@@ -31,9 +31,10 @@ public interface ITrueCacheService
     TrueCacheLookup LookupAlbum(string albumPath);
 
     /// <summary>
-    /// Gets a value indicating whether the declaration of a resource changed after a point in time: its valid entry was
-    /// declared anew, or a valid entry was removed. A removed entry leaves nothing on disk, so a removal is only known
-    /// when the server saw the entry before; otherwise the scheduled tasks restore what the entry provided.
+    /// Gets a value indicating whether the declaration of a resource changed after a point in time: its <c>meta.toml</c>
+    /// was written, or a valid entry was added or removed. Neither an addition nor a removal leaves a usable time on disk
+    /// (a copied entry can keep its old modification time), so they are only known when the server saw the resource
+    /// before and after; otherwise the scheduled tasks bring chapter images and trickplay in line.
     /// </summary>
     /// <param name="resourcePath">The absolute path of the media file or disc folder.</param>
     /// <param name="since">The point in time, usually the last refresh of the item.</param>
