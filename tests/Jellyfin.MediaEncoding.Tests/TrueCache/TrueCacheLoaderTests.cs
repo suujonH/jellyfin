@@ -295,7 +295,55 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
             var subtitle = sourceStreams.Single(s => s.Type == MediaStreamType.Subtitle);
 
             Assert.Equal(3, subtitle.Index);
-            Assert.Equal(2, entry.FindProbeSubtitleIndex(sourceStreams, subtitle));
+            Assert.Equal(2, entry.FindProbeSubtitleIndex(sourceStreams, subtitle, Mock.Of<ILocalizationManager>()));
+        }
+
+        [Fact]
+        public void FindProbeSubtitleIndex_LanguageAsTheLibraryReturnsIt_Matches()
+        {
+            // The probe keeps the ISO 639-2/B code it read; the library returns stored streams with the /T code.
+            var path = _fixture.CreateResource("Film.mkv");
+            var files = TrueCacheFixture.CompleteVideoFiles();
+            files[TrueCacheLayout.ProbeFile] = TrueCacheFixture.VideoProbe.Replace("\"jpn\"", "\"ger\"", System.StringComparison.Ordinal);
+            _fixture.WriteEntry(path, files);
+            var entry = _loader.Load(path, TrueCacheFixture.Requirements).Entry!;
+
+            var sourceStreams = entry.CreateMediaInfo(true).MediaStreams;
+            var subtitle = sourceStreams.Single(s => s.Type == MediaStreamType.Subtitle);
+            Assert.Equal("ger", subtitle.Language);
+            subtitle.Language = "deu";
+
+            Assert.Equal(2, entry.FindProbeSubtitleIndex(sourceStreams, subtitle, CreateLocalization()));
+        }
+
+        [Fact]
+        public void FindProbeSubtitleIndex_UnmatchedStream_LeavesLaterStreamsMatchable()
+        {
+            var path = _fixture.CreateResource("Film.mkv");
+            var files = TrueCacheFixture.CompleteVideoFiles();
+            files[TrueCacheLayout.ProbeFile] = TrueCacheFixture.VideoProbe.Replace(
+                "{ \"index\": 3, \"codec_name\": \"ttf\"",
+                "{ \"index\": 4, \"codec_name\": \"ass\", \"codec_type\": \"subtitle\", \"disposition\": { \"default\": 0 }, \"tags\": { \"language\": \"eng\", \"title\": \"Full\" } },\n    { \"index\": 3, \"codec_name\": \"ttf\"",
+                System.StringComparison.Ordinal);
+            files["subtitles/4.ass"] = "[Script Info]";
+            _fixture.WriteEntry(path, files);
+            var entry = _loader.Load(path, TrueCacheFixture.Requirements).Entry!;
+
+            var sourceStreams = entry.CreateMediaInfo(true).MediaStreams;
+            var subtitles = sourceStreams.Where(s => s.Type == MediaStreamType.Subtitle).ToList();
+            Assert.Equal(2, subtitles.Count);
+            subtitles[0].Title = "Renamed";
+
+            Assert.Null(entry.FindProbeSubtitleIndex(sourceStreams, subtitles[0], CreateLocalization()));
+            Assert.Equal(4, entry.FindProbeSubtitleIndex(sourceStreams, subtitles[1], CreateLocalization()));
+        }
+
+        private static ILocalizationManager CreateLocalization()
+        {
+            var localization = new Mock<ILocalizationManager>();
+            var isoT = "deu";
+            localization.Setup(l => l.TryGetISO6392TFromB("ger", out isoT)).Returns(true);
+            return localization.Object;
         }
     }
 }

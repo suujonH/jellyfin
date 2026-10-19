@@ -193,6 +193,7 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
             Mock.Of<ISubtitleParser>(MockBehavior.Strict),
             Mock.Of<IPathManager>(MockBehavior.Strict),
             Mock.Of<IServerConfigurationManager>(),
+            Mock.Of<ILocalizationManager>(),
             _trueCache);
 
         private AttachmentExtractor CreateAttachmentExtractor(string mediaSourceId, string outputFolder)

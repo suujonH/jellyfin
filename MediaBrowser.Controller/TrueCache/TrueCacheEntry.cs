@@ -6,6 +6,7 @@ using System.Text.Json;
 using Jellyfin.Extensions.Json;
 using Jellyfin.MediaEncoding.Keyframes;
 using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.MediaInfo;
 
 namespace MediaBrowser.Controller.TrueCache;
@@ -166,8 +167,9 @@ public sealed class TrueCacheEntry
     /// </summary>
     /// <param name="sourceStreams">The streams of the media source.</param>
     /// <param name="stream">An embedded subtitle stream of the media source.</param>
+    /// <param name="localization">The localization manager, which maps language codes as the library does.</param>
     /// <returns>The probe stream index, or <c>null</c> when there is no match.</returns>
-    public int? FindProbeSubtitleIndex(IReadOnlyList<MediaStream> sourceStreams, MediaStream stream)
+    public int? FindProbeSubtitleIndex(IReadOnlyList<MediaStream> sourceStreams, MediaStream stream, ILocalizationManager localization)
     {
         if (MediaInfo is null)
         {
@@ -184,32 +186,36 @@ public sealed class TrueCacheEntry
                 continue;
             }
 
-            while (probeIndex < probeStreams.Count && !Matches(probeStreams[probeIndex], current))
+            var match = probeIndex;
+            while (match < probeStreams.Count && !Matches(probeStreams[match], current, localization))
             {
-                probeIndex++;
-            }
-
-            if (probeIndex >= probeStreams.Count)
-            {
-                return null;
+                match++;
             }
 
             if (ReferenceEquals(current, stream))
             {
-                return probeStreams[probeIndex].Index;
+                return match < probeStreams.Count ? probeStreams[match].Index : null;
             }
 
-            probeIndex++;
+            // A stream without a counterpart does not use up the probe streams that later streams match.
+            if (match < probeStreams.Count)
+            {
+                probeIndex = match + 1;
+            }
         }
 
         return null;
     }
 
-    private static bool Matches(MediaStream probe, MediaStream current)
+    private static bool Matches(MediaStream probe, MediaStream current, ILocalizationManager localization)
         => probe.Type == MediaStreamType.Subtitle
            && string.Equals(probe.Codec, current.Codec, StringComparison.OrdinalIgnoreCase)
-           && string.Equals(probe.Language, current.Language, StringComparison.OrdinalIgnoreCase)
+           && string.Equals(NormalizeLanguage(probe.Language, localization), NormalizeLanguage(current.Language, localization), StringComparison.OrdinalIgnoreCase)
            && string.Equals(probe.Title, current.Title, StringComparison.Ordinal)
            && probe.IsDefault == current.IsDefault
            && probe.IsForced == current.IsForced;
+
+    // The probe keeps the ISO 639-2/B code it read, while the library returns stored streams with the /T code; both are compared as /T.
+    private static string? NormalizeLanguage(string? language, ILocalizationManager localization)
+        => language is not null && localization.TryGetISO6392TFromB(language, out var isoT) ? isoT : language;
 }

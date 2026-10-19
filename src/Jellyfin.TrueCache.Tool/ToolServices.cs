@@ -88,6 +88,7 @@ internal sealed class ToolServices : IDisposable
             null!,
             PathManager,
             Config,
+            Localization,
             NoTrueCacheService.Instance);
         AttachmentExtractor = new AttachmentExtractor(
             loggerFactory.CreateLogger<AttachmentExtractor>(),

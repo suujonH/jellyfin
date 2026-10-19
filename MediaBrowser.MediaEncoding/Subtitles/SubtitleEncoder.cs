@@ -25,6 +25,7 @@ using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.MediaInfo;
 using Microsoft.Extensions.Logging;
@@ -45,6 +46,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
         private readonly ISubtitleParser _subtitleParser;
         private readonly IPathManager _pathManager;
         private readonly IServerConfigurationManager _serverConfigurationManager;
+        private readonly ILocalizationManager _localization;
         private readonly ITrueCacheService _trueCache;
 
         /// <summary>
@@ -65,6 +67,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             ISubtitleParser subtitleParser,
             IPathManager pathManager,
             IServerConfigurationManager serverConfigurationManager,
+            ILocalizationManager localization,
             ITrueCacheService trueCache)
         {
             _logger = logger;
@@ -75,6 +78,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             _subtitleParser = subtitleParser;
             _pathManager = pathManager;
             _serverConfigurationManager = serverConfigurationManager;
+            _localization = localization;
             _trueCache = trueCache;
         }
 
@@ -102,7 +106,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
                 throw TrueCacheRejectedException.For(resourcePath, lookup);
             }
 
-            if (lookup.Entry.FindProbeSubtitleIndex(mediaSource.MediaStreams, subtitleStream) is not { } probeIndex
+            if (lookup.Entry.FindProbeSubtitleIndex(mediaSource.MediaStreams, subtitleStream, _localization) is not { } probeIndex
                 || !lookup.Entry.TryGetSubtitle(probeIndex, out var path))
             {
                 throw new TrueCacheRejectedException($"The __true_cache__ entry of {resourcePath} holds no subtitle for stream {subtitleStream.Index}.");
