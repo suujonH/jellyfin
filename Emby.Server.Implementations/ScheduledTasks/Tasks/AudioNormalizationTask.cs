@@ -109,10 +109,10 @@ public partial class AudioNormalizationTask : IScheduledTask
                     // Album gain
                     var albumTracks = ((MusicAlbum)a).Tracks.Where(x => x.IsFileProtocol).ToList();
 
-                    // An album with a declared track is never read as a whole: its loudness is declared too, or stays unknown.
-                    if (albumTracks.Any(x => _trueCache.Lookup(x.Path).IsDeclared))
+                    // A declared album, or one with a declared track, is never read as a whole: its loudness is declared, or stays unknown.
+                    var album = _trueCache.LookupAlbum(a.Path);
+                    if (album.IsDeclared || albumTracks.Any(x => _trueCache.Lookup(x.Path).IsDeclared))
                     {
-                        var album = _trueCache.LookupAlbum(a.Path);
                         if (album.IsValid)
                         {
                             a.LUFS = album.Entry.Manifest.AlbumLufs;

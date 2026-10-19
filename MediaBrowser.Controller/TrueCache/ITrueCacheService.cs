@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace MediaBrowser.Controller.TrueCache;
@@ -28,6 +29,16 @@ public interface ITrueCacheService
     /// <param name="albumPath">The album folder.</param>
     /// <returns>The lookup result.</returns>
     TrueCacheLookup LookupAlbum(string albumPath);
+
+    /// <summary>
+    /// Gets a value indicating whether the declaration of a resource changed after a point in time: its valid entry was
+    /// declared anew, or a valid entry was removed. A removed entry leaves nothing on disk, so a removal is only known
+    /// when the server saw the entry before; otherwise the scheduled tasks restore what the entry provided.
+    /// </summary>
+    /// <param name="resourcePath">The absolute path of the media file or disc folder.</param>
+    /// <param name="since">The point in time, usually the last refresh of the item.</param>
+    /// <returns><c>true</c> when the declaration changed after <paramref name="since"/>.</returns>
+    bool HasDeclarationChanged(string resourcePath, DateTime since);
 
     /// <summary>
     /// Gets the resources that were rejected because their entry is invalid or incomplete.

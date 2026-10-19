@@ -24,6 +24,7 @@ public sealed class TrueCacheService : ITrueCacheService
     private readonly ConcurrentDictionary<string, (bool Exists, DateTime CheckedAt)> _folders = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (Stamp Stamp, TrueCacheLookup Result, DateTime CheckedAt)> _entries = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, TrueCacheRejection> _rejections = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _removals = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Initializes a new instance of the <see cref="TrueCacheService"/> class.
@@ -59,6 +60,20 @@ public sealed class TrueCacheService : ITrueCacheService
     public IReadOnlyList<TrueCacheRejection> GetRejections()
         => _rejections.Values.OrderByDescending(r => r.CheckedAt).ToArray();
 
+    /// <inheritdoc />
+    public bool HasDeclarationChanged(string resourcePath, DateTime since)
+    {
+        var lookup = Lookup(resourcePath);
+        if (lookup.IsValid)
+        {
+            var meta = new FileInfo(Path.Combine(lookup.Entry.Directory, TrueCacheLayout.MetaFile));
+            return meta.Exists && meta.LastWriteTimeUtc > since;
+        }
+
+        // The item still points at what the removed entry provided, such as chapter images and trickplay tiles.
+        return lookup.State == TrueCacheState.None && _removals.TryGetValue(resourcePath, out var removed) && removed > since;
+    }
+
     private TrueCacheLookup Lookup(string resourcePath, bool force)
     {
         if (string.IsNullOrEmpty(resourcePath) || !Path.IsPathFullyQualified(resourcePath))
@@ -87,6 +102,11 @@ public sealed class TrueCacheService : ITrueCacheService
 
         var result = _loader.Load(resourcePath, requirements);
         _entries[resourcePath] = (stamp, result, now);
+        if (result.IsDeclared)
+        {
+            _removals.TryRemove(resourcePath, out _);
+        }
+
         if (result.State == TrueCacheState.Rejected)
         {
             var isNew = !_rejections.TryGetValue(resourcePath, out var previous) || !string.Equals(previous.Reason, result.Reason, StringComparison.Ordinal);
@@ -106,7 +126,12 @@ public sealed class TrueCacheService : ITrueCacheService
 
     private void Forget(string resourcePath)
     {
-        _entries.TryRemove(resourcePath, out _);
+        // A removed valid entry leaves nothing on disk, so the moment it went away is kept until the entry comes back.
+        if (_entries.TryRemove(resourcePath, out var kept) && kept.Result.IsValid)
+        {
+            _removals[resourcePath] = DateTime.UtcNow;
+        }
+
         _rejections.TryRemove(resourcePath, out _);
     }
 

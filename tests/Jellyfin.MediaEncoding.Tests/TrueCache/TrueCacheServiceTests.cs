@@ -104,6 +104,35 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
         }
 
         [Fact]
+        public void HasDeclarationChanged_ValidEntryRemoved_IsTrueUntilTheNextRefresh()
+        {
+            // A removed entry leaves nothing on disk, yet the item still points at the chapter images and trickplay it provided.
+            var path = _fixture.CreateCompleteVideo();
+            var refreshed = DateTime.UtcNow.AddMinutes(-1);
+            Assert.True(_service.Lookup(path).IsValid);
+
+            Directory.Delete(TrueCacheLayout.GetEntryDirectory(path)!, true);
+
+            Assert.True(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = refreshed }));
+            Assert.False(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = DateTime.UtcNow.AddMinutes(1) }));
+        }
+
+        [Fact]
+        public void HasDeclarationChanged_RejectedEntryRemoved_IsFalse()
+        {
+            // Nothing of a rejected entry was ever applied to the item.
+            var path = _fixture.CreateResource("Film.mkv");
+            var files = TrueCacheFixture.CompleteVideoFiles();
+            files.Remove(TrueCacheLayout.ProbeFile);
+            var directory = _fixture.WriteEntry(path, files);
+            Assert.Equal(TrueCacheState.Rejected, _service.Lookup(path).State);
+
+            Directory.Delete(directory, true);
+
+            Assert.False(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = DateTime.MinValue }));
+        }
+
+        [Fact]
         public void HasDeclarationChanged_RejectedEntry_IsFalse()
         {
             var path = _fixture.CreateResource("Film.mkv");
