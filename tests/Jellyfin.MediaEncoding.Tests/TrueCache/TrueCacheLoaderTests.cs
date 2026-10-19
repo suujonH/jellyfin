@@ -133,6 +133,32 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
             Assert.Equal(TrueCacheState.Rejected, result.State);
         }
 
+        [Theory]
+        [InlineData("")]
+        [InlineData("kind = \"video\"\n[source]\nsize = 4\n")]
+        public void Load_MetaWithoutVersion_IsRejected(string meta)
+        {
+            var path = _fixture.CreateResource("Film.mkv");
+            var files = TrueCacheFixture.CompleteVideoFiles();
+            files[TrueCacheLayout.MetaFile] = meta;
+            _fixture.WriteEntry(path, files);
+
+            var result = _loader.Load(path, TrueCacheFixture.Requirements);
+
+            Assert.Equal(TrueCacheState.Rejected, result.State);
+            Assert.Contains("version", result.Reason, System.StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void LoadAlbum_MetaWithoutVersion_IsRejected()
+        {
+            var albumEntry = TrueCacheLayout.GetAlbumEntryDirectory(_fixture.Root);
+            Directory.CreateDirectory(albumEntry);
+            File.WriteAllText(Path.Combine(albumEntry, TrueCacheLayout.MetaFile), "kind = \"album\"\n[album]\nlufs = -9.25\n");
+
+            Assert.Equal(TrueCacheState.Rejected, _loader.LoadAlbum(_fixture.Root).State);
+        }
+
         [Fact]
         public void Load_DiscKindForFile_IsRejected()
         {

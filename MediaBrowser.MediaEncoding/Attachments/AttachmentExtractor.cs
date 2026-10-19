@@ -70,24 +70,27 @@ namespace MediaBrowser.MediaEncoding.Attachments
         /// <exception cref="TrueCacheRejectedException">The resource has an entry, but it is incomplete.</exception>
         private TrueCacheEntry? GetDeclaredEntry(MediaSourceInfo mediaSource)
         {
-            if (string.IsNullOrEmpty(mediaSource.Path))
+            // Playback points a .strm source at the target it names and a symlinked file at the link target,
+            // but the entry sits next to the library item.
+            var resourcePath = mediaSource.ItemPath ?? mediaSource.Path;
+            if (string.IsNullOrEmpty(resourcePath))
             {
                 return null;
             }
 
-            var lookup = _trueCache.Lookup(mediaSource.Path);
+            var lookup = _trueCache.Lookup(resourcePath);
             if (!lookup.IsDeclared)
             {
                 return null;
             }
 
-            return lookup.IsValid ? lookup.Entry : throw TrueCacheRejectedException.For(mediaSource.Path, lookup);
+            return lookup.IsValid ? lookup.Entry : throw TrueCacheRejectedException.For(resourcePath, lookup);
         }
 
         /// <summary>
         /// Copies the attachments of a declared resource into the server's attachment folder, where the encoder looks for fonts.
         /// </summary>
-        private void CopyDeclaredAttachments(TrueCacheEntry entry, MediaSourceInfo mediaSource)
+        private async Task CopyDeclaredAttachments(TrueCacheEntry entry, MediaSourceInfo mediaSource, CancellationToken cancellationToken)
         {
             var outputFolder = _pathManager.GetAttachmentFolderPath(mediaSource.Id);
             if (outputFolder is null)
@@ -95,19 +98,24 @@ namespace MediaBrowser.MediaEncoding.Attachments
                 return;
             }
 
-            Directory.CreateDirectory(outputFolder);
-            foreach (var attachment in mediaSource.MediaAttachments)
+            // Concurrent transcodes of a source share its folder: a caller must neither copy over another one
+            // nor find a font that is still being copied.
+            using (await _semaphoreLocks.LockAsync(outputFolder, cancellationToken).ConfigureAwait(false))
             {
-                if (string.Equals(attachment.Codec, "mjpeg", StringComparison.OrdinalIgnoreCase))
+                Directory.CreateDirectory(outputFolder);
+                foreach (var attachment in mediaSource.MediaAttachments)
                 {
-                    continue;
-                }
+                    if (string.Equals(attachment.Codec, "mjpeg", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
 
-                var name = TrueCacheRules.GetAttachmentFileName(attachment);
-                var target = Path.Combine(outputFolder, name);
-                if (!File.Exists(target))
-                {
-                    File.Copy(Path.Combine(entry.GetAttachmentsDirectory(), name), target);
+                    var name = TrueCacheRules.GetAttachmentFileName(attachment);
+                    var target = Path.Combine(outputFolder, name);
+                    if (!File.Exists(target))
+                    {
+                        File.Copy(Path.Combine(entry.GetAttachmentsDirectory(), name), target);
+                    }
                 }
             }
         }
@@ -157,7 +165,7 @@ namespace MediaBrowser.MediaEncoding.Attachments
             // A declared resource is not read; for disc folders the input is a concat list, so the media source decides.
             if (!inputFile.EndsWith(".mks", StringComparison.OrdinalIgnoreCase) && GetDeclaredEntry(mediaSource) is { } entry)
             {
-                CopyDeclaredAttachments(entry, mediaSource);
+                await CopyDeclaredAttachments(entry, mediaSource, cancellationToken).ConfigureAwait(false);
                 return;
             }
 

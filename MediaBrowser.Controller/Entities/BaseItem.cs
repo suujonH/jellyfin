@@ -1209,6 +1209,7 @@ namespace MediaBrowser.Controller.Entities
                 MediaAttachments = MediaSourceManager.GetMediaAttachments(item.Id),
                 Name = GetMediaSourceName(item, commonPrefix),
                 Path = enablePathSubstitution ? GetMappedPath(item, itemPath, protocol) : itemPath,
+                ItemPath = itemPath,
                 RunTimeTicks = item.RunTimeTicks,
                 Container = item.Container,
                 Size = item.Size,

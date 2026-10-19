@@ -270,7 +270,7 @@ internal sealed class EntryGenerator
         }
 
         await WriteSubtitlesAsync(directory, source, bluRay?.MediaStreams ?? info.MediaStreams, cancellationToken).ConfigureAwait(false);
-        await WriteAttachmentsAsync(resourcePath, directory, source, cancellationToken).ConfigureAwait(false);
+        await WriteAttachmentsAsync(directory, source, cancellationToken).ConfigureAwait(false);
 
         if (kind == TrueCacheKind.Video && !isShortcut && videoStream is not null)
         {
@@ -390,7 +390,7 @@ internal sealed class EntryGenerator
         }
     }
 
-    private async Task WriteAttachmentsAsync(string resourcePath, string directory, MediaSourceInfo source, CancellationToken cancellationToken)
+    private async Task WriteAttachmentsAsync(string directory, MediaSourceInfo source, CancellationToken cancellationToken)
     {
         var attachments = source.MediaAttachments.Where(a => !string.Equals(a.Codec, "mjpeg", StringComparison.OrdinalIgnoreCase)).ToList();
         if (attachments.Count == 0)
@@ -398,7 +398,8 @@ internal sealed class EntryGenerator
             return;
         }
 
-        await _services.AttachmentExtractor.ExtractAllAttachments(resourcePath, source, cancellationToken).ConfigureAwait(false);
+        // ffmpeg reads the playable input: the target a .strm names, not the .strm itself.
+        await _services.AttachmentExtractor.ExtractAllAttachments(source.Path, source, cancellationToken).ConfigureAwait(false);
         var folder = _services.PathManager.GetAttachmentFolderPath(source.Id)!;
         foreach (var attachment in attachments)
         {

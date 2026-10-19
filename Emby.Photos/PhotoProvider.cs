@@ -52,6 +52,12 @@ public class PhotoProvider : ICustomMetadataProvider<Photo>, IForcedProvider, IH
     {
         if (item.IsFileProtocol)
         {
+            // A declared photo is described by its __true_cache__ entry: a changed declaration is a changed file.
+            if (_trueCache.HasDeclarationChanged(item))
+            {
+                return true;
+            }
+
             var file = directoryService.GetFile(item.Path);
             return file is not null && item.HasChanged(file.LastWriteTimeUtc);
         }

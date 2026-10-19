@@ -4,6 +4,8 @@ using System.Threading;
 using Jellyfin.MediaEncoding.Hls.Cache;
 using Jellyfin.MediaEncoding.Hls.Extractors;
 using Jellyfin.MediaEncoding.Keyframes;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Entities;
@@ -21,8 +23,7 @@ public class CacheDecoratorTrueCacheTests
     public void TryExtractKeyframes_DeclaredVideo_UsesDeclaredKeyframes()
     {
         var keyframes = new KeyframeData(100, [0, 50]);
-        var entry = new TrueCacheEntry(FilePath, "/media/__true_cache__/Film.mkv", new TrueCacheManifest(), null, null, keyframes, new Dictionary<ImageType, string>(), new Dictionary<int, string>());
-        var (decorator, repository) = Create(TrueCacheLookup.Valid(entry));
+        var (decorator, repository) = Create(TrueCacheLookup.Valid(CreateEntry(keyframes)));
 
         Assert.True(decorator.TryExtractKeyframes(Guid.NewGuid(), FilePath, out var result));
         Assert.Same(keyframes, result);
@@ -37,14 +38,36 @@ public class CacheDecoratorTrueCacheTests
         Assert.False(decorator.TryExtractKeyframes(Guid.NewGuid(), FilePath, out _));
     }
 
+    [Fact]
+    public void TryExtractKeyframes_VideoPlayedFromSymlinkTarget_UsesDeclaredKeyframes()
+    {
+        // Playback passes the file it reads; the entry sits next to the library item.
+        var keyframes = new KeyframeData(100, [0, 50]);
+        var item = new Video { Id = Guid.NewGuid(), Path = FilePath };
+        var (decorator, _) = Create(TrueCacheLookup.Valid(CreateEntry(keyframes)), item);
+
+        Assert.True(decorator.TryExtractKeyframes(item.Id, "/mnt/storage/Film.mkv", out var result));
+        Assert.Same(keyframes, result);
+    }
+
+    private static TrueCacheEntry CreateEntry(KeyframeData keyframes)
+        => new(FilePath, "/media/__true_cache__/Film.mkv", new TrueCacheManifest(), null, null, keyframes, new Dictionary<ImageType, string>(), new Dictionary<int, string>());
+
     // The strict extractor fails the test if the decorator ever asks it to read the file.
-    private static (CacheDecorator Decorator, Mock<IKeyframeRepository> Repository) Create(TrueCacheLookup lookup)
+    private static (CacheDecorator Decorator, Mock<IKeyframeRepository> Repository) Create(TrueCacheLookup lookup, BaseItem? item = null)
     {
         var repository = new Mock<IKeyframeRepository>();
         repository.Setup(r => r.GetKeyframeData(It.IsAny<Guid>())).Returns([]);
         var extractor = new Mock<IKeyframeExtractor>(MockBehavior.Strict);
+        var libraryManager = new Mock<ILibraryManager>();
+        if (item is not null)
+        {
+            libraryManager.Setup(l => l.GetItemById(item.Id)).Returns(item);
+        }
+
         var trueCache = new Mock<ITrueCacheService>();
+        trueCache.Setup(t => t.Lookup(It.IsAny<string>())).Returns(TrueCacheLookup.None);
         trueCache.Setup(t => t.Lookup(FilePath)).Returns(lookup);
-        return (new CacheDecorator(repository.Object, extractor.Object, NullLogger<CacheDecorator>.Instance, trueCache.Object), repository);
+        return (new CacheDecorator(repository.Object, extractor.Object, NullLogger<CacheDecorator>.Instance, trueCache.Object, libraryManager.Object), repository);
     }
 }

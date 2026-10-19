@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using MediaBrowser.Controller.Configuration;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.MediaEncoding.TrueCache;
 using MediaBrowser.Model.Configuration;
@@ -77,6 +78,27 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
         public void Lookup_RelativePath_IsNone()
         {
             Assert.Equal(TrueCacheState.None, _service.Lookup("Film.mkv").State);
+        }
+
+        [Fact]
+        public void HasDeclarationChanged_ComparesMetaWithLastRefresh()
+        {
+            var path = _fixture.CreateCompleteVideo();
+            var written = File.GetLastWriteTimeUtc(Path.Combine(TrueCacheLayout.GetEntryDirectory(path)!, TrueCacheLayout.MetaFile));
+
+            Assert.True(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = written.AddMinutes(-1) }));
+            Assert.False(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = written.AddMinutes(1) }));
+        }
+
+        [Fact]
+        public void HasDeclarationChanged_RejectedEntry_IsFalse()
+        {
+            var path = _fixture.CreateResource("Film.mkv");
+            var files = TrueCacheFixture.CompleteVideoFiles();
+            files.Remove(TrueCacheLayout.ProbeFile);
+            _fixture.WriteEntry(path, files);
+
+            Assert.False(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = DateTime.MinValue }));
         }
     }
 }

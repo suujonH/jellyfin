@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using Jellyfin.MediaEncoding.Hls.Extractors;
 using Jellyfin.MediaEncoding.Keyframes;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.TrueCache;
 using Microsoft.Extensions.Logging;
@@ -19,6 +20,7 @@ public class CacheDecorator : IKeyframeExtractor
     private readonly IKeyframeExtractor _keyframeExtractor;
     private readonly ILogger<CacheDecorator> _logger;
     private readonly ITrueCacheService _trueCache;
+    private readonly ILibraryManager _libraryManager;
     private readonly string _keyframeExtractorName;
 
     /// <summary>
@@ -28,7 +30,8 @@ public class CacheDecorator : IKeyframeExtractor
     /// <param name="keyframeExtractor">An instance of the <see cref="IKeyframeExtractor"/> interface.</param>
     /// <param name="logger">An instance of the <see cref="ILogger{CacheDecorator}"/> interface.</param>
     /// <param name="trueCache">An instance of the <see cref="ITrueCacheService"/> interface.</param>
-    public CacheDecorator(IKeyframeRepository keyframeRepository, IKeyframeExtractor keyframeExtractor, ILogger<CacheDecorator> logger, ITrueCacheService trueCache)
+    /// <param name="libraryManager">An instance of the <see cref="ILibraryManager"/> interface.</param>
+    public CacheDecorator(IKeyframeRepository keyframeRepository, IKeyframeExtractor keyframeExtractor, ILogger<CacheDecorator> logger, ITrueCacheService trueCache, ILibraryManager libraryManager)
     {
         ArgumentNullException.ThrowIfNull(keyframeRepository);
         ArgumentNullException.ThrowIfNull(keyframeExtractor);
@@ -37,6 +40,7 @@ public class CacheDecorator : IKeyframeExtractor
         _keyframeExtractor = keyframeExtractor;
         _logger = logger;
         _trueCache = trueCache;
+        _libraryManager = libraryManager;
         _keyframeExtractorName = keyframeExtractor.GetType().Name;
     }
 
@@ -50,7 +54,9 @@ public class CacheDecorator : IKeyframeExtractor
         if (keyframeData is null)
         {
             // A declared video is never read: its keyframes come from its __true_cache__ entry or not at all.
-            var lookup = _trueCache.Lookup(filePath);
+            // Playback passes the file it reads, which can be the target of a symlink; the entry sits next to the library item.
+            var itemPath = _libraryManager.GetItemById(itemId)?.Path;
+            var lookup = _trueCache.Lookup(string.IsNullOrEmpty(itemPath) ? filePath : itemPath);
             if (lookup.IsDeclared)
             {
                 if (lookup.Entry?.Keyframes is not { } declared)

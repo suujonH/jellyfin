@@ -133,15 +133,10 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <inheritdoc />
         public bool HasChanged(BaseItem item, IDirectoryService directoryService)
         {
-            if (!string.IsNullOrEmpty(item.Path) && _trueCache.Lookup(item.Path) is { IsValid: true } lookup)
+            if (_trueCache.HasDeclarationChanged(item))
             {
-                // The declaration replaces the file: a changed declaration is a changed file.
-                var meta = new FileInfo(Path.Combine(lookup.Entry.Directory, TrueCacheLayout.MetaFile));
-                if (meta.Exists && meta.LastWriteTimeUtc > item.DateLastRefreshed)
-                {
-                    _logger.LogDebug("Refreshing {ItemPath} due to a changed __true_cache__ entry.", item.Path);
-                    return true;
-                }
+                _logger.LogDebug("Refreshing {ItemPath} due to a changed __true_cache__ entry.", item.Path);
+                return true;
             }
 
             var video = item as Video;

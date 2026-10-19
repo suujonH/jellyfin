@@ -7,6 +7,7 @@ using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Trickplay;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Configuration;
 
 namespace MediaBrowser.Providers.Trickplay;
@@ -27,6 +28,7 @@ public class TrickplayProvider : ICustomMetadataProvider<Episode>,
     private readonly IServerConfigurationManager _config;
     private readonly ITrickplayManager _trickplayManager;
     private readonly ILibraryManager _libraryManager;
+    private readonly ITrueCacheService _trueCache;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="TrickplayProvider"/> class.
@@ -34,14 +36,17 @@ public class TrickplayProvider : ICustomMetadataProvider<Episode>,
     /// <param name="config">The configuration manager.</param>
     /// <param name="trickplayManager">The trickplay manager.</param>
     /// <param name="libraryManager">The library manager.</param>
+    /// <param name="trueCache">The <c>__true_cache__</c> lookup.</param>
     public TrickplayProvider(
         IServerConfigurationManager config,
         ITrickplayManager trickplayManager,
-        ILibraryManager libraryManager)
+        ILibraryManager libraryManager,
+        ITrueCacheService trueCache)
     {
         _config = config;
         _trickplayManager = trickplayManager;
         _libraryManager = libraryManager;
+        _trueCache = trueCache;
     }
 
     /// <inheritdoc />
@@ -55,6 +60,12 @@ public class TrickplayProvider : ICustomMetadataProvider<Episode>,
     {
         if (item.IsFileProtocol)
         {
+            // The trickplay of a declared video is declared in its __true_cache__ entry: a changed declaration is a changed file.
+            if (_trueCache.HasDeclarationChanged(item))
+            {
+                return true;
+            }
+
             var file = directoryService.GetFile(item.Path);
             if (file is not null && item.HasChanged(file.LastWriteTimeUtc))
             {

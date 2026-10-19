@@ -85,12 +85,13 @@ namespace MediaBrowser.MediaEncoding.Subtitles
         /// <exception cref="TrueCacheRejectedException">The resource has an entry, but it does not hold the stream.</exception>
         private SubtitleInfo? GetDeclaredSubtitle(MediaSourceInfo mediaSource, MediaStream subtitleStream)
         {
-            if (string.IsNullOrEmpty(mediaSource.Path))
+            var resourcePath = GetResourcePath(mediaSource);
+            if (string.IsNullOrEmpty(resourcePath))
             {
                 return null;
             }
 
-            var lookup = _trueCache.Lookup(mediaSource.Path);
+            var lookup = _trueCache.Lookup(resourcePath);
             if (!lookup.IsDeclared)
             {
                 return null;
@@ -98,13 +99,13 @@ namespace MediaBrowser.MediaEncoding.Subtitles
 
             if (!lookup.IsValid)
             {
-                throw TrueCacheRejectedException.For(mediaSource.Path, lookup);
+                throw TrueCacheRejectedException.For(resourcePath, lookup);
             }
 
             if (lookup.Entry.FindProbeSubtitleIndex(mediaSource.MediaStreams, subtitleStream) is not { } probeIndex
                 || !lookup.Entry.TryGetSubtitle(probeIndex, out var path))
             {
-                throw new TrueCacheRejectedException($"The __true_cache__ entry of {mediaSource.Path} holds no subtitle for stream {subtitleStream.Index}.");
+                throw new TrueCacheRejectedException($"The __true_cache__ entry of {resourcePath} holds no subtitle for stream {subtitleStream.Index}.");
             }
 
             var format = TrueCacheRules.GetExtractedSubtitleFormat(subtitleStream.Codec);
@@ -116,6 +117,12 @@ namespace MediaBrowser.MediaEncoding.Subtitles
                 IsExternal = MediaStream.IsVobSubFormat(format)
             };
         }
+
+        /// <summary>
+        /// Gets the resource whose <c>__true_cache__</c> entry describes a media source. Playback points a .strm source at
+        /// the target it names and a symlinked file at the link target, but the entry sits next to the library item.
+        /// </summary>
+        private static string? GetResourcePath(MediaSourceInfo mediaSource) => mediaSource.ItemPath ?? mediaSource.Path;
 
         internal MemoryStream ConvertSubtitles(
             Stream stream,
@@ -551,7 +558,8 @@ namespace MediaBrowser.MediaEncoding.Subtitles
                     .Where(stream => stream is { IsExtractableSubtitleStream: true, SupportsExternalStream: true });
 
                 // The embedded streams of a declared resource are never extracted from it; they are read from its __true_cache__ entry.
-                var isDeclared = !string.IsNullOrEmpty(mediaSource.Path) && _trueCache.Lookup(mediaSource.Path).IsDeclared;
+                var resourcePath = GetResourcePath(mediaSource);
+                var isDeclared = !string.IsNullOrEmpty(resourcePath) && _trueCache.Lookup(resourcePath).IsDeclared;
 
                 foreach (var subtitleStream in subtitleStreams)
                 {

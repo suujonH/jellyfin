@@ -9,6 +9,7 @@ using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.TrueCache;
+using MediaBrowser.MediaEncoding.Attachments;
 using MediaBrowser.MediaEncoding.Encoder;
 using MediaBrowser.MediaEncoding.Subtitles;
 using MediaBrowser.MediaEncoding.TrueCache;
@@ -28,7 +29,7 @@ using Xunit;
 namespace Jellyfin.MediaEncoding.Tests.TrueCache
 {
     /// <summary>
-    /// The encoder, the subtitle encoder and the probe result of a declared resource never touch the resource.
+    /// The encoder, the subtitle encoder, the attachment extractor and the probe result of a declared resource never touch the resource.
     /// None of the encoders below has an ffmpeg or ffprobe path, so any attempt to run one fails the test.
     /// </summary>
     public sealed class TrueCacheReadPathTests : IDisposable
@@ -99,21 +100,112 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
             var path = _fixture.CreateCompleteVideo();
             var streams = _trueCache.Lookup(path).Entry!.CreateMediaInfo(true).MediaStreams;
             var mediaSource = new MediaSourceInfo { Id = Guid.NewGuid().ToString("N"), Path = path, Protocol = MediaProtocol.File, MediaStreams = streams };
-            var encoder = new SubtitleEncoder(
-                NullLogger<SubtitleEncoder>.Instance,
-                Mock.Of<IFileSystem>(),
-                Mock.Of<IMediaEncoder>(MockBehavior.Strict),
-                Mock.Of<IHttpClientFactory>(MockBehavior.Strict),
-                Mock.Of<IMediaSourceManager>(MockBehavior.Strict),
-                Mock.Of<ISubtitleParser>(MockBehavior.Strict),
-                Mock.Of<IPathManager>(MockBehavior.Strict),
-                Mock.Of<IServerConfigurationManager>(),
-                _trueCache);
+            using var encoder = CreateSubtitleEncoder();
 
             var subtitle = await encoder.GetReadableFile(mediaSource, streams.Single(s => s.Type == MediaStreamType.Subtitle), CancellationToken.None);
 
             Assert.Equal("ass", subtitle.Format);
             Assert.Equal(Path.Combine(TrueCacheLayout.GetEntryDirectory(path)!, "subtitles", "2.ass"), subtitle.Path);
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task GetReadableFile_SourcePlayedFromAnotherPath_ReturnsDeclaredExtraction(bool shortcut)
+        {
+            var path = _fixture.CreateCompleteVideo(shortcut ? "Film.strm" : "Film.mkv");
+            var mediaSource = CreatePlayedSource(path, shortcut);
+            using var encoder = CreateSubtitleEncoder();
+
+            var subtitle = await encoder.GetReadableFile(mediaSource, mediaSource.MediaStreams.Single(s => s.Type == MediaStreamType.Subtitle), CancellationToken.None);
+
+            Assert.Equal(Path.Combine(TrueCacheLayout.GetEntryDirectory(path)!, "subtitles", "2.ass"), subtitle.Path);
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task ExtractAllAttachments_SourcePlayedFromAnotherPath_CopiesDeclaredAttachments(bool shortcut)
+        {
+            var path = _fixture.CreateCompleteVideo(shortcut ? "Film.strm" : "Film.mkv");
+            var mediaSource = CreatePlayedSource(path, shortcut);
+            var output = Path.Combine(_fixture.Root, "attachments-out");
+            using var extractor = CreateAttachmentExtractor(mediaSource.Id, output);
+
+            await extractor.ExtractAllAttachments(mediaSource.Path, mediaSource, CancellationToken.None);
+
+            Assert.Equal("ttf", await File.ReadAllTextAsync(Path.Combine(output, "font.ttf"), CancellationToken.None));
+        }
+
+        [Fact]
+        public async Task ExtractAllAttachments_ConcurrentTranscodes_EachFindTheCompleteFont()
+        {
+            const int FontLength = 16 * 1024 * 1024;
+            var path = _fixture.CreateCompleteVideo();
+
+            // A large font keeps each copy running long enough for the transcodes to overlap.
+            await File.WriteAllBytesAsync(Path.Combine(TrueCacheLayout.GetEntryDirectory(path)!, "attachments", "font.ttf"), new byte[FontLength], CancellationToken.None);
+            var entry = _trueCache.Lookup(path).Entry!;
+            var mediaSource = new MediaSourceInfo
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                Path = path,
+                Protocol = MediaProtocol.File,
+                MediaStreams = entry.CreateMediaInfo(true).MediaStreams,
+                MediaAttachments = entry.MediaInfo!.MediaAttachments
+            };
+            var output = Path.Combine(_fixture.Root, "attachments-out");
+            using var extractor = CreateAttachmentExtractor(mediaSource.Id, output);
+
+            // Every transcode starts ffmpeg as soon as the call returns, so the font must be complete by then.
+            var lengths = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => Task.Run(async () =>
+            {
+                await extractor.ExtractAllAttachments(path, mediaSource, CancellationToken.None);
+                return new FileInfo(Path.Combine(output, "font.ttf")).Length;
+            })));
+
+            Assert.All(lengths, length => Assert.Equal(FontLength, length));
+        }
+
+        /// <summary>
+        /// Creates the media source playback uses: a .strm plays the target it names and a symlinked file plays the link target.
+        /// </summary>
+        private MediaSourceInfo CreatePlayedSource(string path, bool shortcut)
+        {
+            var entry = _trueCache.Lookup(path).Entry!;
+            return new MediaSourceInfo
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                Path = shortcut ? "https://example.com/Film.mkv" : Path.Combine(_fixture.Root, "target", "Film.mkv"),
+                ItemPath = path,
+                Protocol = shortcut ? MediaProtocol.Http : MediaProtocol.File,
+                MediaStreams = entry.CreateMediaInfo(true).MediaStreams,
+                MediaAttachments = entry.MediaInfo!.MediaAttachments
+            };
+        }
+
+        private SubtitleEncoder CreateSubtitleEncoder() => new(
+            NullLogger<SubtitleEncoder>.Instance,
+            Mock.Of<IFileSystem>(),
+            Mock.Of<IMediaEncoder>(MockBehavior.Strict),
+            Mock.Of<IHttpClientFactory>(MockBehavior.Strict),
+            Mock.Of<IMediaSourceManager>(MockBehavior.Strict),
+            Mock.Of<ISubtitleParser>(MockBehavior.Strict),
+            Mock.Of<IPathManager>(MockBehavior.Strict),
+            Mock.Of<IServerConfigurationManager>(),
+            _trueCache);
+
+        private AttachmentExtractor CreateAttachmentExtractor(string mediaSourceId, string outputFolder)
+        {
+            var pathManager = new Mock<IPathManager>(MockBehavior.Strict);
+            pathManager.Setup(p => p.GetAttachmentFolderPath(mediaSourceId)).Returns(outputFolder);
+            return new AttachmentExtractor(
+                NullLogger<AttachmentExtractor>.Instance,
+                Mock.Of<IFileSystem>(),
+                Mock.Of<IMediaEncoder>(MockBehavior.Strict),
+                Mock.Of<IMediaSourceManager>(MockBehavior.Strict),
+                pathManager.Object,
+                _trueCache);
         }
 
         private static MediaInfoRequest CreateRequest(string path, bool chapters) => new()

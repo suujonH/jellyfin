@@ -51,7 +51,7 @@ public static class TrueCacheManifestReader
         }
 
         CheckKeys(root, _rootKeys, string.Empty);
-        var version = (int)GetInteger(root, "version", string.Empty)!.Value;
+        var version = GetInteger(root, "version", string.Empty) ?? throw new FormatException("version is required");
         if (version != TrueCacheManifest.CurrentVersion)
         {
             throw new FormatException($"version {version} is not supported");
@@ -78,7 +78,7 @@ public static class TrueCacheManifestReader
 
         return new TrueCacheManifest
         {
-            Version = version,
+            Version = (int)version,
             Kind = kind,
             SourceSize = source is null ? null : GetInteger(source, "size", "source."),
             SourceModified = source is null ? null : GetDate(source, "modified", "source."),

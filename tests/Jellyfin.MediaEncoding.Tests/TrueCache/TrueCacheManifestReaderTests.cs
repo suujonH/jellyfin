@@ -65,8 +65,11 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
             Assert.Equal(2d, photo.Aperture);
         }
 
+        // Only a FormatException rejects the resource; anything else aborts the scan of its folder.
         [Theory]
+        [InlineData("")]
         [InlineData("version = 2\nkind = \"video\"")]
+        [InlineData("version = 4294967297\nkind = \"video\"")]
         [InlineData("kind = \"video\"")]
         [InlineData("version = 1\nkind = \"movie\"")]
         [InlineData("version = 1\nkind = \"video\"\nextra = 1")]
@@ -75,7 +78,7 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
         [InlineData("version = 1\nkind = ")]
         public void Read_InvalidDeclaration_Throws(string text)
         {
-            Assert.ThrowsAny<Exception>(() => TrueCacheManifestReader.Read(text));
+            Assert.Throws<FormatException>(() => TrueCacheManifestReader.Read(text));
         }
     }
 }
