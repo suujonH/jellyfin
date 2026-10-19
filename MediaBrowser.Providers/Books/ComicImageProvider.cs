@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using Jellyfin.Extensions;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Drawing;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
@@ -25,14 +26,17 @@ public class ComicImageProvider : IDynamicImageProvider
     private readonly string[] _coverExtensions = [".png", ".jpeg", ".jpg", ".webp", ".bmp", ".gif"];
 
     private readonly ILogger<ComicImageProvider> _logger;
+    private readonly ITrueCacheService _trueCache;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="ComicImageProvider"/> class.
     /// </summary>
     /// <param name="logger">Instance of the <see cref="ILogger{ComicImageProvider}"/> interface.</param>
-    public ComicImageProvider(ILogger<ComicImageProvider> logger)
+    /// <param name="trueCache">Instance of the <see cref="ITrueCacheService"/> interface.</param>
+    public ComicImageProvider(ILogger<ComicImageProvider> logger, ITrueCacheService trueCache)
     {
         _logger = logger;
+        _trueCache = trueCache;
     }
 
     /// <inheritdoc />
@@ -42,6 +46,15 @@ public class ComicImageProvider : IDynamicImageProvider
     public async Task<DynamicImageResponse> GetImage(BaseItem item, ImageType type, CancellationToken cancellationToken)
     {
         var extension = Path.GetExtension(item.Path);
+
+        // A declared archive is not opened: its cover comes from its __true_cache__ entry.
+        var lookup = _trueCache.Lookup(item.Path);
+        if (lookup.IsDeclared)
+        {
+            return lookup.IsValid && lookup.Entry.GetBookCover() is { } cover
+                ? TrueCacheRules.CreateImageResponse(cover)
+                : new DynamicImageResponse { HasImage = false };
+        }
 
         if (_comicBookExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
         {

@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Xml;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Entities;
 using Microsoft.Extensions.Logging;
 
@@ -18,14 +19,17 @@ namespace MediaBrowser.Providers.Books.OpenPackagingFormat
     public class EpubImageProvider : IDynamicImageProvider
     {
         private readonly ILogger<EpubImageProvider> _logger;
+        private readonly ITrueCacheService _trueCache;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="EpubImageProvider"/> class.
         /// </summary>
         /// <param name="logger">Instance of the <see cref="ILogger{EpubImageProvider}"/> interface.</param>
-        public EpubImageProvider(ILogger<EpubImageProvider> logger)
+        /// <param name="trueCache">Instance of the <see cref="ITrueCacheService"/> interface.</param>
+        public EpubImageProvider(ILogger<EpubImageProvider> logger, ITrueCacheService trueCache)
         {
             _logger = logger;
+            _trueCache = trueCache;
         }
 
         /// <inheritdoc />
@@ -48,6 +52,15 @@ namespace MediaBrowser.Providers.Books.OpenPackagingFormat
         {
             if (string.Equals(Path.GetExtension(item.Path), ".epub", StringComparison.OrdinalIgnoreCase))
             {
+                // A declared EPUB is not opened: its cover comes from its __true_cache__ entry.
+                var lookup = _trueCache.Lookup(item.Path);
+                if (lookup.IsDeclared)
+                {
+                    return Task.FromResult(lookup.IsValid && lookup.Entry.GetBookCover() is { } cover
+                        ? TrueCacheRules.CreateImageResponse(cover)
+                        : new DynamicImageResponse { HasImage = false });
+                }
+
                 return GetFromZip(item, cancellationToken);
             }
 

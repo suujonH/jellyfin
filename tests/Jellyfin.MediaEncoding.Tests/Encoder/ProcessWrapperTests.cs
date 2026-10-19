@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Configuration;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.MediaEncoding.Encoder;
 using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.IO;
@@ -84,7 +85,8 @@ public class ProcessWrapperTests
             Mock.Of<IBlurayExaminer>(),
             Mock.Of<ILocalizationManager>(),
             new ConfigurationBuilder().Build(),
-            Mock.Of<IServerConfigurationManager>());
+            Mock.Of<IServerConfigurationManager>(),
+            NoTrueCacheService.Instance);
 
     // Writes to stdout and exits immediately with a non-zero code, standing in for the ffprobe that
     // rejects a file outright - the process that used to win the race against its own caller.

@@ -13,6 +13,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -33,6 +34,7 @@ public class ChapterManager : IChapterManager
     private readonly IChapterRepository _chapterRepository;
     private readonly ILibraryManager _libraryManager;
     private readonly IPathManager _pathManager;
+    private readonly ITrueCacheService _trueCache;
 
     /// <summary>
     /// The first chapter ticks.
@@ -48,13 +50,15 @@ public class ChapterManager : IChapterManager
     /// <param name="chapterRepository">The <see cref="IChapterRepository"/>.</param>
     /// <param name="libraryManager">The <see cref="ILibraryManager"/>.</param>
     /// <param name="pathManager">The <see cref="IPathManager"/>.</param>
+    /// <param name="trueCache">The <see cref="ITrueCacheService"/>.</param>
     public ChapterManager(
         ILogger<ChapterManager> logger,
         IFileSystem fileSystem,
         IMediaEncoder encoder,
         IChapterRepository chapterRepository,
         ILibraryManager libraryManager,
-        IPathManager pathManager)
+        IPathManager pathManager,
+        ITrueCacheService trueCache)
     {
         _logger = logger;
         _fileSystem = fileSystem;
@@ -62,6 +66,43 @@ public class ChapterManager : IChapterManager
         _chapterRepository = chapterRepository;
         _libraryManager = libraryManager;
         _pathManager = pathManager;
+        _trueCache = trueCache;
+    }
+
+    /// <summary>
+    /// Points the chapters of a declared video at the images of its entry; images stay where the entry keeps them.
+    /// </summary>
+    private bool UseDeclaredChapterImages(Video video, TrueCacheEntry entry, IReadOnlyList<ChapterInfo> chapters, LibraryOptions libraryOptions, bool saveChapters)
+    {
+        var showImages = libraryOptions?.EnableChapterImageExtraction == true;
+        var withImages = TrueCacheRules.GetChaptersWithImages(chapters, video.RunTimeTicks ?? 0).ToHashSet();
+        var changesMade = false;
+        foreach (var chapter in chapters)
+        {
+            string? path = null;
+            if (showImages && withImages.Contains(chapter))
+            {
+                path = entry.GetChapterImagePath(chapter.StartPositionTicks);
+                if (!File.Exists(path))
+                {
+                    path = null;
+                }
+            }
+
+            if (!string.Equals(path, chapter.ImagePath, StringComparison.Ordinal))
+            {
+                chapter.ImagePath = path;
+                chapter.ImageDateModified = path is null ? default : _fileSystem.GetLastWriteTimeUtc(path);
+                changesMade = true;
+            }
+        }
+
+        if (saveChapters && changesMade)
+        {
+            SaveChapters(video, chapters);
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -121,6 +162,13 @@ public class ChapterManager : IChapterManager
         }
 
         var libraryOptions = _libraryManager.GetLibraryOptions(video);
+
+        // A declared video is not read: its chapter images come from its __true_cache__ entry.
+        var lookup = _trueCache.Lookup(video.Path);
+        if (lookup.IsDeclared)
+        {
+            return lookup.IsValid && UseDeclaredChapterImages(video, lookup.Entry, chapters, libraryOptions, saveChapters);
+        }
 
         if (!IsEligibleForChapterImageExtraction(video, libraryOptions))
         {

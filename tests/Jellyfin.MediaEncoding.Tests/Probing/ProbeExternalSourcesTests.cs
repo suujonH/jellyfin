@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using MediaBrowser.Controller.Configuration;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.MediaEncoding.Encoder;
 using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.IO;
@@ -24,7 +25,8 @@ namespace Jellyfin.MediaEncoding.Tests.Probing
                 Mock.Of<IBlurayExaminer>(),
                 Mock.Of<ILocalizationManager>(),
                 new ConfigurationBuilder().Build(),
-                Mock.Of<IServerConfigurationManager>());
+                Mock.Of<IServerConfigurationManager>(),
+                Mock.Of<ITrueCacheService>());
 
             var userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
             var req = new MediaBrowser.Controller.MediaEncoding.MediaInfoRequest()

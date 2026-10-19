@@ -7,6 +7,7 @@ using System.Threading;
 using Jellyfin.MediaEncoding.Hls.Extractors;
 using Jellyfin.MediaEncoding.Keyframes;
 using MediaBrowser.Controller.Persistence;
+using MediaBrowser.Controller.TrueCache;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.MediaEncoding.Hls.Cache;
@@ -17,6 +18,7 @@ public class CacheDecorator : IKeyframeExtractor
     private readonly IKeyframeRepository _keyframeRepository;
     private readonly IKeyframeExtractor _keyframeExtractor;
     private readonly ILogger<CacheDecorator> _logger;
+    private readonly ITrueCacheService _trueCache;
     private readonly string _keyframeExtractorName;
 
     /// <summary>
@@ -25,7 +27,8 @@ public class CacheDecorator : IKeyframeExtractor
     /// <param name="keyframeRepository">An instance of the <see cref="IKeyframeRepository"/> interface.</param>
     /// <param name="keyframeExtractor">An instance of the <see cref="IKeyframeExtractor"/> interface.</param>
     /// <param name="logger">An instance of the <see cref="ILogger{CacheDecorator}"/> interface.</param>
-    public CacheDecorator(IKeyframeRepository keyframeRepository, IKeyframeExtractor keyframeExtractor, ILogger<CacheDecorator> logger)
+    /// <param name="trueCache">An instance of the <see cref="ITrueCacheService"/> interface.</param>
+    public CacheDecorator(IKeyframeRepository keyframeRepository, IKeyframeExtractor keyframeExtractor, ILogger<CacheDecorator> logger, ITrueCacheService trueCache)
     {
         ArgumentNullException.ThrowIfNull(keyframeRepository);
         ArgumentNullException.ThrowIfNull(keyframeExtractor);
@@ -33,6 +36,7 @@ public class CacheDecorator : IKeyframeExtractor
         _keyframeRepository = keyframeRepository;
         _keyframeExtractor = keyframeExtractor;
         _logger = logger;
+        _trueCache = trueCache;
         _keyframeExtractorName = keyframeExtractor.GetType().Name;
     }
 
@@ -45,14 +49,29 @@ public class CacheDecorator : IKeyframeExtractor
         keyframeData = _keyframeRepository.GetKeyframeData(itemId).FirstOrDefault();
         if (keyframeData is null)
         {
-            if (!_keyframeExtractor.TryExtractKeyframes(itemId, filePath, out var result))
+            // A declared video is never read: its keyframes come from its __true_cache__ entry or not at all.
+            var lookup = _trueCache.Lookup(filePath);
+            if (lookup.IsDeclared)
             {
-                _logger.LogDebug("Failed to extract keyframes using {ExtractorName}", _keyframeExtractorName);
-                return false;
+                if (lookup.Entry?.Keyframes is not { } declared)
+                {
+                    return false;
+                }
+
+                keyframeData = declared;
+            }
+            else
+            {
+                if (!_keyframeExtractor.TryExtractKeyframes(itemId, filePath, out var result))
+                {
+                    _logger.LogDebug("Failed to extract keyframes using {ExtractorName}", _keyframeExtractorName);
+                    return false;
+                }
+
+                _logger.LogDebug("Successfully extracted keyframes using {ExtractorName}", _keyframeExtractorName);
+                keyframeData = result;
             }
 
-            _logger.LogDebug("Successfully extracted keyframes using {ExtractorName}", _keyframeExtractorName);
-            keyframeData = result;
             _keyframeRepository.SaveKeyframeDataAsync(itemId, keyframeData, CancellationToken.None).GetAwaiter().GetResult();
         }
 

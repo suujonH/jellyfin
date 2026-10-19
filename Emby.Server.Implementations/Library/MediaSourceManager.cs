@@ -30,6 +30,7 @@ using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -58,6 +59,7 @@ namespace Emby.Server.Implementations.Library
         private readonly IDirectoryService _directoryService;
         private readonly IMediaStreamRepository _mediaStreamRepository;
         private readonly IMediaAttachmentRepository _mediaAttachmentRepository;
+        private readonly ITrueCacheService _trueCache;
         private readonly ConcurrentDictionary<string, ILiveStream> _openStreams = new ConcurrentDictionary<string, ILiveStream>(StringComparer.OrdinalIgnoreCase);
         private readonly AsyncNonKeyedLocker _liveStreamLocker = new(1);
         private readonly JsonSerializerOptions _jsonOptions = JsonDefaults.Options;
@@ -77,7 +79,8 @@ namespace Emby.Server.Implementations.Library
             IMediaEncoder mediaEncoder,
             IDirectoryService directoryService,
             IMediaStreamRepository mediaStreamRepository,
-            IMediaAttachmentRepository mediaAttachmentRepository)
+            IMediaAttachmentRepository mediaAttachmentRepository,
+            ITrueCacheService trueCache)
         {
             _appHost = appHost;
             _itemRepo = itemRepo;
@@ -92,6 +95,7 @@ namespace Emby.Server.Implementations.Library
             _directoryService = directoryService;
             _mediaStreamRepository = mediaStreamRepository;
             _mediaAttachmentRepository = mediaAttachmentRepository;
+            _trueCache = trueCache;
         }
 
         public void AddParts(IEnumerable<IMediaSourceProvider> providers)
@@ -179,8 +183,10 @@ namespace Emby.Server.Implementations.Library
             var mediaSources = GetStaticMediaSources(item, enablePathSubstitution, user);
             ResolveSymlinkPaths(mediaSources, enablePathSubstitution);
 
-            // If file is strm or main media stream is missing, force a metadata refresh with remote probing
+            // If file is strm or main media stream is missing, force a metadata refresh with remote probing.
+            // A declared resource already carries everything its __true_cache__ entry holds; probing again changes nothing.
             if (allowMediaProbe && mediaSources[0].Type != MediaSourceType.Placeholder
+                && !(item.IsFileProtocol && _trueCache.Lookup(item.Path).IsDeclared)
                 && (item.Path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase)
                     || (item.MediaType == MediaType.Video && mediaSources[0].MediaStreams.All(i => i.Type != MediaStreamType.Video))
                     || (item.MediaType == MediaType.Audio && mediaSources[0].MediaStreams.All(i => i.Type != MediaStreamType.Audio))))

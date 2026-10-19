@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Jellyfin.Database.Implementations;
 using Jellyfin.Server.Implementations.Tests.Item;
 using Jellyfin.Server.Implementations.Trickplay;
+using MediaBrowser.Controller.TrueCache;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
@@ -37,7 +38,8 @@ public sealed class TrickplayManagerTests : SqliteDbTestFixture
             null!,
             factory.Object,
             null!,
-            null!);
+            null!,
+            NoTrueCacheService.Instance);
 
         await trickplayManager.DeleteTrickplayDataAsync(Guid.NewGuid(), CancellationToken.None);
 

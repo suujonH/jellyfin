@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using System.Xml.Linq;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.IO;
 using Microsoft.Extensions.Logging;
 
@@ -17,16 +18,19 @@ public class InternalComicInfoProvider : IComicProvider
 {
     private readonly IFileSystem _fileSystem;
     private readonly ILogger<InternalComicInfoProvider> _logger;
+    private readonly ITrueCacheService _trueCache;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="InternalComicInfoProvider"/> class.
     /// </summary>
     /// <param name="fileSystem">Instance of the <see cref="IFileSystem"/> interface.</param>
     /// <param name="logger">Instance of the <see cref="ILogger{InternalComicInfoProvider}"/> interface.</param>
-    public InternalComicInfoProvider(IFileSystem fileSystem, ILogger<InternalComicInfoProvider> logger)
+    /// <param name="trueCache">Instance of the <see cref="ITrueCacheService"/> interface.</param>
+    public InternalComicInfoProvider(IFileSystem fileSystem, ILogger<InternalComicInfoProvider> logger, ITrueCacheService trueCache)
     {
         _logger = logger;
         _fileSystem = fileSystem;
+        _trueCache = trueCache;
     }
 
     /// <inheritdoc />
@@ -75,6 +79,15 @@ public class InternalComicInfoProvider : IComicProvider
         if (path is null)
         {
             return null;
+        }
+
+        // A declared archive is not opened: its ComicInfo.xml comes from its __true_cache__ entry.
+        var lookup = _trueCache.Lookup(path);
+        if (lookup.IsDeclared)
+        {
+            return lookup.IsValid && lookup.Entry.Manifest.Book?.ComicInfo == true
+                ? XDocument.Load(lookup.Entry.GetBookFile(TrueCacheLayout.ComicInfoFile))
+                : null;
         }
 
         try

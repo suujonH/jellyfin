@@ -19,6 +19,7 @@ using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Subtitles;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.IO;
@@ -51,6 +52,7 @@ namespace MediaBrowser.Providers.MediaInfo
         private readonly LyricResolver _lyricResolver;
         private readonly FFProbeVideoInfo _videoProber;
         private readonly AudioFileProber _audioProber;
+        private readonly ITrueCacheService _trueCache;
         private readonly Task<ItemUpdateType> _cachedTask = Task.FromResult(ItemUpdateType.None);
 
         /// <summary>
@@ -70,6 +72,7 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <param name="lyricManager">Instance of the <see cref="ILyricManager"/> interface.</param>
         /// <param name="mediaAttachmentRepository">Instance of the <see cref="IMediaAttachmentRepository"/> interface.</param>
         /// <param name="mediaStreamRepository">Instance of the <see cref="IMediaStreamRepository"/> interface.</param>
+        /// <param name="trueCache">Instance of the <see cref="ITrueCacheService"/> interface.</param>
         public ProbeProvider(
             IMediaSourceManager mediaSourceManager,
             IMediaEncoder mediaEncoder,
@@ -84,9 +87,11 @@ namespace MediaBrowser.Providers.MediaInfo
             NamingOptions namingOptions,
             ILyricManager lyricManager,
             IMediaAttachmentRepository mediaAttachmentRepository,
-            IMediaStreamRepository mediaStreamRepository)
+            IMediaStreamRepository mediaStreamRepository,
+            ITrueCacheService trueCache)
         {
             _logger = loggerFactory.CreateLogger<ProbeProvider>();
+            _trueCache = trueCache;
             _audioResolver = new AudioResolver(loggerFactory.CreateLogger<AudioResolver>(), localization, mediaEncoder, fileSystem, namingOptions);
             _subtitleResolver = new SubtitleResolver(loggerFactory.CreateLogger<SubtitleResolver>(), localization, mediaEncoder, fileSystem, namingOptions);
             _lyricResolver = new LyricResolver(loggerFactory.CreateLogger<LyricResolver>(), localization, mediaEncoder, fileSystem, namingOptions);
@@ -104,7 +109,8 @@ namespace MediaBrowser.Providers.MediaInfo
                 _audioResolver,
                 _subtitleResolver,
                 mediaAttachmentRepository,
-                mediaStreamRepository);
+                mediaStreamRepository,
+                trueCache);
 
             _audioProber = new AudioFileProber(
                 loggerFactory.CreateLogger<AudioFileProber>(),
@@ -114,7 +120,8 @@ namespace MediaBrowser.Providers.MediaInfo
                 _lyricResolver,
                 lyricManager,
                 mediaStreamRepository,
-                chapterManager);
+                chapterManager,
+                trueCache);
         }
 
         /// <inheritdoc />
@@ -126,6 +133,17 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <inheritdoc />
         public bool HasChanged(BaseItem item, IDirectoryService directoryService)
         {
+            if (!string.IsNullOrEmpty(item.Path) && _trueCache.Lookup(item.Path) is { IsValid: true } lookup)
+            {
+                // The declaration replaces the file: a changed declaration is a changed file.
+                var meta = new FileInfo(Path.Combine(lookup.Entry.Directory, TrueCacheLayout.MetaFile));
+                if (meta.Exists && meta.LastWriteTimeUtc > item.DateLastRefreshed)
+                {
+                    _logger.LogDebug("Refreshing {ItemPath} due to a changed __true_cache__ entry.", item.Path);
+                    return true;
+                }
+            }
+
             var video = item as Video;
             if (video is null || video.VideoType == VideoType.VideoFile || video.VideoType == VideoType.Iso)
             {
@@ -248,6 +266,29 @@ namespace MediaBrowser.Providers.MediaInfo
             if (item.IsVirtualItem || !item.IsFileProtocol)
             {
                 return _cachedTask;
+            }
+
+            var lookup = _trueCache.Lookup(item.Path);
+            if (lookup.IsDeclared)
+            {
+                if (!lookup.IsValid)
+                {
+                    throw TrueCacheRejectedException.For(item.Path, lookup);
+                }
+
+                if (string.Equals(Path.GetExtension(item.Path), ".epub", StringComparison.OrdinalIgnoreCase))
+                {
+                    item.RunTimeTicks = TimeSpan.TicksPerSecond;
+                    return Task.FromResult(ItemUpdateType.MetadataImport);
+                }
+
+                if (lookup.Entry.Manifest.Book?.PageCount is not { } declaredPages)
+                {
+                    return _cachedTask;
+                }
+
+                item.RunTimeTicks = declaredPages * 10000;
+                return Task.FromResult(ItemUpdateType.MetadataImport);
             }
 
             long pageCount;

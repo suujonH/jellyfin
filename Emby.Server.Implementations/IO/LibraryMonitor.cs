@@ -10,6 +10,7 @@ using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.IO;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -378,6 +379,17 @@ namespace Emby.Server.Implementations.IO
             if (_disposed)
             {
                 return;
+            }
+
+            // A change inside a __true_cache__ entry is a change of the resource it describes.
+            if (TrueCacheLayout.TryGetResourceOfCachePath(path, out var resourcePath))
+            {
+                if (resourcePath is null)
+                {
+                    return;
+                }
+
+                path = resourcePath;
             }
 
             if (IgnorePatterns.ShouldIgnore(path))

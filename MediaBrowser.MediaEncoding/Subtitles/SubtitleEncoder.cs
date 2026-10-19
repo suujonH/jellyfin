@@ -22,6 +22,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
@@ -44,6 +45,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
         private readonly ISubtitleParser _subtitleParser;
         private readonly IPathManager _pathManager;
         private readonly IServerConfigurationManager _serverConfigurationManager;
+        private readonly ITrueCacheService _trueCache;
 
         /// <summary>
         /// The _semaphoreLocks.
@@ -62,7 +64,8 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             IMediaSourceManager mediaSourceManager,
             ISubtitleParser subtitleParser,
             IPathManager pathManager,
-            IServerConfigurationManager serverConfigurationManager)
+            IServerConfigurationManager serverConfigurationManager,
+            ITrueCacheService trueCache)
         {
             _logger = logger;
             _fileSystem = fileSystem;
@@ -72,6 +75,46 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             _subtitleParser = subtitleParser;
             _pathManager = pathManager;
             _serverConfigurationManager = serverConfigurationManager;
+            _trueCache = trueCache;
+        }
+
+        /// <summary>
+        /// Gets the declared extraction of an embedded subtitle stream of a resource with a <c>__true_cache__</c> entry.
+        /// </summary>
+        /// <returns><c>null</c> for resources without an entry.</returns>
+        /// <exception cref="TrueCacheRejectedException">The resource has an entry, but it does not hold the stream.</exception>
+        private SubtitleInfo? GetDeclaredSubtitle(MediaSourceInfo mediaSource, MediaStream subtitleStream)
+        {
+            if (string.IsNullOrEmpty(mediaSource.Path))
+            {
+                return null;
+            }
+
+            var lookup = _trueCache.Lookup(mediaSource.Path);
+            if (!lookup.IsDeclared)
+            {
+                return null;
+            }
+
+            if (!lookup.IsValid)
+            {
+                throw TrueCacheRejectedException.For(mediaSource.Path, lookup);
+            }
+
+            if (lookup.Entry.FindProbeSubtitleIndex(mediaSource.MediaStreams, subtitleStream) is not { } probeIndex
+                || !lookup.Entry.TryGetSubtitle(probeIndex, out var path))
+            {
+                throw new TrueCacheRejectedException($"The __true_cache__ entry of {mediaSource.Path} holds no subtitle for stream {subtitleStream.Index}.");
+            }
+
+            var format = TrueCacheRules.GetExtractedSubtitleFormat(subtitleStream.Codec);
+            return new SubtitleInfo
+            {
+                Path = path!,
+                Protocol = MediaProtocol.File,
+                Format = format,
+                IsExternal = MediaStream.IsVobSubFormat(format)
+            };
         }
 
         internal MemoryStream ConvertSubtitles(
@@ -215,6 +258,12 @@ namespace MediaBrowser.MediaEncoding.Subtitles
         {
             if (!subtitleStream.IsExternal || subtitleStream.Path.EndsWith(".mks", StringComparison.OrdinalIgnoreCase))
             {
+                // Embedded streams of a declared resource were extracted in advance into its __true_cache__ entry.
+                if (!subtitleStream.IsExternal && GetDeclaredSubtitle(mediaSource, subtitleStream) is { } declared)
+                {
+                    return declared;
+                }
+
                 await ExtractAllExtractableSubtitles(mediaSource, cancellationToken).ConfigureAwait(false);
 
                 var outputFileExtension = GetExtractableSubtitleFileExtension(subtitleStream);
@@ -473,41 +522,12 @@ namespace MediaBrowser.MediaEncoding.Subtitles
             WriteCacheMeta(outputPath, inputPath);
         }
 
-        private string GetExtractableSubtitleFormat(MediaStream subtitleStream)
-        {
-            if (string.Equals(subtitleStream.Codec, "ass", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(subtitleStream.Codec, "ssa", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(subtitleStream.Codec, "pgssub", StringComparison.OrdinalIgnoreCase))
-            {
-                return subtitleStream.Codec;
-            }
-            else if (MediaStream.IsVobSubFormat(subtitleStream.Codec))
-            {
-                return "mks";
-            }
-            else
-            {
-                return "srt";
-            }
-        }
+        // Shared with __true_cache__ entries, which hold the same extractions.
+        private static string GetExtractableSubtitleFormat(MediaStream subtitleStream)
+            => TrueCacheRules.GetExtractedSubtitleFormat(subtitleStream.Codec);
 
-        private string GetExtractableSubtitleFileExtension(MediaStream subtitleStream)
-        {
-            // Using .pgssub as file extension is not allowed by ffmpeg. The file extension for pgs subtitles is .sup.
-            if (string.Equals(subtitleStream.Codec, "pgssub", StringComparison.OrdinalIgnoreCase))
-            {
-                return "sup";
-            }
-            else if (MediaStream.IsVobSubFormat(subtitleStream.Codec))
-            {
-                // FFmpeg cannot mux VobSub subtitle streams back into the .idx/.sub pair, so we use .mks container instead.
-                return "mks";
-            }
-            else
-            {
-                return GetExtractableSubtitleFormat(subtitleStream);
-            }
-        }
+        private static string GetExtractableSubtitleFileExtension(MediaStream subtitleStream)
+            => TrueCacheRules.GetExtractedSubtitleExtension(subtitleStream.Codec);
 
         private bool IsCodecCopyable(string codec)
         {
@@ -530,10 +550,18 @@ namespace MediaBrowser.MediaEncoding.Subtitles
                 var subtitleStreams = mediaSource.MediaStreams
                     .Where(stream => stream is { IsExtractableSubtitleStream: true, SupportsExternalStream: true });
 
+                // The embedded streams of a declared resource are never extracted from it; they are read from its __true_cache__ entry.
+                var isDeclared = !string.IsNullOrEmpty(mediaSource.Path) && _trueCache.Lookup(mediaSource.Path).IsDeclared;
+
                 foreach (var subtitleStream in subtitleStreams)
                 {
                     if (subtitleStream.IsExternal
                         && !subtitleStream.Path.EndsWith(".mks", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (isDeclared && !subtitleStream.IsExternal)
                     {
                         continue;
                     }

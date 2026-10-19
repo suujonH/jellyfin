@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using System.Xml;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.IO;
 using Microsoft.Extensions.Logging;
 
@@ -18,16 +19,19 @@ namespace MediaBrowser.Providers.Books.OpenPackagingFormat
     {
         private readonly IFileSystem _fileSystem;
         private readonly ILogger<EpubProvider> _logger;
+        private readonly ITrueCacheService _trueCache;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="EpubProvider"/> class.
         /// </summary>
         /// <param name="fileSystem">Instance of the <see cref="IFileSystem"/> interface.</param>
         /// <param name="logger">Instance of the <see cref="ILogger{EpubProvider}"/> interface.</param>
-        public EpubProvider(IFileSystem fileSystem, ILogger<EpubProvider> logger)
+        /// <param name="trueCache">Instance of the <see cref="ITrueCacheService"/> interface.</param>
+        public EpubProvider(IFileSystem fileSystem, ILogger<EpubProvider> logger, ITrueCacheService trueCache)
         {
             _fileSystem = fileSystem;
             _logger = logger;
+            _trueCache = trueCache;
         }
 
         /// <inheritdoc />
@@ -41,6 +45,20 @@ namespace MediaBrowser.Providers.Books.OpenPackagingFormat
             if (path is null)
             {
                 return Task.FromResult(new MetadataResult<Book> { HasMetadata = false });
+            }
+
+            // A declared EPUB is not opened: its package document comes from its __true_cache__ entry.
+            var lookup = _trueCache.Lookup(path);
+            if (lookup.IsDeclared)
+            {
+                if (!lookup.IsValid || lookup.Entry.Manifest.Book?.Opf != true)
+                {
+                    return Task.FromResult(new MetadataResult<Book> { HasMetadata = false });
+                }
+
+                var opfDocument = new XmlDocument();
+                opfDocument.Load(lookup.Entry.GetBookFile(TrueCacheLayout.OpfFile));
+                return Task.FromResult(new OpfReader<EpubProvider>(opfDocument, _logger).ReadOpfData(cancellationToken));
             }
 
             var result = ReadEpubAsZip(path, cancellationToken);

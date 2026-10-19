@@ -841,7 +841,8 @@ namespace Emby.Server.Implementations.Library
             IEnumerable<FileSystemMetadata> siblings;
             try
             {
-                siblings = _fileSystem.GetFiles(directory);
+                // Ignored files, such as resources with a rejected __true_cache__ entry, are never parts of a stack.
+                siblings = _fileSystem.GetFiles(directory).Where(f => !IgnoreFile(f, null)).ToList();
             }
             catch (Exception ex)
             {

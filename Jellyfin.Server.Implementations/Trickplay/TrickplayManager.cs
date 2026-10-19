@@ -19,6 +19,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Trickplay;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
@@ -41,6 +42,7 @@ public partial class TrickplayManager : ITrickplayManager
     private readonly IDbContextFactory<JellyfinDbContext> _dbProvider;
     private readonly IApplicationPaths _appPaths;
     private readonly IPathManager _pathManager;
+    private readonly ITrueCacheService _trueCache;
 
     private static readonly AsyncNonKeyedLocker _resourcePool = new(1);
     private static readonly string[] _trickplayImgExtensions = [".jpg"];
@@ -57,6 +59,7 @@ public partial class TrickplayManager : ITrickplayManager
     /// <param name="dbProvider">The database provider.</param>
     /// <param name="appPaths">The application paths.</param>
     /// <param name="pathManager">The path manager.</param>
+    /// <param name="trueCache">The <c>__true_cache__</c> lookup.</param>
     public TrickplayManager(
         ILogger<TrickplayManager> logger,
         IMediaEncoder mediaEncoder,
@@ -66,7 +69,8 @@ public partial class TrickplayManager : ITrickplayManager
         IImageEncoder imageEncoder,
         IDbContextFactory<JellyfinDbContext> dbProvider,
         IApplicationPaths appPaths,
-        IPathManager pathManager)
+        IPathManager pathManager,
+        ITrueCacheService trueCache)
     {
         _logger = logger;
         _mediaEncoder = mediaEncoder;
@@ -77,6 +81,7 @@ public partial class TrickplayManager : ITrickplayManager
         _dbProvider = dbProvider;
         _appPaths = appPaths;
         _pathManager = pathManager;
+        _trueCache = trueCache;
     }
 
     /// <inheritdoc />
@@ -84,6 +89,12 @@ public partial class TrickplayManager : ITrickplayManager
     {
         var options = _config.Configuration.TrickplayOptions;
         if (libraryOptions is null || !libraryOptions.EnableTrickplayImageExtraction || !CanGenerateTrickplay(video, options.Interval))
+        {
+            return;
+        }
+
+        // The tiles of a declared video stay in its __true_cache__ entry.
+        if (_trueCache.Lookup(video.Path).IsDeclared)
         {
             return;
         }
@@ -284,6 +295,18 @@ public partial class TrickplayManager : ITrickplayManager
         var options = _config.Configuration.TrickplayOptions;
         if (!CanGenerateTrickplay(video, options.Interval) || libraryOptions is null)
         {
+            return;
+        }
+
+        // A declared video is not read: its tiles are served from its __true_cache__ entry and never pruned or moved.
+        var lookup = _trueCache.Lookup(video.Path);
+        if (lookup.IsDeclared)
+        {
+            if (lookup.IsValid)
+            {
+                await SaveDeclaredTrickplayAsync(video, lookup.Entry, cancellationToken).ConfigureAwait(false);
+            }
+
             return;
         }
 
@@ -709,6 +732,34 @@ public partial class TrickplayManager : ITrickplayManager
         return trickplayItems;
     }
 
+    /// <summary>
+    /// Replaces the trickplay rows of a declared video with the resolutions its entry declares.
+    /// </summary>
+    private async Task SaveDeclaredTrickplayAsync(Video video, TrueCacheEntry entry, CancellationToken cancellationToken)
+    {
+        var dbContext = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using (dbContext.ConfigureAwait(false))
+        {
+            await dbContext.TrickplayInfos.Where(i => i.ItemId.Equals(video.Id)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var declared in entry.Manifest.Video?.Trickplay ?? [])
+            {
+                dbContext.TrickplayInfos.Add(new TrickplayInfo
+                {
+                    ItemId = video.Id,
+                    Width = declared.Width,
+                    Height = declared.Height,
+                    TileWidth = declared.TileWidth,
+                    TileHeight = declared.TileHeight,
+                    ThumbnailCount = declared.ThumbnailCount,
+                    Interval = declared.Interval,
+                    Bandwidth = declared.Bandwidth
+                });
+            }
+
+            await dbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     /// <inheritdoc />
     public async Task SaveTrickplayInfo(TrickplayInfo info)
     {
@@ -847,7 +898,11 @@ public partial class TrickplayManager : ITrickplayManager
     /// <inheritdoc />
     public string GetTrickplayDirectory(BaseItem item, int tileWidth, int tileHeight, int width, bool saveWithMedia = false)
     {
-        var path = _pathManager.GetTrickplayDirectory(item, saveWithMedia);
+        // Tiles of a declared video live in its __true_cache__ entry. The path manager keeps reporting the server's own
+        // folders, so deleting an item never deletes the user's entry.
+        var path = !string.IsNullOrEmpty(item.Path) && _trueCache.Lookup(item.Path) is { IsValid: true } lookup
+            ? lookup.Entry.TrickplayDirectory
+            : _pathManager.GetTrickplayDirectory(item, saveWithMedia);
         var subdirectory = string.Format(
             CultureInfo.InvariantCulture,
             "{0} - {1}x{2}",
