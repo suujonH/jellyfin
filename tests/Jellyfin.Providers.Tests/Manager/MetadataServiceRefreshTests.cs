@@ -343,6 +343,38 @@ namespace Jellyfin.Providers.Tests.Manager
         }
 
         [Theory]
+        // The probe provider is a pre-refresh provider. When only it reports a change (the file, or the
+        // __true_cache__ declaration of a book, changed), the local readers run as well, including those
+        // without a change monitor of their own, such as the EPUB reader.
+        [InlineData(true)]
+        [InlineData(false)]
+        public async Task RefreshMetadata_OnlyACustomProviderChanged_RunsLocalProvidersIfItIsAPreRefreshProvider(bool isPreRefreshProvider)
+        {
+            var item = NewStampedTestItem();
+
+            var changed = new Mock<ICustomMetadataProvider<TestItem>>(MockBehavior.Loose);
+            changed.Setup(p => p.Name).Returns("Probe Provider");
+            changed.Setup(p => p.FetchAsync(It.IsAny<TestItem>(), It.IsAny<MetadataRefreshOptions>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(ItemUpdateType.None);
+            changed.As<IHasItemChangeMonitor>().Setup(p => p.HasChanged(It.IsAny<BaseItem>(), It.IsAny<IDirectoryService>())).Returns(true);
+            if (isPreRefreshProvider)
+            {
+                changed.As<IPreRefreshProvider>();
+            }
+
+            var local = new Mock<ILocalMetadataProvider<TestItem>>(MockBehavior.Loose);
+            local.Setup(p => p.Name).Returns("Local Reader");
+            local.Setup(p => p.GetMetadata(It.IsAny<ItemInfo>(), It.IsAny<IDirectoryService>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync(new MetadataResult<TestItem> { HasMetadata = true, Item = new TestItem { Name = "Declared Title" } });
+
+            var service = NewService(NewProviderManager(metadataProviders: [changed.Object, local.Object]));
+
+            await service.RefreshMetadata(item, new MetadataRefreshOptions(Mock.Of<IDirectoryService>()), CancellationToken.None).ConfigureAwait(true);
+
+            Assert.Equal(isPreRefreshProvider ? "Declared Title" : "Test Item", item.Name);
+        }
+
+        [Theory]
         [InlineData(true)]
         [InlineData(false)]
         public async Task RefreshMetadata_ImageProviderThrew_LeavesRefreshDateAlone(bool providerThrows)

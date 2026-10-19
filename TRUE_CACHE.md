@@ -130,6 +130,7 @@ dotnet run --project src/Jellyfin.TrueCache.Tool -c Release -- validate --server
 - `--server-config` 读取服务器的 `system.xml` 和 `encoding.xml`，保证 trickplay、章节和编码设置与服务器一致；也可以用 `--trickplay-widths`、`--trickplay-interval`、`--trickplay-tile`、`--dummy-chapters` 单独指定。
 - 生成后会用服务器同一套规则校验。全部完整时退出码为 0，有不完整的为 1，命令行错误为 2。
 - 已有缓存的资源默认跳过，`--force` 重新生成。
+- 条目先写入 `__true_cache__` 中以 `.` 开头的临时目录（服务器忽略它），校验完整后才替换正式条目。生成失败、校验不通过或被中断时，原有条目（或没有条目的状态）保持不变，服务器不会看到写了一半的条目。
 
 ## 运行时行为
 

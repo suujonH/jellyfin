@@ -48,7 +48,8 @@ internal sealed class EntryGenerator
     }
 
     /// <summary>
-    /// Writes the entry of a resource and validates it with the server's rules.
+    /// Writes the entry of a resource and validates it with the server's rules. The entry is put in place only when it is
+    /// complete; otherwise the previous entry, or the lack of one, stays as it was.
     /// </summary>
     /// <param name="resourcePath">The media file or disc folder.</param>
     /// <param name="kind">The kind of resource.</param>
@@ -57,8 +58,110 @@ internal sealed class EntryGenerator
     public async Task<TrueCacheLookup> GenerateAsync(string resourcePath, TrueCacheKind kind, CancellationToken cancellationToken)
     {
         var directory = TrueCacheLayout.GetEntryDirectory(resourcePath) ?? throw new ArgumentException("The path has no parent folder.", nameof(resourcePath));
-        Directory.CreateDirectory(directory);
+        var staged = await StageAsync(directory, staging => WriteEntryAsync(resourcePath, staging, kind, cancellationToken)).ConfigureAwait(false);
+        return staged.IsValid ? _services.Loader.Load(resourcePath, _services.Requirements) : staged;
+    }
 
+    /// <summary>
+    /// Writes the album-wide entry of an album folder: the loudness of all its tracks played in a row.
+    /// </summary>
+    /// <param name="albumPath">The album folder.</param>
+    /// <param name="audioExtensions">The extensions of audio files.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The validation result of the written entry.</returns>
+    public async Task<TrueCacheLookup> GenerateAlbumAsync(string albumPath, IReadOnlyCollection<string> audioExtensions, CancellationToken cancellationToken)
+    {
+        var tracks = Directory.EnumerateFiles(albumPath)
+            .Where(f => audioExtensions.Contains(Path.GetExtension(f), StringComparer.OrdinalIgnoreCase))
+            .Order(StringComparer.Ordinal)
+            .ToList();
+        if (tracks.Count < 2)
+        {
+            throw new InvalidOperationException("An album needs at least two tracks; the server measures no album loudness otherwise.");
+        }
+
+        var concat = Path.Combine(_services.WorkDirectory, Guid.NewGuid().ToString("N") + ".concat");
+        await File.WriteAllLinesAsync(concat, tracks.Select(t => string.Format(CultureInfo.InvariantCulture, "file '{0}'", t.Replace("'", @"'\''", StringComparison.Ordinal))), cancellationToken).ConfigureAwait(false);
+        var lufs = await AudioNormalizationTask.CalculateLUFSAsync(
+            _services.Encoder.EncoderPath,
+            string.Format(CultureInfo.InvariantCulture, "-f concat -safe 0 -i \"{0}\"", concat),
+            true,
+            _logger,
+            cancellationToken).ConfigureAwait(false) ?? throw new InvalidOperationException("ffmpeg reported no loudness for the album.");
+
+        var root = new TomlTable
+        {
+            ["version"] = (long)TrueCacheManifest.CurrentVersion,
+            ["kind"] = "album",
+            ["album"] = new TomlTable { ["lufs"] = (double)lufs }
+        };
+        var staged = await StageAsync(TrueCacheLayout.GetAlbumEntryDirectory(albumPath), async staging =>
+        {
+            await File.WriteAllTextAsync(Path.Combine(staging, TrueCacheLayout.MetaFile), Toml.FromModel(root), cancellationToken).ConfigureAwait(false);
+            return _services.Loader.LoadAlbum(albumPath, staging);
+        }).ConfigureAwait(false);
+        return staged.IsValid ? _services.Loader.LoadAlbum(albumPath) : staged;
+    }
+
+    /// <summary>
+    /// Builds an entry in a staging folder and puts it in place only when it validates. The server rejects a resource whose
+    /// entry folder is incomplete, so it must never see one: not while the entry is written, nor after a failed or cancelled attempt.
+    /// The staging folder lies next to the entry, on the same volume, and its name starts with a dot, which the server ignores.
+    /// </summary>
+    /// <param name="directory">The entry folder.</param>
+    /// <param name="build">Writes the entry into the folder it is given and validates it there.</param>
+    /// <returns>The validation result of the staged entry.</returns>
+    private static async Task<TrueCacheLookup> StageAsync(string directory, Func<string, Task<TrueCacheLookup>> build)
+    {
+        var staging = Path.Combine(Path.GetDirectoryName(directory)!, "." + Path.GetFileName(directory) + "." + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(staging);
+        try
+        {
+            var result = await build(staging).ConfigureAwait(false);
+            if (result.IsValid)
+            {
+                Publish(staging, directory);
+            }
+
+            return result;
+        }
+        finally
+        {
+            if (Directory.Exists(staging))
+            {
+                Directory.Delete(staging, true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Moves a complete entry into place. An existing entry is replaced only now; between the two moves the resource has no entry.
+    /// </summary>
+    private static void Publish(string staging, string directory)
+    {
+        if (!Directory.Exists(directory))
+        {
+            Directory.Move(staging, directory);
+            return;
+        }
+
+        var previous = staging + ".previous";
+        Directory.Move(directory, previous);
+        try
+        {
+            Directory.Move(staging, directory);
+        }
+        catch
+        {
+            Directory.Move(previous, directory);
+            throw;
+        }
+
+        Directory.Delete(previous, true);
+    }
+
+    private async Task<TrueCacheLookup> WriteEntryAsync(string resourcePath, string directory, TrueCacheKind kind, CancellationToken cancellationToken)
+    {
         var root = new TomlTable
         {
             ["version"] = (long)TrueCacheManifest.CurrentVersion,
@@ -96,46 +199,7 @@ internal sealed class EntryGenerator
         }
 
         await File.WriteAllTextAsync(Path.Combine(directory, TrueCacheLayout.MetaFile), Toml.FromModel(root), cancellationToken).ConfigureAwait(false);
-        return _services.Loader.Load(resourcePath, _services.Requirements);
-    }
-
-    /// <summary>
-    /// Writes the album-wide entry of an album folder: the loudness of all its tracks played in a row.
-    /// </summary>
-    /// <param name="albumPath">The album folder.</param>
-    /// <param name="audioExtensions">The extensions of audio files.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>The validation result of the written entry.</returns>
-    public async Task<TrueCacheLookup> GenerateAlbumAsync(string albumPath, IReadOnlyCollection<string> audioExtensions, CancellationToken cancellationToken)
-    {
-        var tracks = Directory.EnumerateFiles(albumPath)
-            .Where(f => audioExtensions.Contains(Path.GetExtension(f), StringComparer.OrdinalIgnoreCase))
-            .Order(StringComparer.Ordinal)
-            .ToList();
-        if (tracks.Count < 2)
-        {
-            throw new InvalidOperationException("An album needs at least two tracks; the server measures no album loudness otherwise.");
-        }
-
-        var concat = Path.Combine(_services.WorkDirectory, Guid.NewGuid().ToString("N") + ".concat");
-        await File.WriteAllLinesAsync(concat, tracks.Select(t => string.Format(CultureInfo.InvariantCulture, "file '{0}'", t.Replace("'", @"'\''", StringComparison.Ordinal))), cancellationToken).ConfigureAwait(false);
-        var lufs = await AudioNormalizationTask.CalculateLUFSAsync(
-            _services.Encoder.EncoderPath,
-            string.Format(CultureInfo.InvariantCulture, "-f concat -safe 0 -i \"{0}\"", concat),
-            true,
-            _logger,
-            cancellationToken).ConfigureAwait(false) ?? throw new InvalidOperationException("ffmpeg reported no loudness for the album.");
-
-        var directory = TrueCacheLayout.GetAlbumEntryDirectory(albumPath);
-        Directory.CreateDirectory(directory);
-        var root = new TomlTable
-        {
-            ["version"] = (long)TrueCacheManifest.CurrentVersion,
-            ["kind"] = "album",
-            ["album"] = new TomlTable { ["lufs"] = (double)lufs }
-        };
-        await File.WriteAllTextAsync(Path.Combine(directory, TrueCacheLayout.MetaFile), Toml.FromModel(root), cancellationToken).ConfigureAwait(false);
-        return _services.Loader.LoadAlbum(albumPath);
+        return _services.Loader.Load(resourcePath, directory, _services.Requirements);
     }
 
     private static string KindName(TrueCacheKind kind) => kind switch

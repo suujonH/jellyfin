@@ -150,6 +150,22 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
         }
 
         [Fact]
+        public void Load_StagedEntry_IsValidatedWhereItIs()
+        {
+            // The generator validates an entry in its staging folder before it moves it into place.
+            var path = _fixture.CreateResource("Film.mkv");
+            var staging = Path.Combine(_fixture.Root, TrueCacheLayout.FolderName, ".Film.mkv.staging");
+            foreach (var (name, content) in TrueCacheFixture.CompleteVideoFiles())
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(staging, name))!);
+                File.WriteAllText(Path.Combine(staging, name), content);
+            }
+
+            Assert.True(_loader.Load(path, staging, TrueCacheFixture.Requirements).IsValid);
+            Assert.Equal(TrueCacheState.None, _loader.Load(path, TrueCacheFixture.Requirements).State);
+        }
+
+        [Fact]
         public void LoadAlbum_MetaWithoutVersion_IsRejected()
         {
             var albumEntry = TrueCacheLayout.GetAlbumEntryDirectory(_fixture.Root);

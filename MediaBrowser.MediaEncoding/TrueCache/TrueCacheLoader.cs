@@ -57,6 +57,19 @@ public sealed class TrueCacheLoader
             return TrueCacheLookup.None;
         }
 
+        return Load(resourcePath, directory, requirements);
+    }
+
+    /// <summary>
+    /// Loads an entry from a folder as if it were the entry of a resource. The generator validates an entry this way
+    /// before it puts the entry in place.
+    /// </summary>
+    /// <param name="resourcePath">The media file or disc folder.</param>
+    /// <param name="directory">The folder holding the entry.</param>
+    /// <param name="requirements">The settings that decide what the entry must hold.</param>
+    /// <returns>The lookup result.</returns>
+    public TrueCacheLookup Load(string resourcePath, string directory, TrueCacheRequirements requirements)
+    {
         try
         {
             return LoadEntry(resourcePath, directory, requirements);
@@ -80,6 +93,17 @@ public sealed class TrueCacheLoader
             return TrueCacheLookup.None;
         }
 
+        return LoadAlbum(albumPath, directory);
+    }
+
+    /// <summary>
+    /// Loads an album-wide entry from a folder as if it were the entry of an album folder.
+    /// </summary>
+    /// <param name="albumPath">The album folder.</param>
+    /// <param name="directory">The folder holding the entry.</param>
+    /// <returns>The lookup result.</returns>
+    public TrueCacheLookup LoadAlbum(string albumPath, string directory)
+    {
         try
         {
             var manifest = ReadManifest(directory);

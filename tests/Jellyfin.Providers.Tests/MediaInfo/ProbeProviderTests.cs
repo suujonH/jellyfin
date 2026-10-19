@@ -55,6 +55,14 @@ public class ProbeProviderTests
     }
 
     [Fact]
+    public void ProbeProvider_IsAPreRefreshProvider()
+    {
+        // Only this provider notices a changed __true_cache__ declaration of a book. Being a pre-refresh provider
+        // makes the metadata service run the local readers too (EPUB, comic), which read the declared documents.
+        Assert.IsAssignableFrom<IPreRefreshProvider>(_probeProvider);
+    }
+
+    [Fact]
     public void HasChanged_NeverProbedVideo_ReturnsTrue()
     {
         // A probe that threw leaves the item like this while the refresh is stamped as done, and the

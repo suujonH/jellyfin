@@ -75,6 +75,19 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
         }
 
         [Fact]
+        public void Lookup_EntryStillStaged_IsNone()
+        {
+            // A partly written entry in the generator's staging folder must not get the resource rejected.
+            var path = _fixture.CreateResource("Film.mkv");
+            var staging = Path.Combine(_fixture.Root, TrueCacheLayout.FolderName, ".Film.mkv.staging");
+            Directory.CreateDirectory(staging);
+            File.WriteAllText(Path.Combine(staging, TrueCacheLayout.ProbeFile), TrueCacheFixture.VideoProbe);
+
+            Assert.Equal(TrueCacheState.None, _service.Lookup(path).State);
+            Assert.Empty(_service.GetRejections());
+        }
+
+        [Fact]
         public void Lookup_RelativePath_IsNone()
         {
             Assert.Equal(TrueCacheState.None, _service.Lookup("Film.mkv").State);

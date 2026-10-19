@@ -75,7 +75,7 @@ public static class Program
                 if (options.Command == "album")
                 {
                     var albumEntry = TrueCacheLayout.GetAlbumEntryDirectory(path);
-                    if (!PrepareEntry(albumEntry, options.Force))
+                    if (!ShouldGenerate(albumEntry, options.Force))
                     {
                         Console.WriteLine($"skipped  {path}: an album entry exists (use --force)");
                         continue;
@@ -91,7 +91,7 @@ public static class Program
                 {
                     var kind = options.Kind ?? DetectKind(path, naming, services);
                     var entry = TrueCacheLayout.GetEntryDirectory(path)!;
-                    if (!PrepareEntry(entry, options.Force))
+                    if (!ShouldGenerate(entry, options.Force))
                     {
                         Console.WriteLine($"skipped  {path}: an entry exists (use --force)");
                         continue;
@@ -124,21 +124,8 @@ public static class Program
         return success;
     }
 
-    private static bool PrepareEntry(string entry, bool force)
-    {
-        if (!Directory.Exists(entry))
-        {
-            return true;
-        }
-
-        if (!force)
-        {
-            return false;
-        }
-
-        Directory.Delete(entry, true);
-        return true;
-    }
+    // An existing entry is not removed here: the generator replaces it only once the new entry is complete.
+    private static bool ShouldGenerate(string entry, bool force) => force || !Directory.Exists(entry);
 
     private static TrueCacheKind DetectKind(string path, NamingOptions naming, ToolServices services)
     {
