@@ -27,7 +27,19 @@ public class CacheDecoratorTrueCacheTests
 
         Assert.True(decorator.TryExtractKeyframes(Guid.NewGuid(), FilePath, out var result));
         Assert.Same(keyframes, result);
-        repository.Verify(r => r.SaveKeyframeDataAsync(It.IsAny<Guid>(), keyframes, It.IsAny<CancellationToken>()), Times.Once());
+        repository.Verify(r => r.SaveKeyframeDataAsync(It.IsAny<Guid>(), It.IsAny<KeyframeData>(), It.IsAny<CancellationToken>()), Times.Never());
+    }
+
+    [Fact]
+    public void TryExtractKeyframes_DeclaredVideoWithPersistedKeyframes_UsesTheCurrentDeclaration()
+    {
+        // Keyframes persisted earlier, by an older entry or before the video was declared, must not outlive a replaced entry.
+        var keyframes = new KeyframeData(100, [0, 50]);
+        var (decorator, repository) = Create(TrueCacheLookup.Valid(CreateEntry(keyframes)));
+        repository.Setup(r => r.GetKeyframeData(It.IsAny<Guid>())).Returns([new KeyframeData(100, [0, 40])]);
+
+        Assert.True(decorator.TryExtractKeyframes(Guid.NewGuid(), FilePath, out var result));
+        Assert.Same(keyframes, result);
     }
 
     [Fact]

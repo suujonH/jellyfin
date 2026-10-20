@@ -50,34 +50,28 @@ public class CacheDecorator : IKeyframeExtractor
     /// <inheritdoc />
     public bool TryExtractKeyframes(Guid itemId, string filePath, [NotNullWhen(true)] out KeyframeData? keyframeData)
     {
+        // A declared video is never read: its keyframes come from its __true_cache__ entry or not at all.
+        // They are not persisted, so a replaced entry takes effect at once.
+        // Playback passes the file it reads, which can be the target of a symlink; the entry sits next to the library item.
+        var itemPath = _libraryManager.GetItemById(itemId)?.Path;
+        var lookup = _trueCache.Lookup(string.IsNullOrEmpty(itemPath) ? filePath : itemPath);
+        if (lookup.IsDeclared)
+        {
+            keyframeData = lookup.Entry?.Keyframes;
+            return keyframeData is not null;
+        }
+
         keyframeData = _keyframeRepository.GetKeyframeData(itemId).FirstOrDefault();
         if (keyframeData is null)
         {
-            // A declared video is never read: its keyframes come from its __true_cache__ entry or not at all.
-            // Playback passes the file it reads, which can be the target of a symlink; the entry sits next to the library item.
-            var itemPath = _libraryManager.GetItemById(itemId)?.Path;
-            var lookup = _trueCache.Lookup(string.IsNullOrEmpty(itemPath) ? filePath : itemPath);
-            if (lookup.IsDeclared)
+            if (!_keyframeExtractor.TryExtractKeyframes(itemId, filePath, out var result))
             {
-                if (lookup.Entry?.Keyframes is not { } declared)
-                {
-                    return false;
-                }
-
-                keyframeData = declared;
-            }
-            else
-            {
-                if (!_keyframeExtractor.TryExtractKeyframes(itemId, filePath, out var result))
-                {
-                    _logger.LogDebug("Failed to extract keyframes using {ExtractorName}", _keyframeExtractorName);
-                    return false;
-                }
-
-                _logger.LogDebug("Successfully extracted keyframes using {ExtractorName}", _keyframeExtractorName);
-                keyframeData = result;
+                _logger.LogDebug("Failed to extract keyframes using {ExtractorName}", _keyframeExtractorName);
+                return false;
             }
 
+            _logger.LogDebug("Successfully extracted keyframes using {ExtractorName}", _keyframeExtractorName);
+            keyframeData = result;
             _keyframeRepository.SaveKeyframeDataAsync(itemId, keyframeData, CancellationToken.None).GetAwaiter().GetResult();
         }
 

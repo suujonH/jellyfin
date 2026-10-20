@@ -30,6 +30,15 @@ public sealed class TrueCacheLoader
     private static readonly string[] _comicArchiveExtensions = [".cbz", ".cbr", ".cb7", ".cbt"];
     private static readonly TimeSpan _modifiedTolerance = TimeSpan.FromSeconds(2);
 
+    // Documents the providers import from but the loader does not parse. An edit that keeps their size must still change the hash.
+    private static readonly string[] _importedDocuments =
+    [
+        TrueCacheLayout.LyricsFile,
+        TrueCacheLayout.BookFolder + "/" + TrueCacheLayout.ComicInfoFile,
+        TrueCacheLayout.BookFolder + "/" + TrueCacheLayout.ComicBookInfoFile,
+        TrueCacheLayout.BookFolder + "/" + TrueCacheLayout.OpfFile
+    ];
+
     private readonly ProbeResultNormalizer _normalizer;
     private readonly JsonSerializerOptions _probeOptions;
     private readonly StringComparer _pathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
@@ -144,11 +153,16 @@ public sealed class TrueCacheLoader
     /// </summary>
     private static string ReadText(string directory, string relative, XxHash3 hash)
     {
+        using var reader = new StreamReader(new MemoryStream(AppendContents(hash, directory, relative)));
+        return reader.ReadToEnd();
+    }
+
+    private static byte[] AppendContents(XxHash3 hash, string directory, string relative)
+    {
         var bytes = File.ReadAllBytes(ToPath(directory, relative));
         AppendFile(hash, relative, bytes.LongLength);
         hash.Append(bytes);
-        using var reader = new StreamReader(new MemoryStream(bytes));
-        return reader.ReadToEnd();
+        return bytes;
     }
 
     private static void AppendFile(XxHash3 hash, string relative, long length)
@@ -235,6 +249,11 @@ public sealed class TrueCacheLoader
         if (missing.Count > 0)
         {
             return TrueCacheLookup.Rejected("missing " + string.Join(", ", missing));
+        }
+
+        foreach (var document in _importedDocuments.Where(files.Contains))
+        {
+            AppendContents(hash, directory, document);
         }
 
         // The listing covers the files the server does not read, such as images and trickplay tiles.

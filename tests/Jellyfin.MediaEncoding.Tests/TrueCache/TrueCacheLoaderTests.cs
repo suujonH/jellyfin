@@ -216,6 +216,30 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
             Assert.NotEqual(before, after.Entry.Hash);
         }
 
+        [Theory]
+        [InlineData("Comic.cbz", "book/ComicInfo.xml", "<ComicInfo><Title>Teh</Title></ComicInfo>", "<ComicInfo><Title>The</Title></ComicInfo>")]
+        [InlineData("Song.mp3", TrueCacheLayout.LyricsFile, "[00:01.00]Helo!", "[00:01.00]Hello")]
+        public void Load_ImportedDocumentEditedToTheSameSize_ChangesTheHash(string name, string document, string original, string edited)
+        {
+            // The providers import these documents, so their contents count as well.
+            var path = _fixture.CreateResource(name);
+            var files = name.EndsWith(".cbz", System.StringComparison.Ordinal)
+                ? new Dictionary<string, string>
+                {
+                    [TrueCacheLayout.MetaFile] = "version = 1\nkind = \"book\"\n[source]\nsize = 4\n[book]\npage_count = 24\ncomic_info = true\ncomic_book_info = false\ncover = true\n",
+                    ["book/cover.png"] = "png"
+                }
+                : TrueCacheFixture.CompleteAudioFiles();
+            files[document] = original;
+            _fixture.WriteEntry(path, files);
+            var before = _loader.Load(path, TrueCacheFixture.Requirements);
+            Assert.True(before.IsValid, before.Reason);
+
+            _fixture.WriteEntry(path, new Dictionary<string, string> { [document] = edited });
+
+            Assert.NotEqual(before.Entry.Hash, _loader.Load(path, TrueCacheFixture.Requirements).Entry!.Hash);
+        }
+
         [Fact]
         public void LoadAlbum_MetaWithoutVersion_IsRejected()
         {
