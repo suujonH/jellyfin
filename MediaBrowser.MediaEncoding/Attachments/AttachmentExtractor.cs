@@ -25,6 +25,9 @@ namespace MediaBrowser.MediaEncoding.Attachments
     /// <inheritdoc cref="IAttachmentExtractor"/>
     public sealed class AttachmentExtractor : IAttachmentExtractor, IDisposable
     {
+        // Names the entry revision the copies of declared attachments came from.
+        private const string DeclaredRevisionFile = ".truecache-revision";
+
         private readonly ILogger<AttachmentExtractor> _logger;
         private readonly IFileSystem _fileSystem;
         private readonly IMediaEncoder _mediaEncoder;
@@ -102,6 +105,16 @@ namespace MediaBrowser.MediaEncoding.Attachments
             // nor find a font that is still being copied.
             using (await _semaphoreLocks.LockAsync(outputFolder, cancellationToken).ConfigureAwait(false))
             {
+                // Copies from another revision of the entry, or left by an interrupted copy, are replaced:
+                // a replaced entry can bring other fonts under the same names.
+                var revisionFile = Path.Combine(outputFolder, DeclaredRevisionFile);
+                if (Directory.Exists(outputFolder)
+                    && (!File.Exists(revisionFile)
+                        || !string.Equals(await File.ReadAllTextAsync(revisionFile, cancellationToken).ConfigureAwait(false), entry.Hash, StringComparison.Ordinal)))
+                {
+                    Directory.Delete(outputFolder, true);
+                }
+
                 Directory.CreateDirectory(outputFolder);
                 foreach (var attachment in mediaSource.MediaAttachments)
                 {
@@ -117,6 +130,8 @@ namespace MediaBrowser.MediaEncoding.Attachments
                         File.Copy(Path.Combine(entry.GetAttachmentsDirectory(), name), target);
                     }
                 }
+
+                await File.WriteAllTextAsync(revisionFile, entry.Hash, cancellationToken).ConfigureAwait(false);
             }
         }
 

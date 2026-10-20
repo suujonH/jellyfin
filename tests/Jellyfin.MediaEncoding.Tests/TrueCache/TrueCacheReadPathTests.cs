@@ -138,6 +138,23 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
         }
 
         [Fact]
+        public async Task ExtractAllAttachments_EntryReplaced_ReplacesTheCopiedFont()
+        {
+            // A font copied for an earlier transcode must not outlive a corrected entry, for example after an interrupted upload.
+            var path = _fixture.CreateCompleteVideo();
+            var mediaSource = CreatePlayedSource(path, false);
+            var output = Path.Combine(_fixture.Root, "attachments-out");
+            using var extractor = CreateAttachmentExtractor(mediaSource.Id, output);
+            await extractor.ExtractAllAttachments(mediaSource.Path, mediaSource, CancellationToken.None);
+
+            await File.WriteAllTextAsync(Path.Combine(TrueCacheLayout.GetEntryDirectory(path)!, "attachments", "font.ttf"), "ttf, complete", CancellationToken.None);
+            Assert.True(_trueCache.Validate(path).IsValid);
+            await extractor.ExtractAllAttachments(mediaSource.Path, mediaSource, CancellationToken.None);
+
+            Assert.Equal("ttf, complete", await File.ReadAllTextAsync(Path.Combine(output, "font.ttf"), CancellationToken.None));
+        }
+
+        [Fact]
         public async Task ExtractAllAttachments_ConcurrentTranscodes_EachFindTheCompleteFont()
         {
             const int FontLength = 16 * 1024 * 1024;
