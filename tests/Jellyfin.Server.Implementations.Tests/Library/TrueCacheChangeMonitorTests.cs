@@ -1,4 +1,4 @@
-using System;
+using System.Collections.Generic;
 using Emby.Photos;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Drawing;
@@ -7,6 +7,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Trickplay;
 using MediaBrowser.Controller.TrueCache;
+using MediaBrowser.Model.Entities;
 using MediaBrowser.Providers.Trickplay;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
@@ -21,34 +22,37 @@ namespace Jellyfin.Server.Implementations.Tests.Library;
 public sealed class TrueCacheChangeMonitorTests
 {
     private const string ResourcePath = "/media/Film.mkv";
+    private const string DeclaredHash = "declared";
 
     private readonly Mock<ITrueCacheService> _trueCache = new();
-    private readonly DateTime _declared = DateTime.UtcNow;
 
     public TrueCacheChangeMonitorTests()
     {
-        _trueCache.Setup(t => t.HasDeclarationChanged(ResourcePath, It.IsAny<DateTime>())).Returns((string _, DateTime since) => _declared > since);
+        var entry = new TrueCacheEntry(ResourcePath, "/media/__true_cache__/Film.mkv", DeclaredHash, new TrueCacheManifest(), null, null, null, new Dictionary<ImageType, string>(), new Dictionary<int, string>());
+        _trueCache.Setup(t => t.Lookup(ResourcePath)).Returns(TrueCacheLookup.Valid(entry));
         BaseItem.MediaSourceManager = Mock.Of<IMediaSourceManager>();
     }
 
     [Theory]
-    [InlineData(-1, true)]
-    [InlineData(1, false)]
-    public void PhotoProvider_HasChanged_FollowsDeclaration(int refreshedMinutesAfterDeclaration, bool changed)
+    [InlineData(null, true)]
+    [InlineData("older", true)]
+    [InlineData(DeclaredHash, false)]
+    public void PhotoProvider_HasChanged_FollowsDeclaration(string? refreshedHash, bool changed)
     {
         var provider = new PhotoProvider(NullLogger<PhotoProvider>.Instance, Mock.Of<IImageProcessor>(), _trueCache.Object);
-        var photo = new Photo { Path = ResourcePath, DateLastRefreshed = _declared.AddMinutes(refreshedMinutesAfterDeclaration) };
+        var photo = new Photo { Path = ResourcePath, TrueCacheHash = refreshedHash };
 
         Assert.Equal(changed, provider.HasChanged(photo, Mock.Of<IDirectoryService>()));
     }
 
     [Theory]
-    [InlineData(-1, true)]
-    [InlineData(1, false)]
-    public void TrickplayProvider_HasChanged_FollowsDeclaration(int refreshedMinutesAfterDeclaration, bool changed)
+    [InlineData(null, true)]
+    [InlineData("older", true)]
+    [InlineData(DeclaredHash, false)]
+    public void TrickplayProvider_HasChanged_FollowsDeclaration(string? refreshedHash, bool changed)
     {
         var provider = new TrickplayProvider(Mock.Of<IServerConfigurationManager>(), Mock.Of<ITrickplayManager>(), Mock.Of<ILibraryManager>(), _trueCache.Object);
-        var video = new Video { Path = ResourcePath, DateLastRefreshed = _declared.AddMinutes(refreshedMinutesAfterDeclaration) };
+        var video = new Video { Path = ResourcePath, TrueCacheHash = refreshedHash };
 
         Assert.Equal(changed, provider.HasChanged(video, Mock.Of<IDirectoryService>()));
     }

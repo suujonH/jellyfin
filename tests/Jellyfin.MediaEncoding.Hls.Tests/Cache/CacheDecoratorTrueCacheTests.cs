@@ -51,7 +51,7 @@ public class CacheDecoratorTrueCacheTests
     }
 
     private static TrueCacheEntry CreateEntry(KeyframeData keyframes)
-        => new(FilePath, "/media/__true_cache__/Film.mkv", new TrueCacheManifest(), null, null, keyframes, new Dictionary<ImageType, string>(), new Dictionary<int, string>());
+        => new(FilePath, "/media/__true_cache__/Film.mkv", "hash", new TrueCacheManifest(), null, null, keyframes, new Dictionary<ImageType, string>(), new Dictionary<int, string>());
 
     // The strict extractor fails the test if the decorator ever asks it to read the file.
     private static (CacheDecorator Decorator, Mock<IKeyframeRepository> Repository) Create(TrueCacheLookup lookup, BaseItem? item = null)

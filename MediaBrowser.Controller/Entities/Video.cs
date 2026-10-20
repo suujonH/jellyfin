@@ -167,11 +167,6 @@ namespace MediaBrowser.Controller.Entities
 
         public static IRecordingsManager RecordingsManager { get; set; }
 
-        /// <summary>
-        /// Gets or sets the <c>__true_cache__</c> lookup; resources with a rejected entry are treated like missing files.
-        /// </summary>
-        public static ITrueCacheService TrueCache { get; set; } = NoTrueCacheService.Instance;
-
         [JsonIgnore]
         public override SourceType SourceType
         {

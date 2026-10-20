@@ -94,7 +94,7 @@ namespace Jellyfin.Providers.Tests.MediaInfo
             var cover = Path.Combine(_root, "cover.jpg");
             await File.WriteAllTextAsync(cover, "jpg", TestContext.Current.CancellationToken);
             var path = Path.Combine(_root, "Song.mp3");
-            var entry = new TrueCacheEntry(path, _root, new TrueCacheManifest { Kind = TrueCacheKind.Audio }, null, null, null, new Dictionary<ImageType, string> { [ImageType.Primary] = cover }, new Dictionary<int, string>());
+            var entry = new TrueCacheEntry(path, _root, "hash", new TrueCacheManifest { Kind = TrueCacheKind.Audio }, null, null, null, new Dictionary<ImageType, string> { [ImageType.Primary] = cover }, new Dictionary<int, string>());
             var provider = new AudioImageProvider(Mock.Of<IMediaSourceManager>(MockBehavior.Strict), Mock.Of<IMediaEncoder>(MockBehavior.Strict), Mock.Of<IServerConfigurationManager>(), Mock.Of<IFileSystem>(), Valid(entry));
 
             var response = await provider.GetImage(new Audio { Path = path }, ImageType.Primary, CancellationToken.None);
@@ -111,7 +111,7 @@ namespace Jellyfin.Providers.Tests.MediaInfo
             var entryDirectory = TrueCacheLayout.GetEntryDirectory(path)!;
             Directory.CreateDirectory(Path.Combine(entryDirectory, TrueCacheLayout.BookFolder));
             await File.WriteAllTextAsync(Path.Combine(entryDirectory, TrueCacheLayout.BookFolder, "cover.webp"), "webp", TestContext.Current.CancellationToken);
-            var entry = new TrueCacheEntry(path, entryDirectory, new TrueCacheManifest { Kind = TrueCacheKind.Book, Book = new TrueCacheBookInfo { Cover = true } }, null, null, null, new Dictionary<ImageType, string>(), new Dictionary<int, string>());
+            var entry = new TrueCacheEntry(path, entryDirectory, "hash", new TrueCacheManifest { Kind = TrueCacheKind.Book, Book = new TrueCacheBookInfo { Cover = true } }, null, null, null, new Dictionary<ImageType, string>(), new Dictionary<int, string>());
             var provider = new ComicImageProvider(NullLogger<ComicImageProvider>.Instance, Valid(entry));
 
             var response = await provider.GetImage(new Book { Path = path }, ImageType.Primary, CancellationToken.None);
@@ -134,7 +134,7 @@ namespace Jellyfin.Providers.Tests.MediaInfo
             var directory = TrueCacheLayout.GetEntryDirectory(path)!;
             Directory.CreateDirectory(directory);
             var movie = new Movie { Path = path, DefaultVideoStreamIndex = 0 };
-            return (movie, new TrueCacheEntry(path, directory, manifest, null, null, null, images, new Dictionary<int, string>()));
+            return (movie, new TrueCacheEntry(path, directory, "hash", manifest, null, null, null, images, new Dictionary<int, string>()));
         }
     }
 }

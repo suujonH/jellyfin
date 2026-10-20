@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using MediaBrowser.Controller.TrueCache;
@@ -163,6 +164,56 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
 
             Assert.True(_loader.Load(path, staging, TrueCacheFixture.Requirements).IsValid);
             Assert.Equal(TrueCacheState.None, _loader.Load(path, TrueCacheFixture.Requirements).State);
+        }
+
+        [Fact]
+        public void Load_SameEntryWithOtherTimestamps_HasTheSameHash()
+        {
+            // A copy that keeps or resets the modification times is still the same entry.
+            var path = _fixture.CreateCompleteVideo();
+            var directory = TrueCacheLayout.GetEntryDirectory(path)!;
+            var before = _loader.Load(path, TrueCacheFixture.Requirements).Entry!.Hash;
+
+            var longAgo = new System.DateTime(2020, 1, 1, 0, 0, 0, System.DateTimeKind.Utc);
+            foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+            {
+                File.SetLastWriteTimeUtc(file, longAgo);
+            }
+
+            Directory.SetLastWriteTimeUtc(directory, longAgo);
+
+            Assert.Equal(before, _loader.Load(path, TrueCacheFixture.Requirements).Entry!.Hash);
+        }
+
+        [Theory]
+        [InlineData("chapters/0.jpg", "jpeg")]
+        [InlineData("trickplay/320 - 10x10/1.jpg", "jpg")]
+        public void Load_FileRewrittenOrAdded_ChangesTheHash(string name, string content)
+        {
+            // The server does not read images, so their names and sizes stand for them.
+            var path = _fixture.CreateCompleteVideo();
+            var before = _loader.Load(path, TrueCacheFixture.Requirements).Entry!.Hash;
+
+            _fixture.WriteEntry(path, new Dictionary<string, string> { [name] = content });
+
+            Assert.NotEqual(before, _loader.Load(path, TrueCacheFixture.Requirements).Entry!.Hash);
+        }
+
+        [Fact]
+        public void Load_ProbeEditedToTheSameSize_ChangesTheHash()
+        {
+            // The server reads the probe result, so its contents count, not only its size.
+            var path = _fixture.CreateCompleteVideo();
+            var before = _loader.Load(path, TrueCacheFixture.Requirements).Entry!.Hash;
+
+            _fixture.WriteEntry(path, new Dictionary<string, string>
+            {
+                [TrueCacheLayout.ProbeFile] = TrueCacheFixture.VideoProbe.Replace("\"width\": 1920", "\"width\": 1921", System.StringComparison.Ordinal)
+            });
+
+            var after = _loader.Load(path, TrueCacheFixture.Requirements);
+            Assert.True(after.IsValid, after.Reason);
+            Assert.NotEqual(before, after.Entry.Hash);
         }
 
         [Fact]

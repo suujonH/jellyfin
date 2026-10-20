@@ -351,6 +351,9 @@ namespace Jellyfin.Server.Implementations.Migrations
                     b.Property<int?>("TotalBitrate")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("TrueCacheHash")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Type")
                         .IsRequired()
                         .HasColumnType("TEXT");

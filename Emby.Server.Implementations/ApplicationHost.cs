@@ -704,7 +704,7 @@ namespace Emby.Server.Implementations
             BaseItem.Logger = Resolve<ILogger<BaseItem>>();
             BaseItem.MediaSegmentManager = Resolve<IMediaSegmentManager>();
             BaseItem.MediaSourceManager = Resolve<IMediaSourceManager>();
-            Video.TrueCache = Resolve<ITrueCacheService>();
+            BaseItem.TrueCache = Resolve<ITrueCacheService>();
             BaseItem.ProviderManager = Resolve<IProviderManager>();
             BaseItem.UserDataManager = Resolve<IUserDataManager>();
             CollectionFolder.XmlSerializer = _xmlSerializer;

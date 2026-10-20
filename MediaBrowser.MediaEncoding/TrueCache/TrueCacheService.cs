@@ -24,14 +24,6 @@ public sealed class TrueCacheService : ITrueCacheService
     private readonly ConcurrentDictionary<string, (bool Exists, DateTime CheckedAt)> _folders = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (Stamp Stamp, TrueCacheLookup Result, DateTime CheckedAt)> _entries = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, TrueCacheRejection> _rejections = new(StringComparer.Ordinal);
-    // When a valid entry appeared or went away while the service watched. Neither leaves a usable time on disk:
-    // a removed entry is gone, and a copied entry can keep an older modification time than the item's last refresh.
-    private readonly ConcurrentDictionary<string, DateTime> _transitions = new(StringComparer.Ordinal);
-
-    // Resources seen without an entry, and folders seen without a cache folder before one appeared:
-    // an entry found later for them is new, while one found at the first look may have been there all along.
-    private readonly ConcurrentDictionary<string, bool> _undeclared = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, bool> _appearedCacheFolders = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Initializes a new instance of the <see cref="TrueCacheService"/> class.
@@ -67,31 +59,6 @@ public sealed class TrueCacheService : ITrueCacheService
     public IReadOnlyList<TrueCacheRejection> GetRejections()
         => _rejections.Values.OrderByDescending(r => r.CheckedAt).ToArray();
 
-    /// <inheritdoc />
-    public bool HasDeclarationChanged(string resourcePath, DateTime since)
-    {
-        var lookup = Lookup(resourcePath);
-        if (lookup.State == TrueCacheState.Rejected)
-        {
-            return false;
-        }
-
-        // An item still holds what a removed entry provided, such as chapter images and trickplay tiles,
-        // or has never been given what a newly added entry provides.
-        if (_transitions.TryGetValue(resourcePath, out var changed) && changed > since)
-        {
-            return true;
-        }
-
-        if (!lookup.IsValid)
-        {
-            return false;
-        }
-
-        var meta = new FileInfo(Path.Combine(lookup.Entry.Directory, TrueCacheLayout.MetaFile));
-        return meta.Exists && meta.LastWriteTimeUtc > since;
-    }
-
     private TrueCacheLookup Lookup(string resourcePath, bool force)
     {
         if (string.IsNullOrEmpty(resourcePath) || !Path.IsPathFullyQualified(resourcePath))
@@ -101,16 +68,9 @@ public sealed class TrueCacheService : ITrueCacheService
 
         var directory = TrueCacheLayout.GetEntryDirectory(resourcePath);
         var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(resourcePath));
-        if (directory is null || parent is null || !HasCacheFolder(parent, force))
+        if (directory is null || parent is null || !HasCacheFolder(parent, force) || !Directory.Exists(directory))
         {
             Forget(resourcePath);
-            return TrueCacheLookup.None;
-        }
-
-        if (!Directory.Exists(directory))
-        {
-            Forget(resourcePath);
-            _undeclared[resourcePath] = true;
             return TrueCacheLookup.None;
         }
 
@@ -119,8 +79,7 @@ public sealed class TrueCacheService : ITrueCacheService
         var now = DateTime.UtcNow;
 
         // A rejected entry is checked again after a while: files added to its subfolders do not change the stamp.
-        var known = _entries.TryGetValue(resourcePath, out var kept);
-        if (!force && known && kept.Stamp == stamp
+        if (!force && _entries.TryGetValue(resourcePath, out var kept) && kept.Stamp == stamp
             && (kept.Result.State != TrueCacheState.Rejected || now - kept.CheckedAt < _folderCheckInterval))
         {
             return kept.Result;
@@ -128,11 +87,6 @@ public sealed class TrueCacheService : ITrueCacheService
 
         var result = _loader.Load(resourcePath, requirements);
         _entries[resourcePath] = (stamp, result, now);
-        if (result.IsValid && (_undeclared.TryRemove(resourcePath, out _) || (!known && _appearedCacheFolders.ContainsKey(parent))))
-        {
-            _transitions[resourcePath] = now;
-        }
-
         if (result.State == TrueCacheState.Rejected)
         {
             var isNew = !_rejections.TryGetValue(resourcePath, out var previous) || !string.Equals(previous.Reason, result.Reason, StringComparison.Ordinal);
@@ -152,30 +106,20 @@ public sealed class TrueCacheService : ITrueCacheService
 
     private void Forget(string resourcePath)
     {
-        if (_entries.TryRemove(resourcePath, out var kept) && kept.Result.IsValid)
-        {
-            _transitions[resourcePath] = DateTime.UtcNow;
-        }
-
+        _entries.TryRemove(resourcePath, out _);
         _rejections.TryRemove(resourcePath, out _);
     }
 
     private bool HasCacheFolder(string folder, bool force)
     {
         var now = DateTime.UtcNow;
-        var known = _folders.TryGetValue(folder, out var kept);
-        if (!force && known && now - kept.CheckedAt < _folderCheckInterval)
+        if (!force && _folders.TryGetValue(folder, out var kept) && now - kept.CheckedAt < _folderCheckInterval)
         {
             return kept.Exists;
         }
 
         var exists = Directory.Exists(Path.Combine(folder, TrueCacheLayout.FolderName));
         _folders[folder] = (exists, now);
-        if (exists && known && !kept.Exists)
-        {
-            _appearedCacheFolders[folder] = true;
-        }
-
         return exists;
     }
 

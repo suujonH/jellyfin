@@ -1,8 +1,11 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.IO.Hashing;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using Jellyfin.Extensions.Json;
 using Jellyfin.Extensions.Json.Converters;
@@ -106,7 +109,8 @@ public sealed class TrueCacheLoader
     {
         try
         {
-            var manifest = ReadManifest(directory);
+            var hash = new XxHash3();
+            var manifest = ReadManifest(directory, hash);
             if (manifest.Kind != TrueCacheKind.Album)
             {
                 return TrueCacheLookup.Rejected("an album entry must have kind = \"album\"");
@@ -117,7 +121,7 @@ public sealed class TrueCacheLoader
                 return TrueCacheLookup.Rejected("missing album.lufs");
             }
 
-            return TrueCacheLookup.Valid(new TrueCacheEntry(albumPath, directory, manifest, null, null, null, new Dictionary<ImageType, string>(), new Dictionary<int, string>()));
+            return TrueCacheLookup.Valid(new TrueCacheEntry(albumPath, directory, ToHashString(hash), manifest, null, null, null, new Dictionary<ImageType, string>(), new Dictionary<int, string>()));
         }
         catch (Exception ex) when (ex is FormatException or IOException or UnauthorizedAccessException)
         {
@@ -125,16 +129,38 @@ public sealed class TrueCacheLoader
         }
     }
 
-    private static TrueCacheManifest ReadManifest(string directory)
+    private static TrueCacheManifest ReadManifest(string directory, XxHash3 hash)
     {
-        var path = Path.Combine(directory, TrueCacheLayout.MetaFile);
-        if (!File.Exists(path))
+        if (!File.Exists(Path.Combine(directory, TrueCacheLayout.MetaFile)))
         {
             throw new FormatException("missing " + TrueCacheLayout.MetaFile);
         }
 
-        return TrueCacheManifestReader.Read(File.ReadAllText(path));
+        return TrueCacheManifestReader.Read(ReadText(directory, TrueCacheLayout.MetaFile, hash));
     }
+
+    /// <summary>
+    /// Reads a file of an entry the way <see cref="File.ReadAllText(string)"/> does, and adds the file to the hash of the entry.
+    /// </summary>
+    private static string ReadText(string directory, string relative, XxHash3 hash)
+    {
+        var bytes = File.ReadAllBytes(ToPath(directory, relative));
+        AppendFile(hash, relative, bytes.LongLength);
+        hash.Append(bytes);
+        using var reader = new StreamReader(new MemoryStream(bytes));
+        return reader.ReadToEnd();
+    }
+
+    private static void AppendFile(XxHash3 hash, string relative, long length)
+    {
+        Span<byte> size = stackalloc byte[sizeof(long)];
+        BinaryPrimitives.WriteInt64LittleEndian(size, length);
+        hash.Append(Encoding.UTF8.GetBytes(relative));
+        hash.Append("\0"u8);
+        hash.Append(size);
+    }
+
+    private static string ToHashString(XxHash3 hash) => Convert.ToHexStringLower(hash.GetCurrentHash());
 
     private static string Relative(params string[] parts) => string.Join('/', parts);
 
@@ -142,7 +168,8 @@ public sealed class TrueCacheLoader
 
     private TrueCacheLookup LoadEntry(string resourcePath, string directory, TrueCacheRequirements requirements)
     {
-        var manifest = ReadManifest(directory);
+        var hash = new XxHash3();
+        var manifest = ReadManifest(directory, hash);
         var missing = new List<string>();
 
         var isFolder = Directory.Exists(resourcePath);
@@ -162,10 +189,10 @@ public sealed class TrueCacheLoader
             CheckSource(resourcePath, manifest, missing);
         }
 
-        var files = new HashSet<string>(
-            Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories)
-                .Select(f => Path.GetRelativePath(directory, f).Replace(Path.DirectorySeparatorChar, '/')),
-            _pathComparer);
+        var listing = new DirectoryInfo(directory).EnumerateFiles("*", SearchOption.AllDirectories)
+            .Select(f => (Name: Path.GetRelativePath(directory, f.FullName).Replace(Path.DirectorySeparatorChar, '/'), f.Length))
+            .ToList();
+        var files = new HashSet<string>(listing.Select(f => f.Name), _pathComparer);
 
         var images = new Dictionary<ImageType, string>();
         var subtitles = new Dictionary<int, string>();
@@ -178,15 +205,15 @@ public sealed class TrueCacheLoader
             case TrueCacheKind.Video:
             case TrueCacheKind.Dvd:
             case TrueCacheKind.BluRay:
-                mediaInfo = ReadProbe(directory, files, resourcePath, manifest.Kind, missing);
+                mediaInfo = ReadProbe(directory, files, resourcePath, manifest.Kind, hash, missing);
                 if (mediaInfo is not null)
                 {
-                    (bluRay, keyframes) = CheckVideo(resourcePath, directory, files, manifest, mediaInfo, requirements, images, subtitles, missing);
+                    (bluRay, keyframes) = CheckVideo(resourcePath, directory, files, manifest, mediaInfo, requirements, hash, images, subtitles, missing);
                 }
 
                 break;
             case TrueCacheKind.Audio:
-                mediaInfo = ReadProbe(directory, files, resourcePath, manifest.Kind, missing);
+                mediaInfo = ReadProbe(directory, files, resourcePath, manifest.Kind, hash, missing);
                 if (mediaInfo is not null)
                 {
                     CheckAudio(directory, files, manifest, mediaInfo, images, missing);
@@ -210,7 +237,13 @@ public sealed class TrueCacheLoader
             return TrueCacheLookup.Rejected("missing " + string.Join(", ", missing));
         }
 
-        return TrueCacheLookup.Valid(new TrueCacheEntry(resourcePath, directory, manifest, mediaInfo, bluRay, keyframes, images, subtitles));
+        // The listing covers the files the server does not read, such as images and trickplay tiles.
+        foreach (var (name, length) in listing.OrderBy(f => f.Name, StringComparer.Ordinal))
+        {
+            AppendFile(hash, name, length);
+        }
+
+        return TrueCacheLookup.Valid(new TrueCacheEntry(resourcePath, directory, ToHashString(hash), manifest, mediaInfo, bluRay, keyframes, images, subtitles));
     }
 
     private static void CheckSource(string resourcePath, TrueCacheManifest manifest, List<string> missing)
@@ -232,7 +265,7 @@ public sealed class TrueCacheLoader
         }
     }
 
-    private MediaInfo? ReadProbe(string directory, HashSet<string> files, string resourcePath, TrueCacheKind kind, List<string> missing)
+    private MediaInfo? ReadProbe(string directory, HashSet<string> files, string resourcePath, TrueCacheKind kind, XxHash3 hash, List<string> missing)
     {
         if (!files.Contains(TrueCacheLayout.ProbeFile))
         {
@@ -240,7 +273,7 @@ public sealed class TrueCacheLoader
             return null;
         }
 
-        return NormalizeProbe(File.ReadAllText(Path.Combine(directory, TrueCacheLayout.ProbeFile)), resourcePath, kind);
+        return NormalizeProbe(ReadText(directory, TrueCacheLayout.ProbeFile, hash), resourcePath, kind);
     }
 
     /// <summary>
@@ -294,6 +327,7 @@ public sealed class TrueCacheLoader
         TrueCacheManifest manifest,
         MediaInfo mediaInfo,
         TrueCacheRequirements requirements,
+        XxHash3 hash,
         Dictionary<ImageType, string> images,
         Dictionary<int, string> subtitles,
         List<string> missing)
@@ -330,7 +364,7 @@ public sealed class TrueCacheLoader
 
         if (kind == TrueCacheKind.BluRay)
         {
-            bluRay = ReadBluRay(resourcePath, directory, files, missing);
+            bluRay = ReadBluRay(resourcePath, directory, files, hash, missing);
         }
 
         var streams = mediaInfo.MediaStreams;
@@ -413,7 +447,7 @@ public sealed class TrueCacheLoader
         {
             if (files.Contains(TrueCacheLayout.KeyframesFile))
             {
-                keyframes = ReadKeyframes(Path.Combine(directory, TrueCacheLayout.KeyframesFile));
+                keyframes = ReadKeyframes(directory, hash);
             }
             else
             {
@@ -458,7 +492,7 @@ public sealed class TrueCacheLoader
         missing.Add(baseName + ".*");
     }
 
-    private BlurayDiscInfo? ReadBluRay(string resourcePath, string directory, HashSet<string> files, List<string> missing)
+    private BlurayDiscInfo? ReadBluRay(string resourcePath, string directory, HashSet<string> files, XxHash3 hash, List<string> missing)
     {
         if (!files.Contains(TrueCacheLayout.BdInfoFile))
         {
@@ -466,7 +500,7 @@ public sealed class TrueCacheLoader
             return null;
         }
 
-        var info = JsonSerializer.Deserialize<BlurayDiscInfo>(File.ReadAllText(Path.Combine(directory, TrueCacheLayout.BdInfoFile)), JsonDefaults.Options)
+        var info = JsonSerializer.Deserialize<BlurayDiscInfo>(ReadText(directory, TrueCacheLayout.BdInfoFile, hash), JsonDefaults.Options)
             ?? throw new FormatException(TrueCacheLayout.BdInfoFile + " is empty");
         if (info.Files is not { Length: > 0 })
         {
@@ -479,9 +513,9 @@ public sealed class TrueCacheLoader
         return info;
     }
 
-    private KeyframeData ReadKeyframes(string path)
+    private KeyframeData ReadKeyframes(string directory, XxHash3 hash)
     {
-        var data = JsonSerializer.Deserialize<KeyframeData>(File.ReadAllText(path), JsonDefaults.Options)
+        var data = JsonSerializer.Deserialize<KeyframeData>(ReadText(directory, TrueCacheLayout.KeyframesFile, hash), JsonDefaults.Options)
             ?? throw new FormatException(TrueCacheLayout.KeyframesFile + " is empty");
         if (data.KeyframeTicks is null || data.TotalDuration <= 0)
         {

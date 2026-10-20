@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 
 namespace MediaBrowser.Controller.TrueCache;
@@ -23,9 +22,6 @@ public sealed class NoTrueCacheService : ITrueCacheService
 
     /// <inheritdoc />
     public TrueCacheLookup LookupAlbum(string albumPath) => TrueCacheLookup.None;
-
-    /// <inheritdoc />
-    public bool HasDeclarationChanged(string resourcePath, DateTime since) => false;
 
     /// <inheritdoc />
     public IReadOnlyList<TrueCacheRejection> GetRejections() => [];

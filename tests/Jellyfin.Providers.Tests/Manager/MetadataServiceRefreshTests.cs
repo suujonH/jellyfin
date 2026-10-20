@@ -12,6 +12,7 @@ using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
@@ -24,6 +25,8 @@ namespace Jellyfin.Providers.Tests.Manager
 {
     public class MetadataServiceRefreshTests
     {
+        private const string ResourcePath = "/media/Film.mkv";
+
         [Theory]
         // RemoveOldMetadata is only ever set by an explicit user action - a refresh with "replace all
         // metadata", or Identify. A provider failing must not silently downgrade that to a merge: the
@@ -434,6 +437,79 @@ namespace Jellyfin.Providers.Tests.Manager
             Assert.Equal(stampBefore, item.DateLastRefreshed);
         }
 
+        [Theory]
+        // The hash is all that changed, yet it is saved: otherwise every later refresh would find the same change.
+        [InlineData(MetadataRefreshMode.Default, "declared")]
+        // Only metadata providers read the declaration, so an image refresh has not taken it in.
+        [InlineData(MetadataRefreshMode.None, "older")]
+        public async Task RefreshMetadata_Declared_RecordsTheEntryHash(MetadataRefreshMode metadataMode, string expectedHash)
+        {
+            var item = NewStampedTestItem();
+            item.Path = ResourcePath;
+            item.TrueCacheHash = "older";
+            var service = NewService(NewProviderManager(), Declared(TrueCacheLookup.Valid(NewEntry("declared"))));
+
+            await service.RefreshMetadata(
+                item,
+                new MetadataRefreshOptions(Mock.Of<IDirectoryService>()) { MetadataRefreshMode = metadataMode },
+                CancellationToken.None).ConfigureAwait(true);
+
+            Assert.Equal(expectedHash, item.TrueCacheHash);
+            Assert.Equal(metadataMode != MetadataRefreshMode.None, item.Saved);
+        }
+
+        [Theory]
+        // Whatever the item last took in is still on it, so a removed entry is recorded as no entry.
+        [InlineData(TrueCacheState.None, null)]
+        // A rejected entry is never read, and its resource leaves the library.
+        [InlineData(TrueCacheState.Rejected, "older")]
+        public async Task RefreshMetadata_NoValidEntry_RecordsNoHashUnlessRejected(TrueCacheState state, string? expectedHash)
+        {
+            var item = NewStampedTestItem();
+            item.Path = ResourcePath;
+            item.TrueCacheHash = "older";
+            var lookup = state == TrueCacheState.Rejected ? TrueCacheLookup.Rejected("missing probe.json") : TrueCacheLookup.None;
+            var service = NewService(NewProviderManager(), Declared(lookup));
+
+            await service.RefreshMetadata(item, new MetadataRefreshOptions(Mock.Of<IDirectoryService>()), CancellationToken.None).ConfigureAwait(true);
+
+            Assert.Equal(expectedHash, item.TrueCacheHash);
+        }
+
+        [Fact]
+        public async Task RefreshMetadata_EntryReplacedWhileProvidersRun_RecordsTheEntryLookedUpFirst()
+        {
+            // The providers may have read the first entry; recording the second would hide it from the next refresh.
+            var item = NewStampedTestItem();
+            item.Path = ResourcePath;
+            var current = TrueCacheLookup.Valid(NewEntry("first"));
+            var trueCache = new Mock<ITrueCacheService>();
+            trueCache.Setup(t => t.Lookup(ResourcePath)).Returns(() => current);
+
+            var provider = new Mock<ICustomMetadataProvider<TestItem>>(MockBehavior.Loose);
+            provider.Setup(p => p.Name).Returns("Probe Provider");
+            provider.Setup(p => p.FetchAsync(It.IsAny<TestItem>(), It.IsAny<MetadataRefreshOptions>(), It.IsAny<CancellationToken>()))
+                .Callback(() => current = TrueCacheLookup.Valid(NewEntry("second")))
+                .ReturnsAsync(ItemUpdateType.None);
+            provider.As<IHasItemChangeMonitor>().Setup(p => p.HasChanged(It.IsAny<BaseItem>(), It.IsAny<IDirectoryService>())).Returns(true);
+
+            var service = NewService(NewProviderManager(metadataProviders: [provider.Object]), trueCache.Object);
+
+            await service.RefreshMetadata(item, new MetadataRefreshOptions(Mock.Of<IDirectoryService>()), CancellationToken.None).ConfigureAwait(true);
+
+            Assert.Equal("first", item.TrueCacheHash);
+        }
+
+        private static TrueCacheEntry NewEntry(string hash)
+            => new(ResourcePath, "/media/__true_cache__/Film.mkv", hash, new TrueCacheManifest(), null, null, null, new Dictionary<ImageType, string>(), new Dictionary<int, string>());
+
+        private static ITrueCacheService Declared(TrueCacheLookup lookup)
+        {
+            var trueCache = new Mock<ITrueCacheService>();
+            trueCache.Setup(t => t.Lookup(ResourcePath)).Returns(lookup);
+            return trueCache.Object;
+        }
+
         private static TestItem NewStampedTestItem()
         {
             var item = new TestItem
@@ -463,7 +539,7 @@ namespace Jellyfin.Providers.Tests.Manager
             return providerManager;
         }
 
-        private static TestItemMetadataService NewService(Mock<IProviderManager> providerManager)
+        private static TestItemMetadataService NewService(Mock<IProviderManager> providerManager, ITrueCacheService? trueCache = null)
         {
             var libraryManager = new Mock<ILibraryManager>(MockBehavior.Loose);
             libraryManager.Setup(l => l.GetLibraryOptions(It.IsAny<BaseItem>())).Returns(new LibraryOptions());
@@ -471,7 +547,7 @@ namespace Jellyfin.Providers.Tests.Manager
             var itemRepository = new Mock<IItemRepository>(MockBehavior.Loose);
             itemRepository.Setup(r => r.ItemExistsAsync(It.IsAny<Guid>())).ReturnsAsync(true);
 
-            return new TestItemMetadataService(libraryManager.Object, providerManager.Object, itemRepository.Object);
+            return new TestItemMetadataService(libraryManager.Object, providerManager.Object, itemRepository.Object, trueCache);
         }
 
         /// <summary>
@@ -523,17 +599,22 @@ namespace Jellyfin.Providers.Tests.Manager
 
         private sealed class TestItemMetadataService : MetadataService<TestItem, ItemLookupInfo>
         {
-            public TestItemMetadataService(ILibraryManager libraryManager, IProviderManager providerManager, IItemRepository itemRepository)
+            private readonly ITrueCacheService _trueCache;
+
+            public TestItemMetadataService(ILibraryManager libraryManager, IProviderManager providerManager, IItemRepository itemRepository, ITrueCacheService? trueCache = null)
                 : base(
                     Mock.Of<IServerConfigurationManager>(),
                     NullLogger<MetadataService<TestItem, ItemLookupInfo>>.Instance,
                     providerManager,
-                    Mock.Of<IFileSystem>(),
+                    Mock.Of<IFileSystem>(f => f.GetFileSystemInfo(It.IsAny<string>()) == new FileSystemMetadata()),
                     libraryManager,
                     Mock.Of<IExternalDataManager>(),
                     itemRepository)
             {
+                _trueCache = trueCache ?? NoTrueCacheService.Instance;
             }
+
+            protected override ITrueCacheService TrueCache => _trueCache;
         }
     }
 }

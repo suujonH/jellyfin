@@ -70,6 +70,8 @@ public class BaseItemEntity
 
     public DateTime? DateLastRefreshed { get; set; }
 
+    public string? TrueCacheHash { get; set; }
+
     public DateTime? DateLastSaved { get; set; }
 
     public bool IsInMixedFolder { get; set; }

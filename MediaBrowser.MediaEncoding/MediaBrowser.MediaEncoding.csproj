@@ -27,6 +27,7 @@
     <PackageReference Include="BDInfo" />
     <PackageReference Include="libse" />
     <PackageReference Include="Microsoft.Extensions.Http" />
+    <PackageReference Include="System.IO.Hashing" />
     <PackageReference Include="Tomlyn" />
     <PackageReference Include="UTF.Unknown" />
   </ItemGroup>

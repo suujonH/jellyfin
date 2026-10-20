@@ -24,6 +24,7 @@ public sealed class TrueCacheEntry
     /// </summary>
     /// <param name="resourcePath">The resource the entry describes.</param>
     /// <param name="directory">The entry folder.</param>
+    /// <param name="hash">The hash of the entry.</param>
     /// <param name="manifest">The declaration.</param>
     /// <param name="mediaInfo">The normalized probe result, for media resources.</param>
     /// <param name="bluRay">The Blu-ray structure, for Blu-ray folders.</param>
@@ -33,6 +34,7 @@ public sealed class TrueCacheEntry
     public TrueCacheEntry(
         string resourcePath,
         string directory,
+        string hash,
         TrueCacheManifest manifest,
         MediaInfo? mediaInfo,
         BlurayDiscInfo? bluRay,
@@ -42,6 +44,7 @@ public sealed class TrueCacheEntry
     {
         ResourcePath = resourcePath;
         Directory = directory;
+        Hash = hash;
         Manifest = manifest;
         MediaInfo = mediaInfo;
         BluRay = bluRay;
@@ -55,6 +58,12 @@ public sealed class TrueCacheEntry
 
     /// <summary>Gets the entry folder.</summary>
     public string Directory { get; }
+
+    /// <summary>
+    /// Gets the hash of the entry: the contents of the files the server reads, and the names and sizes of all files.
+    /// Any edit or replacement of the entry changes it, whatever the modification times are.
+    /// </summary>
+    public string Hash { get; }
 
     /// <summary>Gets the declaration.</summary>
     public TrueCacheManifest Manifest { get; }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
@@ -19,9 +20,7 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
 
         public TrueCacheServiceTests()
         {
-            var config = new Mock<IServerConfigurationManager>();
-            config.SetupGet(c => c.Configuration).Returns(new ServerConfiguration { TrickplayOptions = new TrickplayOptions { WidthResolutions = [320] } });
-            _service = new TrueCacheService(NullLogger<TrueCacheService>.Instance, Mock.Of<ILocalizationManager>(), config.Object);
+            _service = CreateService();
         }
 
         public void Dispose() => _fixture.Dispose();
@@ -93,74 +92,64 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
             Assert.Equal(TrueCacheState.None, _service.Lookup("Film.mkv").State);
         }
 
-        private void WriteEntryWrittenLongAgo(string resourcePath)
+        [Fact]
+        public void HasDeclarationChanged_ItemRefreshedWithTheEntry_IsFalseAfterARestart()
         {
-            var directory = _fixture.WriteEntry(resourcePath, TrueCacheFixture.CompleteVideoFiles());
-            var longAgo = DateTime.UtcNow.AddDays(-30);
-            File.SetLastWriteTimeUtc(Path.Combine(directory, TrueCacheLayout.MetaFile), longAgo);
-            Directory.SetLastWriteTimeUtc(directory, longAgo);
+            // An entry that is already there when the server starts is not new: a restart must not refresh every declared item.
+            var path = _fixture.CreateCompleteVideo();
+            var item = new Video { Path = path, TrueCacheHash = _service.Lookup(path).Entry!.Hash };
+
+            Assert.False(_service.HasDeclarationChanged(item));
+            Assert.False(CreateService().HasDeclarationChanged(item));
         }
 
         [Fact]
-        public void HasDeclarationChanged_ComparesMetaWithLastRefresh()
+        public void HasDeclarationChanged_NeitherEntryNorHash_IsFalse()
         {
-            var path = _fixture.CreateCompleteVideo();
-            var written = File.GetLastWriteTimeUtc(Path.Combine(TrueCacheLayout.GetEntryDirectory(path)!, TrueCacheLayout.MetaFile));
+            var path = _fixture.CreateResource("Film.mkv");
 
-            Assert.True(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = written.AddMinutes(-1) }));
-            Assert.False(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = written.AddMinutes(1) }));
+            Assert.False(_service.HasDeclarationChanged(new Video { Path = path }));
         }
 
         [Fact]
-        public void HasDeclarationChanged_ValidEntryRemoved_IsTrueUntilTheNextRefresh()
+        public void HasDeclarationChanged_EntryAddedWithOldTimestamps_IsTrue()
         {
-            // A removed entry leaves nothing on disk, yet the item still points at the chapter images and trickplay it provided.
+            // Copies that keep timestamps (rsync, rclone) leave the entry older than the item's last refresh,
+            // and an entry added while the server was not running was never seen appearing.
+            var path = _fixture.CreateResource("Film.mkv");
+            var item = new Video { Path = path, DateLastRefreshed = DateTime.UtcNow };
+
+            WriteEntryWrittenLongAgo(path, TrueCacheFixture.CompleteVideoFiles());
+
+            Assert.True(CreateService().HasDeclarationChanged(item));
+        }
+
+        [Fact]
+        public void HasDeclarationChanged_EntryRemoved_IsTrue()
+        {
+            // The item still holds what the removed entry provided, such as chapter images and trickplay tiles.
             var path = _fixture.CreateCompleteVideo();
-            var refreshed = DateTime.UtcNow.AddMinutes(-1);
-            Assert.True(_service.Lookup(path).IsValid);
+            var item = new Video { Path = path, TrueCacheHash = _service.Lookup(path).Entry!.Hash };
 
             Directory.Delete(TrueCacheLayout.GetEntryDirectory(path)!, true);
 
-            Assert.True(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = refreshed }));
-            Assert.False(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = DateTime.UtcNow.AddMinutes(1) }));
+            Assert.True(_service.HasDeclarationChanged(item));
+            Assert.True(CreateService().HasDeclarationChanged(item));
         }
 
         [Fact]
-        public void HasDeclarationChanged_EntryCopiedInWithOldTimestamps_IsTrueUntilTheNextRefresh()
+        public void HasDeclarationChanged_EntryReplacedWithOldTimestamps_IsTrue()
         {
-            // Copies that keep timestamps (rsync, rclone) leave meta.toml older than the item's last refresh.
-            var path = _fixture.CreateResource("Film.mkv");
-            Directory.CreateDirectory(Path.Combine(_fixture.Root, TrueCacheLayout.FolderName));
-            var refreshed = DateTime.UtcNow.AddMinutes(-1);
-            Assert.Equal(TrueCacheState.None, _service.Lookup(path).State);
+            // A regenerated entry copied over the old one keeps the times it was generated at, before the item's last refresh.
+            var path = _fixture.CreateCompleteVideo();
+            var item = new Video { Path = path, TrueCacheHash = _service.Lookup(path).Entry!.Hash, DateLastRefreshed = DateTime.UtcNow };
+            var files = TrueCacheFixture.CompleteVideoFiles();
+            files[TrueCacheLayout.ProbeFile] = TrueCacheFixture.VideoProbe.Replace("\"width\": 1920", "\"width\": 1921", StringComparison.Ordinal);
 
-            WriteEntryWrittenLongAgo(path);
+            WriteEntryWrittenLongAgo(path, files);
 
-            Assert.True(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = refreshed }));
-            Assert.False(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = DateTime.UtcNow.AddMinutes(1) }));
-        }
-
-        [Fact]
-        public void HasDeclarationChanged_CacheFolderCopiedInWithOldTimestamps_IsTrue()
-        {
-            var path = _fixture.CreateResource("Film.mkv");
-            Assert.Equal(TrueCacheState.None, _service.Lookup(path).State);
-
-            WriteEntryWrittenLongAgo(path);
-
-            // The appearance of the cache folder is noticed once the folder is looked at again.
-            Assert.True(_service.Validate(path).IsValid);
-            Assert.True(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = DateTime.UtcNow.AddMinutes(-1) }));
-        }
-
-        [Fact]
-        public void HasDeclarationChanged_EntryPresentWhenFirstSeen_IsFalse()
-        {
-            // An entry that is already there when the server starts is not new: a restart must not refresh every declared item.
-            var path = _fixture.CreateResource("Film.mkv");
-            WriteEntryWrittenLongAgo(path);
-
-            Assert.False(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = DateTime.UtcNow.AddMinutes(-1) }));
+            Assert.True(_service.Lookup(path).IsValid);
+            Assert.True(_service.HasDeclarationChanged(item));
         }
 
         [Fact]
@@ -175,18 +164,38 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
 
             Directory.Delete(directory, true);
 
-            Assert.False(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = DateTime.MinValue }));
+            Assert.False(_service.HasDeclarationChanged(new Video { Path = path }));
         }
 
         [Fact]
         public void HasDeclarationChanged_RejectedEntry_IsFalse()
         {
-            var path = _fixture.CreateResource("Film.mkv");
-            var files = TrueCacheFixture.CompleteVideoFiles();
-            files.Remove(TrueCacheLayout.ProbeFile);
-            _fixture.WriteEntry(path, files);
+            // The resource leaves the library instead.
+            var path = _fixture.CreateCompleteVideo();
+            var item = new Video { Path = path, TrueCacheHash = _service.Lookup(path).Entry!.Hash };
+            File.Delete(Path.Combine(TrueCacheLayout.GetEntryDirectory(path)!, TrueCacheLayout.ProbeFile));
 
-            Assert.False(_service.HasDeclarationChanged(new Video { Path = path, DateLastRefreshed = DateTime.MinValue }));
+            Assert.Equal(TrueCacheState.Rejected, _service.Validate(path).State);
+            Assert.False(_service.HasDeclarationChanged(item));
+        }
+
+        private static TrueCacheService CreateService()
+        {
+            var config = new Mock<IServerConfigurationManager>();
+            config.SetupGet(c => c.Configuration).Returns(new ServerConfiguration { TrickplayOptions = new TrickplayOptions { WidthResolutions = [320] } });
+            return new TrueCacheService(NullLogger<TrueCacheService>.Instance, Mock.Of<ILocalizationManager>(), config.Object);
+        }
+
+        private void WriteEntryWrittenLongAgo(string resourcePath, Dictionary<string, string> files)
+        {
+            var directory = _fixture.WriteEntry(resourcePath, files);
+            var longAgo = DateTime.UtcNow.AddDays(-30);
+            foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+            {
+                File.SetLastWriteTimeUtc(file, longAgo);
+            }
+
+            Directory.SetLastWriteTimeUtc(directory, longAgo);
         }
     }
 }

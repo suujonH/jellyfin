@@ -16,6 +16,7 @@ using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
@@ -63,6 +64,8 @@ namespace MediaBrowser.Providers.Manager
 
         protected IItemRepository ItemRepository { get; }
 
+        protected virtual ITrueCacheService TrueCache => BaseItem.TrueCache;
+
         protected virtual bool EnableUpdatingPremiereDateFromChildren => false;
 
         protected virtual bool EnableUpdatingGenresFromChildren => false;
@@ -97,6 +100,9 @@ namespace MediaBrowser.Providers.Manager
             var hasRefreshedImages = true;
 
             var requiresRefresh = libraryOptions.AutomaticRefreshIntervalDays > 0 && (DateTime.UtcNow - item.DateLastRefreshed).TotalDays >= libraryOptions.AutomaticRefreshIntervalDays;
+
+            // Looked up before the providers read the declaration, so a change made while they run is found by the next refresh.
+            var declaration = string.IsNullOrEmpty(item.Path) ? TrueCacheLookup.None : TrueCache.Lookup(item.Path);
 
             if (!requiresRefresh && refreshOptions.MetadataRefreshMode != MetadataRefreshMode.None)
             {
@@ -228,6 +234,16 @@ namespace MediaBrowser.Providers.Manager
                 // that the lookup happened, so the next pass repeats the same fruitless queries forever.
                 refreshStampNeedsSaving = refreshOptions.MetadataRefreshMode == MetadataRefreshMode.FullRefresh
                     || refreshOptions.ImageRefreshMode == MetadataRefreshMode.FullRefresh;
+
+                // The hash tells the next refresh whether the declaration changed, so it is saved even when nothing else changed.
+                // The metadata providers are the ones that read the declaration; a rejected entry is never read, and its resource leaves the library.
+                if (refreshOptions.MetadataRefreshMode != MetadataRefreshMode.None
+                    && declaration.State != TrueCacheState.Rejected
+                    && !string.Equals(item.TrueCacheHash, declaration.Entry?.Hash, StringComparison.Ordinal))
+                {
+                    item.TrueCacheHash = declaration.Entry?.Hash;
+                    refreshStampNeedsSaving = true;
+                }
             }
 
             updateType = await SaveInternal(item, refreshOptions, updateType, isFirstRefresh, requiresRefresh, refreshStampNeedsSaving, metadataResult, cancellationToken).ConfigureAwait(false);
