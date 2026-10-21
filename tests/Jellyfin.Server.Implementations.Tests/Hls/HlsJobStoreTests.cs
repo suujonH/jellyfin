@@ -236,7 +236,7 @@ public sealed class HlsJobStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task Identify_RetriedReturnsThePlan_AndAnotherHashIsRefused()
+    public async Task Identify_RetriedReturnsThePlan_AndAnotherHashOrRootIsRefused()
     {
         await AddSourceAsync();
         var (lease, plan) = await ClaimAndPlanAsync(Sha('a'));
@@ -245,6 +245,8 @@ public sealed class HlsJobStoreTests : IDisposable
 
         Assert.Equal(HlsIdentifyOutcome.Planned, again.Outcome);
         Assert.Equal(Json(plan), Json(again.Plan!));
+        Assert.Equal(_environment.Root, (await JobAsync(lease.Id)).Base);
+        await Assert.ThrowsAsync<ArgumentException>(() => IdentifyAsync(lease, Sha('a'), root: "s3://media/hls"));
         await Assert.ThrowsAsync<ArgumentException>(() => IdentifyAsync(lease, Sha('b')));
         await Assert.ThrowsAsync<ArgumentException>(() => IdentifyAsync(lease, "not a hash"));
     }
@@ -477,11 +479,29 @@ public sealed class HlsJobStoreTests : IDisposable
         Assert.Null(job.LeaseExpires);
         Assert.False(await SubmitAsync(lease, Outputs(plan)));
         Assert.False(await _store.HeartbeatAsync(lease.Id, lease.LeaseToken, Lease, _now, TestContext.Current.CancellationToken));
-        var verifying = Assert.Single(await _store.GetVerifyingJobsAsync(10, TestContext.Current.CancellationToken));
-        Assert.Equal((lease.Id, Sha('a'), 1), (verifying.Id, verifying.Sha256, verifying.Attempt));
+        var verifying = Assert.Single(await _store.GetVerifyingJobsAsync(10, [], TestContext.Current.CancellationToken));
+        Assert.Equal((lease.Id, Sha('a'), _environment.Root, 1), (verifying.Id, verifying.Sha256, verifying.Base, verifying.Attempt));
         Assert.Equal(_sortedKeys, verifying.Outputs.Select(o => o.Key));
         Assert.All(verifying.Outputs, o => Assert.Equal(plan.Renditions.Single(r => r.Key == o.Key).RelativeDirectory, o.RelativeDirectory));
         Assert.Equal(11, verifying.Outputs.Single(o => o.Key == "v1080").Files.Count);
+    }
+
+    [Fact]
+    public async Task Publish_InAnotherRoot_MovesTheRenditionsThere_AndDeletesTheReplacedOnesFromTheOldRoot()
+    {
+        const string Other = "s3://media/hls";
+        await EncodeAndPublishAsync(Sha('a'));
+        await EnsureMediaJobAsync(Sha('a'), NextProfile);
+        var next = await ClaimAsync();
+        var nextPlan = (await IdentifyAsync(next!, Sha('a'), NextProfile, root: Other)).Plan!;
+        await PublishAsync(next!, nextPlan);
+
+        Assert.All(await _store.GetPublishedRenditionsAsync(TestContext.Current.CancellationToken), r => Assert.Equal(Other, r.Base));
+        Assert.All(await _store.GetPublishedManifestsAsync(null, TestContext.Current.CancellationToken), m => Assert.Equal(Other, m.Base));
+        Assert.All(await DeletionsAsync(), d => Assert.Equal(_environment.Root, d.Base));
+        Assert.Equal(new[] { _environment.Root, Other }.Order(StringComparer.Ordinal), await _store.GetRootsAsync(TestContext.Current.CancellationToken));
+        Assert.Empty(await _store.GetPublishedSampleAsync(_environment.Root, false, 10, TestContext.Current.CancellationToken));
+        Assert.Equal(Directories(nextPlan).Count(), (await _store.GetPublishedSampleAsync(Other, false, 10, TestContext.Current.CancellationToken)).Count);
     }
 
     [Fact]
@@ -491,7 +511,7 @@ public sealed class HlsJobStoreTests : IDisposable
 
         var published = await _store.GetPublishedRenditionsAsync(TestContext.Current.CancellationToken);
         Assert.Equal(_sortedKeys, published.Select(r => r.Key));
-        Assert.All(published, r => Assert.Equal((Profile, (Guid?)lease.Id, (Guid?)null), (r.Profile, r.PublishedJobId, r.JobId)));
+        Assert.All(published, r => Assert.Equal((Profile, (Guid?)lease.Id, (Guid?)null, _environment.Root), (r.Profile, r.PublishedJobId, r.JobId, r.Base)));
         Assert.Equal(1080, published.Single(r => r.Key == "v1080").Summary!.Quality);
         Assert.Equal(Directories(plan), (await _store.GetPublishedManifestsAsync(null, TestContext.Current.CancellationToken)).Select(m => m.RelativeDirectory).Order(StringComparer.Ordinal));
         Assert.Equal(11, (await _store.GetPublishedManifestsAsync(Sha('a'), TestContext.Current.CancellationToken)).Single(m => m.Key == "v720").Files.Count);
@@ -538,7 +558,7 @@ public sealed class HlsJobStoreTests : IDisposable
         Assert.False(await _store.FailVerificationAsync(lease.Id, "A segment is missing.", MaxAttempts, _now, TestContext.Current.CancellationToken));
         AssertQueued(await DeletionsAsync(), Directories(plan), _now);
         Assert.Empty(await OutputsAsync(lease.Id));
-        Assert.Empty(await _store.GetVerifyingJobsAsync(10, TestContext.Current.CancellationToken));
+        Assert.Empty(await _store.GetVerifyingJobsAsync(10, [], TestContext.Current.CancellationToken));
         var job = await JobAsync(lease.Id);
         Assert.Equal(((int)HlsJobStatus.Pending, "A segment is missing."), (job.Status, job.Error));
         Assert.Null(job.Plan);
@@ -737,7 +757,7 @@ public sealed class HlsJobStoreTests : IDisposable
         var deletions = await DeletionsAsync();
         AssertQueued(deletions, Directories(plan), _now);
         Assert.All(deletions, d => Assert.Equal("The job was cancelled.", d.Reason));
-        Assert.Empty(await _store.GetVerifyingJobsAsync(10, TestContext.Current.CancellationToken));
+        Assert.Empty(await _store.GetVerifyingJobsAsync(10, [], TestContext.Current.CancellationToken));
         Assert.Null(await _store.PublishAsync(lease.Id, ReplacedGrace, _now, TestContext.Current.CancellationToken));
         Assert.All(await _store.GetRenditionsAsync(Sha('b'), TestContext.Current.CancellationToken), r => Assert.Equal((HlsRenditionState.Missing, (Guid?)null), (r.State, r.JobId)));
 
@@ -849,8 +869,11 @@ public sealed class HlsJobStoreTests : IDisposable
         var (_, _, plan) = await EncodeAndPublishAsync(Sha('a'));
 
         Assert.Equal([Sha('a'), Sha('b')], await _store.GetPublishedShasAsync(TestContext.Current.CancellationToken));
-        Assert.Equal(Directories(plan).Take(2), await _store.GetPublishedSampleAsync(2, TestContext.Current.CancellationToken));
-        Assert.Equal(10, (await _store.GetPublishedSampleAsync(100, TestContext.Current.CancellationToken)).Count);
+        Assert.Equal(Directories(plan).Take(2), await _store.GetPublishedSampleAsync(_environment.Root, false, 2, TestContext.Current.CancellationToken));
+        Assert.Equal(10, (await _store.GetPublishedSampleAsync(_environment.Root, false, 100, TestContext.Current.CancellationToken)).Count);
+        Assert.Empty(await _store.GetPublishedSampleAsync("s3://other", false, 100, TestContext.Current.CancellationToken));
+        Assert.Empty(await _store.GetPublishedSampleAsync(_environment.Root.ToUpperInvariant(), false, 100, TestContext.Current.CancellationToken));
+        Assert.Equal(10, (await _store.GetPublishedSampleAsync(_environment.Root.ToUpperInvariant(), true, 100, TestContext.Current.CancellationToken)).Count);
     }
 
     // ---- Deletions
@@ -862,19 +885,19 @@ public sealed class HlsJobStoreTests : IDisposable
         var (_, plan) = await ClaimAndPlanAsync(Sha('a'));
         _now += Lease;
         await _store.ReapExpiredLeasesAsync(MaxAttempts, TimeSpan.FromMinutes(10), _now, TestContext.Current.CancellationToken);
-        Assert.Empty(await _store.GetDueDeletionsAsync(_now, 10, TestContext.Current.CancellationToken));
+        Assert.Empty(await _store.GetDueDeletionsAsync(_now, 10, [], TestContext.Current.CancellationToken));
 
-        var due = await _store.GetDueDeletionsAsync(_now + TimeSpan.FromMinutes(10), 2, TestContext.Current.CancellationToken);
+        var due = await _store.GetDueDeletionsAsync(_now + TimeSpan.FromMinutes(10), 2, [], TestContext.Current.CancellationToken);
 
-        Assert.Equal(Directories(plan).Take(2).Select(d => new HlsDeletionRecord(d, 0)), due);
+        Assert.Equal(Directories(plan).Take(2).Select(d => new HlsDeletionRecord(_environment.Root, d, 0)), due);
         await _store.PostponeDeletionAsync(due[0].RelativeDirectory, "Access denied.", _now + TimeSpan.FromHours(1), TestContext.Current.CancellationToken);
         await _store.CompleteDeletionAsync(due[1].RelativeDirectory, TestContext.Current.CancellationToken);
         await _store.CompleteDeletionAsync("unknown", TestContext.Current.CancellationToken);
         await _store.PostponeDeletionAsync("unknown", "Access denied.", _now, TestContext.Current.CancellationToken);
-        Assert.Equal(Directories(plan).Skip(2), (await _store.GetDueDeletionsAsync(_now + TimeSpan.FromMinutes(10), 10, TestContext.Current.CancellationToken)).Select(d => d.RelativeDirectory));
+        Assert.Equal(Directories(plan).Skip(2), (await _store.GetDueDeletionsAsync(_now + TimeSpan.FromMinutes(10), 10, [], TestContext.Current.CancellationToken)).Select(d => d.RelativeDirectory));
         var postponed = (await DeletionsAsync()).Single(d => d.RelativeDirectory == due[0].RelativeDirectory);
         Assert.Equal((1, "Access denied.", _now + TimeSpan.FromHours(1)), (postponed.Attempts, postponed.LastError, postponed.NotBefore));
-        Assert.Contains(new HlsDeletionRecord(due[0].RelativeDirectory, 1), await _store.GetDueDeletionsAsync(_now + TimeSpan.FromHours(1), 10, TestContext.Current.CancellationToken));
+        Assert.Contains(new HlsDeletionRecord(_environment.Root, due[0].RelativeDirectory, 1), await _store.GetDueDeletionsAsync(_now + TimeSpan.FromHours(1), 10, [], TestContext.Current.CancellationToken));
     }
 
     // ---- Listing
@@ -904,10 +927,11 @@ public sealed class HlsJobStoreTests : IDisposable
 
     private static IEnumerable<string> Directories(HlsEncodePlan plan) => plan.Renditions.Select(r => r.RelativeDirectory).Order(StringComparer.Ordinal);
 
-    private static void AssertQueued(IReadOnlyList<HlsDeletion> deletions, IEnumerable<string> directories, DateTime notBefore)
+    private void AssertQueued(IReadOnlyList<HlsDeletion> deletions, IEnumerable<string> directories, DateTime notBefore)
     {
         Assert.Equal(directories.Order(StringComparer.Ordinal), deletions.Select(d => d.RelativeDirectory));
         Assert.All(deletions, d => Assert.Equal(notBefore, d.NotBefore));
+        Assert.All(deletions, d => Assert.Equal(_environment.Root, d.Base));
     }
 
     // Records a new library file; its source job is created a second after every earlier one, so jobs are claimed in this order.
@@ -930,8 +954,8 @@ public sealed class HlsJobStoreTests : IDisposable
     private Task<HlsJobLease?> ClaimAsync(string worker = "worker", Func<Guid, bool>? eligible = null)
         => _store.ClaimAsync(new HlsClaimRequest(worker, Lease, eligible ?? (_ => true), _now), TestContext.Current.CancellationToken);
 
-    private Task<HlsIdentifyResult> IdentifyAsync(HlsJobLease lease, string sha, string profile = Profile, Func<Guid, bool>? eligible = null, HlsProbe? probe = null, int[]? qualities = null)
-        => _store.IdentifyAsync(new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, probe ?? Probe, qualities ?? Qualities, profile, eligible ?? (_ => true), _now), TestContext.Current.CancellationToken);
+    private Task<HlsIdentifyResult> IdentifyAsync(HlsJobLease lease, string sha, string profile = Profile, Func<Guid, bool>? eligible = null, HlsProbe? probe = null, int[]? qualities = null, string? root = null)
+        => _store.IdentifyAsync(new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, probe ?? Probe, root ?? _environment.Root, qualities ?? Qualities, profile, eligible ?? (_ => true), _now), TestContext.Current.CancellationToken);
 
     // Claims the oldest pending job and identifies its file as the content, which it must then encode.
     private async Task<(HlsJobLease Lease, HlsEncodePlan Plan)> ClaimAndPlanAsync(string sha, string profile = Profile, int[]? qualities = null)

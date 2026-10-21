@@ -297,7 +297,7 @@ public sealed class HlsCoordinatorTests : IDisposable
     }
 
     [Fact]
-    public async Task AnExpiredLease_KeepsTheDirectories_UntilTheUploadAddressesExpired()
+    public async Task AnExpiredLease_KeepsTheDirectories_ForALease()
     {
         await TickAsync(_start);
         await _environment.AddSourceAsync();
@@ -308,7 +308,7 @@ public sealed class HlsCoordinatorTests : IDisposable
 
         var deletions = await _environment.DeletionsAsync();
         Assert.Equal(plan.Renditions.Select(r => r.RelativeDirectory).Order(StringComparer.Ordinal), deletions.Select(d => d.RelativeDirectory).Order(StringComparer.Ordinal));
-        Assert.All(deletions, d => Assert.Equal(expired + TimeSpan.FromHours(1) + Lease, d.NotBefore));
+        Assert.All(deletions, d => Assert.Equal(expired + Lease, d.NotBefore));
     }
 
     [Fact]
@@ -338,7 +338,6 @@ public sealed class HlsCoordinatorTests : IDisposable
         => new()
         {
             Enabled = enabled,
-            Store = _environment.Root,
             Libraries = libraries ?? [],
             Qualities = qualities ?? Qualities,
             OrphanRetentionHours = orphanRetentionHours

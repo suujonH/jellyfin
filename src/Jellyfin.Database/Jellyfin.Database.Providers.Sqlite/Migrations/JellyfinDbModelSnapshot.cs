@@ -662,6 +662,10 @@ namespace Jellyfin.Server.Implementations.Migrations
                     b.Property<int>("Attempts")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("Base")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("LastError")
                         .HasColumnType("TEXT");
 
@@ -689,6 +693,9 @@ namespace Jellyfin.Server.Implementations.Migrations
 
                     b.Property<int>("Attempt")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("Base")
+                        .HasColumnType("TEXT");
 
                     b.Property<DateTime>("DateCreated")
                         .HasColumnType("TEXT");
@@ -813,6 +820,9 @@ namespace Jellyfin.Server.Implementations.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Key")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Base")
                         .HasColumnType("TEXT");
 
                     b.Property<DateTime?>("DatePublished")

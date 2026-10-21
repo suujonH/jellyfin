@@ -2,16 +2,17 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.MediaEncoding.Hls.Published;
 using Jellyfin.Server.Implementations.Hls;
+using MediaBrowser.Controller;
 using MediaBrowser.Controller.Hls;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Configuration;
+using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Hls;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
@@ -29,6 +30,8 @@ public sealed class HlsTaskCenterTests : IDisposable
 
     private readonly List<IDisposable> _disposables = [];
     private readonly Mock<INetworkStorageManager> _networkStorage = new();
+    private string _library = string.Empty;
+    private string _data = string.Empty;
 
     private static CancellationToken CancellationToken => TestContext.Current.CancellationToken;
 
@@ -62,7 +65,7 @@ public sealed class HlsTaskCenterTests : IDisposable
 
         await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.PollAsync(" ", CancellationToken));
         await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.PollAsync(new string('w', 129), CancellationToken));
-        environment.Save(new HlsOptions { Enabled = false, Store = environment.Root });
+        environment.Save(new HlsOptions { Enabled = false });
         Assert.Null(await taskCenter.PollAsync("worker", CancellationToken));
     }
 
@@ -102,16 +105,81 @@ public sealed class HlsTaskCenterTests : IDisposable
         var item = await environment.AddSourceAsync();
         var lease = (await taskCenter.PollAsync("worker", CancellationToken))!.Lease;
 
-        await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, "abc", ProbeJson), CancellationToken));
-        await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, Sha('a'), "{}"), CancellationToken));
-        Assert.Null(await taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification("another lease", Sha('a'), ProbeJson), CancellationToken));
+        await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, "abc", ProbeJson, environment.Root), CancellationToken));
+        await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, Sha('a'), "{}", environment.Root), CancellationToken));
+        Assert.Null(await taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification("another lease", Sha('a'), ProbeJson, environment.Root), CancellationToken));
 
-        var response = await taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, Sha('a').ToUpperInvariant(), ProbeJson), CancellationToken);
+        var response = await taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, Sha('a').ToUpperInvariant(), ProbeJson, environment.Root), CancellationToken);
 
         Assert.NotNull(response);
         Assert.False(response.Done);
         Assert.Equal(["v1080", "v720", "a1", "preview"], response.Plan!.Renditions.Select(r => r.Key));
         Assert.Equal(Sha('a'), environment.Index.GetSource(item)!.Sha256);
+        Assert.Equal(environment.Root, (await environment.JobAsync(lease.JobId)).Base);
+    }
+
+    [Fact]
+    public async Task Identify_WithARootTheWorkerMayNotUse_IsRefused()
+    {
+        var (environment, taskCenter) = Create();
+        await environment.AddSourceAsync();
+        var lease = (await taskCenter.PollAsync("worker", CancellationToken))!.Lease;
+
+        foreach (var root in new[] { null, " ", "relative/hls", "ftp://bucket/hls", Path.Combine(environment.TempDirectory, "missing"), _library })
+        {
+            await Assert.ThrowsAsync<ArgumentException>(
+                () => taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, Sha('a'), ProbeJson, root!), CancellationToken));
+        }
+
+        Assert.Null((await environment.JobAsync(lease.JobId)).Plan);
+    }
+
+    [Fact]
+    public async Task CheckBase_AcceptsAnExistingLocalDirectory_AndTellsWhetherItHasTheMarker()
+    {
+        var (environment, taskCenter) = Create();
+
+        Assert.Equal(new HlsStoreTestResult(true, false, null), await taskCenter.CheckBaseAsync(environment.Root, CancellationToken));
+        await File.WriteAllTextAsync(Path.Combine(environment.Root, HlsStorePaths.MarkerName), string.Empty, CancellationToken);
+        Assert.Equal(new HlsStoreTestResult(true, true, null), await taskCenter.CheckBaseAsync(environment.Root, CancellationToken));
+    }
+
+    [Fact]
+    public async Task CheckBase_RefusesALocalRootThatOverlapsALibrary_OrTheDataOfTheServer()
+    {
+        var (environment, taskCenter) = Create();
+        var inLibrary = Directory.CreateDirectory(Path.Combine(_library, "hls")).FullName;
+        var holdingLibrary = Path.GetDirectoryName(_library)!;
+        var inData = Directory.CreateDirectory(Path.Combine(_data, "hls")).FullName;
+
+        foreach (var root in new[] { _library, inLibrary, holdingLibrary, inData, Path.Combine(environment.TempDirectory, "missing"), "relative", new string('a', 1025) })
+        {
+            var result = await taskCenter.CheckBaseAsync(root, CancellationToken);
+            Assert.False(result.Success, root);
+            Assert.NotNull(result.Message);
+        }
+    }
+
+    [Fact]
+    public async Task CheckBase_RefusesARootInALibraryAtTheRootOfTheFileSystem()
+    {
+        var (environment, taskCenter) = Create(library: Path.GetPathRoot(Path.GetTempPath()));
+
+        Assert.False((await taskCenter.CheckBaseAsync(environment.Root, CancellationToken)).Success);
+    }
+
+    [Fact]
+    public async Task CheckBase_RefusesARootThatLostWhatWasPublishedInIt()
+    {
+        var (environment, taskCenter) = Create();
+        await environment.PublishAsync(Sha('a'));
+
+        // The mount is lost: what is left is the empty mount point, which has neither the marker nor what was published.
+        Directory.Delete(environment.Root, true);
+        Directory.CreateDirectory(environment.Root);
+
+        Assert.False((await taskCenter.CheckBaseAsync(environment.Root, CancellationToken)).Success);
+        Assert.Contains(environment.Root, (await taskCenter.GetStatusAsync(CancellationToken)).StoreProblems.Select(p => p.Base));
     }
 
     [Fact]
@@ -122,101 +190,9 @@ public sealed class HlsTaskCenterTests : IDisposable
         await environment.AddSourceAsync();
         var lease = (await taskCenter.PollAsync("worker", CancellationToken))!.Lease;
 
-        var response = await taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, Sha('a'), ProbeJson), CancellationToken);
+        var response = await taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, Sha('a'), ProbeJson, environment.Root), CancellationToken);
 
         Assert.Equal(new HlsIdentifyResponse(true, null), response);
-    }
-
-    [Fact]
-    public async Task Uploads_OfALocalStore_GoThroughTheServer_AndOnlyForFilesOfThePlan()
-    {
-        var (environment, taskCenter) = Create();
-        var (lease, _) = await IdentifiedAsync(environment, taskCenter);
-
-        var targets = await taskCenter.GetUploadTargetsAsync(
-            lease.JobId,
-            new HlsUploadRequest(lease.LeaseToken, "a1", [new("init.mp4", 10), new(HlsRenditionPaths.GetSegmentFile(0), 20)]),
-            CancellationToken);
-
-        Assert.Equal(
-            [new HlsUploadTarget("init.mp4", null, "audio/mp4"), new HlsUploadTarget(HlsRenditionPaths.GetSegmentFile(0), null, "audio/mp4")],
-            targets);
-        Assert.Null(await taskCenter.GetUploadTargetsAsync(lease.JobId, new HlsUploadRequest("another lease", "a1", [new("init.mp4", 10)]), CancellationToken));
-        foreach (var refused in new[]
-        {
-            new HlsUploadRequest(lease.LeaseToken, "v2160", [new("init.mp4", 10)]),
-            new HlsUploadRequest(lease.LeaseToken, "a1", [new("../init.mp4", 10)]),
-            new HlsUploadRequest(lease.LeaseToken, "a1", [new(HlsRenditionPaths.GetSegmentFile(12), 10)]),
-            new HlsUploadRequest(lease.LeaseToken, "preview", [new("init.mp4", 10)]),
-            new HlsUploadRequest(lease.LeaseToken, "a1", []),
-            new HlsUploadRequest(lease.LeaseToken, "a1", [null!]),
-            new HlsUploadRequest(lease.LeaseToken, "a1", Enumerable.Range(0, 501).Select(i => new HlsOutputFile("init.mp4", 10)).ToList())
-        })
-        {
-            await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.GetUploadTargetsAsync(lease.JobId, refused, CancellationToken));
-        }
-    }
-
-    [Fact]
-    public async Task Uploads_BeforeTheFileIsIdentified_AreRefused()
-    {
-        var (environment, taskCenter) = Create();
-        await environment.AddSourceAsync();
-        var lease = (await taskCenter.PollAsync("worker", CancellationToken))!.Lease;
-
-        await Assert.ThrowsAsync<ArgumentException>(
-            () => taskCenter.GetUploadTargetsAsync(lease.JobId, new HlsUploadRequest(lease.LeaseToken, "a1", [new("init.mp4", 10)]), CancellationToken));
-    }
-
-    [Fact]
-    public async Task Uploads_OfNetworkStorage_AreSigned()
-    {
-        var store = new Mock<IHlsStore>();
-        store.Setup(s => s.GetUploadAddress(It.IsAny<string>(), TimeSpan.FromHours(1)))
-            .Returns((string path, TimeSpan _) => new Uri("https://storage.example/hls/" + path + "?X-Amz-Signature=0"));
-        var (environment, taskCenter) = Create(store.Object);
-        var (lease, plan) = await IdentifiedAsync(environment, taskCenter);
-
-        var target = Assert.Single((await taskCenter.GetUploadTargetsAsync(lease.JobId, new HlsUploadRequest(lease.LeaseToken, "preview", [new("preview.jpg", 10)]), CancellationToken))!);
-
-        var directory = plan.Renditions.Single(r => r.Key == "preview").RelativeDirectory;
-        Assert.Equal(new HlsUploadTarget("preview.jpg", new Uri("https://storage.example/hls/" + directory + "/preview.jpg?X-Amz-Signature=0"), "image/jpeg"), target);
-        await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.WriteFileAsync(lease.JobId, lease.LeaseToken, "preview", "preview.jpg", Stream.Null, CancellationToken));
-    }
-
-    [Fact]
-    public async Task WriteFile_WritesIntoTheDirectoryOfTheRendition()
-    {
-        var (environment, taskCenter) = Create();
-        var (lease, plan) = await IdentifiedAsync(environment, taskCenter);
-        using var content = new MemoryStream(Encoding.UTF8.GetBytes("init"));
-
-        Assert.True(await taskCenter.WriteFileAsync(lease.JobId, lease.LeaseToken, "a1", "init.mp4", content, CancellationToken));
-        Assert.False(await taskCenter.WriteFileAsync(lease.JobId, "another lease", "a1", "init.mp4", Stream.Null, CancellationToken));
-
-        var directory = plan.Renditions.Single(r => r.Key == "a1").RelativeDirectory;
-        Assert.Equal("init", await File.ReadAllTextAsync(Path.Combine(environment.GetStorePath(directory), "init.mp4"), CancellationToken));
-    }
-
-    [Fact]
-    public async Task Uploads_IntoARootThatCannotBeTrusted_AreRefused()
-    {
-        var (environment, taskCenter) = Create();
-        await environment.PublishAsync(Sha('b'));
-        var (lease, _) = await IdentifiedAsync(environment, taskCenter);
-        var request = new HlsUploadRequest(lease.LeaseToken, "a1", [new("init.mp4", 1)]);
-        await taskCenter.GetUploadTargetsAsync(lease.JobId, request, CancellationToken);
-
-        // The mount is lost: what is left is the empty mount point, which has neither the marker nor what was published.
-        Directory.Delete(environment.Root, true);
-        Directory.CreateDirectory(environment.Root);
-        using var content = new MemoryStream([1]);
-
-        await Assert.ThrowsAsync<IOException>(() => taskCenter.WriteFileAsync(lease.JobId, lease.LeaseToken, "a1", "init.mp4", content, CancellationToken));
-        await Assert.ThrowsAsync<IOException>(() => taskCenter.GetUploadTargetsAsync(lease.JobId, request, CancellationToken));
-        await Assert.ThrowsAsync<IOException>(() => taskCenter.StartUploadCheckAsync("worker", CancellationToken));
-        Assert.Empty(Directory.EnumerateFileSystemEntries(environment.Root));
-        Assert.DoesNotContain(await environment.DeletionsAsync(), d => d.RelativeDirectory.StartsWith(".jellyfin-hls-test-", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -248,7 +224,7 @@ public sealed class HlsTaskCenterTests : IDisposable
     }
 
     [Fact]
-    public async Task Fail_KeepsTheDirectories_UntilTheUploadAddressesExpired()
+    public async Task Fail_KeepsTheDirectories_ForALease()
     {
         var (environment, taskCenter) = Create();
         var (lease, plan) = await IdentifiedAsync(environment, taskCenter);
@@ -258,46 +234,7 @@ public sealed class HlsTaskCenterTests : IDisposable
 
         var deletions = await environment.DeletionsAsync();
         Assert.Equal(plan.Renditions.Select(r => r.RelativeDirectory).Order(StringComparer.Ordinal), deletions.Select(d => d.RelativeDirectory).Order(StringComparer.Ordinal));
-        Assert.All(deletions, d => Assert.True(d.NotBefore >= before + TimeSpan.FromHours(1) + Lease));
-    }
-
-    [Fact]
-    public async Task UploadCheck_OfALocalStore_IsWrittenAndDeleted_Once()
-    {
-        var (environment, taskCenter) = Create();
-
-        var check = await taskCenter.StartUploadCheckAsync("worker", CancellationToken);
-
-        Assert.Null(check.Address);
-        var directory = ".jellyfin-hls-test-" + check.Id.ToString("N");
-        Assert.Equal(directory + "/check", check.Path);
-        Assert.Equal([directory], (await environment.DeletionsAsync()).Select(d => d.RelativeDirectory));
-        using var content = new MemoryStream([1, 2, 3]);
-
-        // The store is gone for a moment; the check is not used up.
-        Directory.Delete(environment.Root);
-        await Assert.ThrowsAsync<IOException>(() => taskCenter.WriteUploadCheckAsync(check.Id, content, CancellationToken));
-        Directory.CreateDirectory(environment.Root);
-
-        Assert.True(await taskCenter.WriteUploadCheckAsync(check.Id, content, CancellationToken));
-        Assert.False(Directory.Exists(environment.GetStorePath(directory)));
-        Assert.False(await taskCenter.WriteUploadCheckAsync(check.Id, Stream.Null, CancellationToken));
-        Assert.False(await taskCenter.WriteUploadCheckAsync(Guid.NewGuid(), Stream.Null, CancellationToken));
-    }
-
-    [Fact]
-    public async Task UploadCheck_OfNetworkStorage_IsSigned_AndQueuedForDeletion()
-    {
-        var store = new Mock<IHlsStore>();
-        store.Setup(s => s.GetUploadAddress(It.IsAny<string>(), TimeSpan.FromHours(1)))
-            .Returns((string path, TimeSpan _) => new Uri("https://storage.example/hls/" + path));
-        var (environment, taskCenter) = Create(store.Object);
-
-        var check = await taskCenter.StartUploadCheckAsync("worker", CancellationToken);
-
-        Assert.Equal(new Uri("https://storage.example/hls/" + check.Path), check.Address);
-        Assert.Equal(check.Path[..^"/check".Length], Assert.Single(await environment.DeletionsAsync()).RelativeDirectory);
-        Assert.False(await taskCenter.WriteUploadCheckAsync(check.Id, Stream.Null, CancellationToken));
+        Assert.All(deletions, d => Assert.True(d.NotBefore >= before + Lease));
     }
 
     [Fact]
@@ -319,24 +256,23 @@ public sealed class HlsTaskCenterTests : IDisposable
     {
         await environment.AddSourceAsync();
         var lease = (await taskCenter.PollAsync("worker", CancellationToken))!.Lease;
-        var response = await taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, Sha('a'), ProbeJson), CancellationToken);
+        var response = await taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, Sha('a'), ProbeJson, environment.Root), CancellationToken);
         return (lease, response!.Plan!);
     }
 
-    // A new local store in a temporary directory, or the store given.
-    private (HlsTestEnvironment Environment, HlsTaskCenter TaskCenter) Create(IHlsStore? store = null)
+    // A new local store in a temporary directory, beside a library and the data of the server.
+    private (HlsTestEnvironment Environment, HlsTaskCenter TaskCenter) Create(string? library = null)
     {
-        IHlsStoreFactory? factory = null;
-        if (store is not null)
-        {
-            var mock = new Mock<IHlsStoreFactory>();
-            mock.Setup(f => f.Create(It.IsAny<string>())).Returns(store);
-            factory = mock.Object;
-        }
-
-        var environment = new HlsTestEnvironment(factory);
+        var environment = new HlsTestEnvironment();
         _disposables.Add(environment);
         Directory.CreateDirectory(environment.Root);
+        _library = library ?? Directory.CreateDirectory(Path.Combine(environment.TempDirectory, "media", "movies")).FullName;
+        _data = Directory.CreateDirectory(Path.Combine(environment.TempDirectory, "data")).FullName;
+        var libraryManager = new Mock<ILibraryManager>();
+        libraryManager.Setup(l => l.GetVirtualFolders()).Returns([new VirtualFolderInfo { Locations = [_library] }]);
+        var appPaths = new Mock<IServerApplicationPaths>();
+        appPaths.SetupGet(p => p.ProgramDataPath).Returns(_data);
+        appPaths.SetupGet(p => p.DataPath).Returns(Path.Combine(_data, "data"));
         var coordinator = new HlsCoordinator(
             environment.Store,
             environment.Settings,
@@ -362,6 +298,8 @@ public sealed class HlsTaskCenterTests : IDisposable
             verification,
             environment.Monitor,
             _networkStorage.Object,
+            libraryManager.Object,
+            appPaths.Object,
             NullLogger<HlsTaskCenter>.Instance);
         return (environment, taskCenter);
     }

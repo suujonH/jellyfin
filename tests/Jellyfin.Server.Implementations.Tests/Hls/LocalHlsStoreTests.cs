@@ -1,11 +1,9 @@
 using System;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Server.Implementations.Hls;
-using MediaBrowser.Model.Hls;
 using Xunit;
 
 namespace Jellyfin.Server.Implementations.Tests.Hls;
@@ -62,15 +60,18 @@ public sealed class LocalHlsStoreTests : IDisposable
         // The directories may be gone for other reasons, such as being deleted by hand; that is for the verification to find.
         Assert.Null(await Store.CheckRootAsync([Published, Other], CancellationToken));
         Assert.Equal(["kept"], Directory.EnumerateFiles(Root).Select(File.ReadAllText));
+        Assert.True(await Store.HasMarkerAsync(CancellationToken));
     }
 
     [Fact]
-    public async Task CheckRoot_PredatesTheMarker_GetsItWhenAPublishedDirectoryIsThere()
+    public async Task CheckRoot_Unmarked_IsUsableWhileAPublishedDirectoryIsThere_AndIsNotMarked()
     {
+        // The marker is for the worker to write.
         Directory.CreateDirectory(Full(Published));
 
         Assert.Null(await Store.CheckRootAsync([Other, Published], CancellationToken));
-        Assert.Equal("Jellyfin HLS store. Do not delete.\n", await File.ReadAllTextAsync(Marker, CancellationToken));
+        Assert.False(File.Exists(Marker));
+        Assert.False(await Store.HasMarkerAsync(CancellationToken));
     }
 
     [Fact]
@@ -182,66 +183,13 @@ public sealed class LocalHlsStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task WriteAsync_File_ReplacesItThroughATemporaryFile()
-    {
-        var path = Published + "/init.mp4";
-        await WriteFileAsync(path, 10);
-
-        await Store.WriteAsync(path, new MemoryStream(Encoding.UTF8.GetBytes("new")), CancellationToken);
-
-        Assert.Equal("new", await File.ReadAllTextAsync(Full(path), CancellationToken));
-        Assert.Equal([Full(path)], Directory.EnumerateFileSystemEntries(Full(Published)));
-    }
-
-    [Fact]
-    public async Task WriteAsync_UploadBroken_LeavesNothing()
-    {
-        Directory.CreateDirectory(Root);
-
-        await Assert.ThrowsAsync<IOException>(() => Store.WriteAsync(Published + "/init.mp4", new BrokenStream(), CancellationToken));
-
-        Assert.Empty(Directory.EnumerateFileSystemEntries(Full(Published)));
-    }
-
-    [Fact]
-    public async Task WriteAsync_WithoutTheRoot_CreatesNothing()
-    {
-        // The root may be a mount point.
-        await Assert.ThrowsAsync<IOException>(() => Store.WriteAsync(Published + "/init.mp4", new MemoryStream([1]), CancellationToken));
-
-        Assert.False(Directory.Exists(Root));
-    }
-
-    [Fact]
     public void Addresses_File_IsReadByTheServerFromItsPath()
     {
         var path = Published + "/init.mp4";
 
         Assert.Equal(Full(path), Store.GetServerPath(path));
-        Assert.Null(Store.GetUploadAddress(path, TimeSpan.FromHours(1)));
         Assert.Null(Store.GetClientAddress(path));
         Assert.Throws<ArgumentException>(() => Store.GetServerPath("../x"));
-    }
-
-    [Fact]
-    public async Task TestAsync_WritableRoot_SucceedsAndLeavesNothing()
-    {
-        Directory.CreateDirectory(Root);
-
-        Assert.Equal(new HlsStoreTestResult(true, false, null), await Store.TestAsync(CancellationToken));
-        Assert.Empty(Directory.EnumerateFileSystemEntries(Root));
-
-        await File.WriteAllTextAsync(Marker, "kept", CancellationToken);
-        Assert.Equal(new HlsStoreTestResult(true, true, null), await Store.TestAsync(CancellationToken));
-    }
-
-    [Fact]
-    public async Task TestAsync_MissingRoot_FailsWithoutCreatingIt()
-    {
-        var result = await Store.TestAsync(CancellationToken);
-
-        Assert.False(result.Success);
-        Assert.False(Directory.Exists(Root));
     }
 
     private string Full(string path) => Path.Combine(Root, path.Replace('/', Path.DirectorySeparatorChar));
@@ -250,12 +198,5 @@ public sealed class LocalHlsStoreTests : IDisposable
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Full(path))!);
         await File.WriteAllBytesAsync(Full(path), new byte[length], CancellationToken);
-    }
-
-    // An upload whose connection is lost.
-    private sealed class BrokenStream : MemoryStream
-    {
-        public override Task CopyToAsync(Stream destination, int bufferSize, CancellationToken cancellationToken)
-            => Task.FromException(new IOException("The connection was reset."));
     }
 }

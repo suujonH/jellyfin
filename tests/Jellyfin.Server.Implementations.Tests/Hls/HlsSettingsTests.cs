@@ -12,15 +12,13 @@ public sealed class HlsSettingsTests : IDisposable
     public void Dispose() => _environment.Dispose();
 
     [Fact]
-    public void Current_IsWhatWasSaved_WithItsStore()
+    public void Current_IsWhatWasSaved()
     {
         var current = _environment.Settings.Current;
 
         Assert.True(current.Options.Enabled);
         Assert.Null(current.Error);
         Assert.Equal(0, current.Version);
-        Assert.True(current.Store!.IsLocal);
-        Assert.Equal(_environment.Root, current.Store.Location);
         Assert.Equal(TimeSpan.FromMinutes(5), current.Lease);
     }
 
@@ -31,7 +29,6 @@ public sealed class HlsSettingsTests : IDisposable
 
         var current = _environment.Settings.Current;
         Assert.False(current.Options.Enabled);
-        Assert.Null(current.Store);
         Assert.Equal(1, current.Version);
 
         _environment.RaiseUpdated("encoding", new EncodingOptions());
@@ -45,7 +42,6 @@ public sealed class HlsSettingsTests : IDisposable
 
         var current = _environment.Settings.Current;
         Assert.False(current.Options.Enabled);
-        Assert.Null(current.Store);
         Assert.NotNull(current.Error);
         Assert.False(current.IsLibraryEligible(HlsTestEnvironment.LibraryId));
     }
@@ -55,11 +51,11 @@ public sealed class HlsSettingsTests : IDisposable
     {
         Assert.True(_environment.Settings.Current.IsLibraryEligible(HlsTestEnvironment.LibraryId));
 
-        _environment.Save(new HlsOptions { Enabled = true, Store = _environment.Root, Libraries = [HlsTestEnvironment.OtherLibraryId] });
+        _environment.Save(new HlsOptions { Enabled = true, Libraries = [HlsTestEnvironment.OtherLibraryId] });
         Assert.False(_environment.Settings.Current.IsLibraryEligible(HlsTestEnvironment.LibraryId));
         Assert.True(_environment.Settings.Current.IsLibraryEligible(HlsTestEnvironment.OtherLibraryId));
 
-        _environment.Save(new HlsOptions { Store = _environment.Root, Libraries = [HlsTestEnvironment.OtherLibraryId] });
+        _environment.Save(new HlsOptions { Libraries = [HlsTestEnvironment.OtherLibraryId] });
         Assert.False(_environment.Settings.Current.IsLibraryEligible(HlsTestEnvironment.OtherLibraryId));
     }
 }

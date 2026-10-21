@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -116,20 +117,55 @@ public sealed class HlsDeletionServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task TheDirectoryOfAnUploadCheck_IsDeletedToo()
+    public async Task EveryRoot_IsCheckedOnItsOwn()
     {
+        // The second root is a mount point without its mount: its directory waits, the first root's goes.
         var (environment, service) = Create(local: true);
         Directory.CreateDirectory(environment.Root);
         await File.WriteAllTextAsync(Path.Combine(environment.Root, ".jellyfin-hls"), "marked", CancellationToken);
-        var directory = ".jellyfin-hls-test-" + Guid.NewGuid().ToString("N");
-        Directory.CreateDirectory(environment.GetStorePath(directory));
-        await File.WriteAllTextAsync(Path.Combine(environment.GetStorePath(directory), "check"), "check", CancellationToken);
-        await environment.Store.QueueUploadCheckDeletionAsync(directory, environment.Now, CancellationToken);
-        await Assert.ThrowsAsync<ArgumentException>(() => environment.Store.QueueUploadCheckDeletionAsync(".jellyfin-hls-test-check", environment.Now, CancellationToken));
+        Directory.CreateDirectory(environment.GetStorePath(Due));
+        var unmounted = Path.Combine(environment.TempDirectory, "unmounted");
+        await QueueAsync(environment, Due, environment.Now);
+        await QueueAsync(environment, Later, environment.Now, root: unmounted);
 
         await service.ProcessAsync(environment.Now, CancellationToken);
 
-        Assert.False(Directory.Exists(environment.GetStorePath(directory)));
+        Assert.False(Directory.Exists(environment.GetStorePath(Due)));
+        var left = Assert.Single(await environment.DeletionsAsync());
+        Assert.Equal((Later, unmounted, 0), (left.RelativeDirectory, left.Base, left.Attempts));
+        Assert.Contains(unmounted, environment.Monitor.GetProblems().Keys);
+    }
+
+    [Fact]
+    public async Task ARootThatCannotBeTrusted_DoesNotHoldUpTheOthers()
+    {
+        // More directories of the unmounted root are due, and longer, than a batch holds.
+        var (environment, service) = Create(local: true);
+        Directory.CreateDirectory(environment.GetStorePath(Due));
+        var unmounted = Path.Combine(environment.TempDirectory, "unmounted");
+        for (var i = 0; i < 20; i++)
+        {
+            await QueueAsync(environment, "0123456789abcdef0123456789abcdef/video/480/" + (i + 16).ToString("x32", CultureInfo.InvariantCulture), environment.Now - TimeSpan.FromHours(1), root: unmounted);
+        }
+
+        await QueueAsync(environment, Due, environment.Now);
+
+        await service.ProcessAsync(environment.Now, CancellationToken);
+
+        Assert.False(Directory.Exists(environment.GetStorePath(Due)));
+        Assert.All(await environment.DeletionsAsync(), d => Assert.Equal(unmounted, d.Base));
+        Assert.Equal(20, (await environment.DeletionsAsync()).Count);
+    }
+
+    [Fact]
+    public async Task AnInvalidRoot_IsDroppedWithoutDeletingAnything()
+    {
+        // A directory queued before roots were recorded has none.
+        var (environment, service) = Create(local: true);
+        await QueueAsync(environment, Due, environment.Now, root: string.Empty);
+
+        await service.ProcessAsync(environment.Now, CancellationToken);
+
         Assert.Empty(await environment.DeletionsAsync());
     }
 
@@ -146,10 +182,10 @@ public sealed class HlsDeletionServiceTests : IDisposable
     }
 
     // Rows written as the job store queues them; only the path checks of the service stand between them and the store.
-    private static async Task QueueAsync(HlsTestEnvironment environment, string directory, DateTime notBefore, int attempts = 0)
+    private static async Task QueueAsync(HlsTestEnvironment environment, string directory, DateTime notBefore, int attempts = 0, string? root = null)
     {
         await using var context = environment.CreateDbContext();
-        context.HlsDeletions.Add(new HlsDeletion { RelativeDirectory = directory, NotBefore = notBefore, Attempts = attempts, Reason = "Test" });
+        context.HlsDeletions.Add(new HlsDeletion { RelativeDirectory = directory, Base = root ?? environment.Root, NotBefore = notBefore, Attempts = attempts, Reason = "Test" });
         await context.SaveChangesAsync(CancellationToken);
     }
 
@@ -164,7 +200,7 @@ public sealed class HlsDeletionServiceTests : IDisposable
         }
 
         _environment = new HlsTestEnvironment(factory);
-        _service = new HlsDeletionService(_environment.Store, _environment.Settings, _environment.Monitor, NullLogger<HlsDeletionService>.Instance);
+        _service = new HlsDeletionService(_environment.Store, _environment.Monitor, NullLogger<HlsDeletionService>.Instance);
         return (_environment, _service);
     }
 }

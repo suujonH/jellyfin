@@ -192,8 +192,8 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 **根的校验**（`Identify`、`Jobs/Eager` 和 `Bases/Check` 共用同一个实现，结果为 `HlsStoreTestResult`）：
 1. 能由 `HlsStoreFactory` 解析（路径规则见下）；
 2. s3：服务器有该桶的访问权限，且不是归档（归档的存储客户端无法播放）；
-3. 本地目录：绝对路径、目录存在、不在任何媒体库路径之下、也不在服务器数据目录之下；
-4. 列出根目录一次成功。
+3. 本地目录：绝对路径、目录存在，与任何媒体库路径互不包含（在其下或包含它都不行，删除档位目录时可能带走媒体文件），也不在服务器的程序数据目录或数据目录之下；
+4. 根可信，与监视同一判断：有标记，或该根下还没有已发布的目录，或最近发布的样本至少有一个还在；列出失败也算不通过。
 
 不通过时 `Identify`、`Jobs/Eager` 回 `400` 带原因，`Bases/Check` 返回失败及原因。服务器只要求该桶有一条访问权限：没有时由 Worker 用自己的凭据创建，服务器不参与。
 
@@ -215,7 +215,7 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - 不可信时，只有记在这个根上的记录暂停校验和删除，不消耗重试次数；其他根照常。
 - 网络存储同样适用，防止访问权限被改到别的桶后，系统误以为成果全部丢失、整库重新编码。
 
-**按根监视**（`HlsRootMonitor`）：取已发布档位、校验中的任务和删除队列中出现的全部根，逐个抽样核对（样本取该根下的已发布目录）。`HlsStatus.StoreProblem` 改为列出有问题的根及原因。
+**按根监视**（`HlsRootMonitor`）：取已发布档位、校验中的任务和删除队列中出现的全部根，逐个抽样核对（样本取该根下的已发布目录）。`HlsStatus.StoreProblems` 列出仍在使用、有问题的根及原因。
 
 | 操作 | 本地目录 | 网络存储 |
 | --- | --- | --- |
@@ -437,7 +437,7 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - **认证**：`HlsWorkerProtocolAttribute` 在管理员策略之后检查：用户会话 `403`，协议请求头缺失或不符 `400`。
 - **错误**：请求不合理（档位或文件不在计划中、哈希或探测结果无效、根不通过等）为 `400`，租约失效或内容有进行中的任务为 `409`，都带原因。
 - **地址**：`InputUrl` 是相对于服务器地址的路径，反向代理的路径前缀因此保留。
-- **完成时存储不可用**：任务上的根不可信时 `Complete` 回 `503`，Worker 把它当作暂时性错误，保持心跳并稍后重试，不报告失败。
+- **完成时不检查根**：根在 `Identify` 时已校验；之后根不可信时，任务停在校验中，等根恢复后再校验（见第五节），`Complete` 照常回 `202`。
 
 **一个任务的流程**：
 1. **领取**：得到租约和来源（ItemId、路径或目标、长度、修改时间）。
@@ -712,4 +712,5 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - 2026-10-22：第 4b 阶段完成：命名配置 `hls`（`HlsOptions`，保存时校验）、`HlsSettings`、`HlsRootMonitor`、发布索引 `HlsPublishedIndex`、任务中心循环 `HlsCoordinator`（同步、排程、租约回收、全量排程、孤儿）、`HlsVerificationService`（校验、发布、校验已发布成果）、`HlsDeletionService`，三个服务注册为托管服务。与 5.2 的差别已写回：只取 `VideoFile`、`.strm` 的大小只取 TrueCache 条目、多媒体库任选其一、失败在下次全量排程时重试、根目录只在有工作时检查、宽限期暂用播放授权有效期、索引刷新失败自动补读、删除队列的已知限制；签名密钥的生成与版本条目的排除留到第 5 阶段（见 7.2、7.4）。另有一个提交修复 Debug 构建的分析器错误（master 的网络存储代码与前几个阶段的 HLS 代码），WSL 下 Debug 构建 0 错误。Release 构建 0 警告；Server.Implementations 中 HLS 的 163 个测试全部通过（另有 2 个本地化测试因系统语言为中文而失败），MediaEncoding.Hls 300 个（44 个跳过）、Integration 129 个通过。
 - 2026-10-22：第 4c 阶段完成：`IHlsTaskCenter` 与 `HlsTaskCenter`（领取、输入、心跳、识别、上传地址、本地写入、完成、失败、上传测试、状态与任务列表），`HlsWorkerController`、`HlsController`，`HlsWorkerProtocolAttribute`。与第六、八节的差别已写回：Worker 只接受 API Key（用户会话 `403`），错误码 `400`/`409`/`503` 带原因，`InputUrl` 与本地上传地址为相对路径，本地存储的上传测试走服务器路由，测试对象经删除队列删除，存储测试可指定位置；与 5.2 的差别：根目录不可信时不签发也不接收上传，租约结束后目录等上传地址过期再删除。Release 构建 0 警告，WSL 下 Debug 构建 0 警告；Server.Implementations 中 HLS 的 182 个测试全部通过（另有 2 个本地化测试因系统语言为中文而失败），Api 173 个、MediaEncoding.Hls 300 个（44 个跳过）、Integration 132 个通过。
 - 2026-10-22：设计变更写回计划：Worker 自持凭据并上报存储根、服务器去掉存储设置与上传通道、档位三层过滤、添加媒体时的预编码任务、原片规则并入归档与用户权限、Worker 仓库改为 `Jellyfin.HLS.Worker`。新增第 4d、4e 阶段。
-- 下一步：第 4d 阶段（按根改造与协议裁减）。
+- 2026-10-22：第 4d 阶段完成：三张表的 `Base` 列与迁移 `AddHlsBase`；存储只读（删去 PUT 预签名、本地写入、标记写入与存储测试），由 Worker 写标记；`HlsOptions` 删去 `Store`、`OriginalUsers`，新增 `AllowOriginal`；`UserPolicy.EnableOriginalPlayback`；`Identify` 带根，根的校验与 `Bases/Check` 共用一个实现（本地根与媒体库互不包含、不在数据目录下）；监视、校验、再校验、删除都按根进行，一个根不可信只停它自己的工作，`StoreProblems` 只列仍在使用的根；`Base` 为空或无效的删除记录直接丢弃，不删除任何东西；租约结束后的宽限为一个租约长度；上传通道的路由、方法、DTO 与测试全部删除。Release 构建 0 警告；Server.Implementations 1320 个测试通过（2 个本地化测试因系统语言为中文而失败），Api 173 个、MediaEncoding.Hls 300 个（44 个跳过）、Integration 132 个通过。
+- 下一步：第 4e 阶段（每库档位、`Libraries` 与 `Jobs/Eager`）。

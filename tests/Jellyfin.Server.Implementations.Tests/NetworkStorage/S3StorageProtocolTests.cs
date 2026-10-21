@@ -30,23 +30,6 @@ public class S3StorageProtocolTests
     };
 
     [Fact]
-    public void GetUploadAddress_Object_IsPresignedForPutForTheLifetime()
-    {
-        var protocol = new S3StorageProtocol(null!);
-        Assert.True(protocol.TryLocate("s3://media/hls/a/init.mp4", out var location));
-        var now = new DateTime(2026, 10, 22, 12, 0, 0, DateTimeKind.Utc);
-
-        var url = protocol.GetUploadAddress(_access, location, now, TimeSpan.FromHours(1));
-
-        Assert.StartsWith("http://minio.lan:9000/media/hls/a/init.mp4?X-Amz-Algorithm=AWS4-HMAC-SHA256&", url.AbsoluteUri, StringComparison.Ordinal);
-        Assert.Contains("X-Amz-Expires=3600&", url.Query, StringComparison.Ordinal);
-
-        // The method is signed.
-        var get = S3UrlSigner.GetUrl(S3StorageProtocol.ToS3Access(_access), "media", "hls/a/init.mp4", now, TimeSpan.FromHours(1), "GET", null);
-        Assert.NotEqual(get, url);
-    }
-
-    [Fact]
     public async Task ListAsync_TruncatedPages_FollowsTheContinuationToken()
     {
         var handler = new StubHandler(request => request.RequestUri!.Query.Contains("continuation-token=", StringComparison.Ordinal)

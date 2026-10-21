@@ -1,20 +1,17 @@
 using System;
 using System.Threading;
 using MediaBrowser.Common.Configuration;
-using MediaBrowser.Controller.Hls;
 using MediaBrowser.Model.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Server.Implementations.Hls;
 
 /// <summary>
-/// Follows the settings of pre-encoded HLS: every save is checked again and the HLS store opened once, so the services read
-/// one consistent snapshot of both.
+/// Follows the settings of pre-encoded HLS: every save is checked again, so the services read one consistent snapshot.
 /// </summary>
 public sealed class HlsSettings : IDisposable
 {
     private readonly IConfigurationManager _configurationManager;
-    private readonly IHlsStoreFactory _storeFactory;
     private readonly ILogger<HlsSettings> _logger;
     private readonly Lock _lock = new();
     private HlsSettingsSnapshot _current;
@@ -23,12 +20,10 @@ public sealed class HlsSettings : IDisposable
     /// Initializes a new instance of the <see cref="HlsSettings"/> class.
     /// </summary>
     /// <param name="configurationManager">The configuration manager.</param>
-    /// <param name="storeFactory">The factory of HLS stores.</param>
     /// <param name="logger">The logger.</param>
-    public HlsSettings(IConfigurationManager configurationManager, IHlsStoreFactory storeFactory, ILogger<HlsSettings> logger)
+    public HlsSettings(IConfigurationManager configurationManager, ILogger<HlsSettings> logger)
     {
         _configurationManager = configurationManager;
-        _storeFactory = storeFactory;
         _logger = logger;
         _current = Apply(configurationManager.GetHlsOptions(), 0);
         configurationManager.NamedConfigurationUpdated += OnNamedConfigurationUpdated;
@@ -61,10 +56,9 @@ public sealed class HlsSettings : IDisposable
         if (HlsOptionsValidator.Validate(options) is { } error)
         {
             _logger.LogError("The settings of pre-encoded HLS are invalid, so it is off: {Error}", error);
-            return new HlsSettingsSnapshot(new HlsOptions(), null, error, version);
+            return new HlsSettingsSnapshot(new HlsOptions(), error, version);
         }
 
-        var store = string.IsNullOrWhiteSpace(options.Store) ? null : _storeFactory.Create(options.Store);
-        return new HlsSettingsSnapshot(options, store, null, version);
+        return new HlsSettingsSnapshot(options, null, version);
     }
 }

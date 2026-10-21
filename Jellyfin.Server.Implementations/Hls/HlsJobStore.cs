@@ -246,9 +246,9 @@ public sealed partial class HlsJobStore : IDisposable
                 foreach (var sha in shas)
                 {
                     var renditions = await context.HlsRenditions.Where(r => r.Sha256 == sha).OrderBy(r => r.Key).ToListAsync(cancellationToken).ConfigureAwait(false);
-                    foreach (var directory in renditions.Select(r => r.RelativeDirectory).OfType<string>())
+                    foreach (var rendition in renditions.Where(r => r.RelativeDirectory is not null))
                     {
-                        await QueueDeletionAsync(context, directory, now, "The content has no library file left.", cancellationToken).ConfigureAwait(false);
+                        await QueueDeletionAsync(context, rendition.Base, rendition.RelativeDirectory!, now, "The content has no library file left.", cancellationToken).ConfigureAwait(false);
                     }
 
                     var jobs = await context.HlsJobs.Where(j => j.Sha256 == sha).ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -331,7 +331,9 @@ public sealed partial class HlsJobStore : IDisposable
         };
 
     // Runs inside the caller's transaction. Only directories of the layout are ever queued; a queued directory keeps its earliest time.
-    private static async Task QueueDeletionAsync(JellyfinDbContext context, string relativeDirectory, DateTime notBefore, string reason, CancellationToken cancellationToken)
+    // The lease token in a directory makes it unique across roots. A row from before the roots has none and is queued with an empty
+    // one, which the deletion drops without deleting anything.
+    private static async Task QueueDeletionAsync(JellyfinDbContext context, string? root, string relativeDirectory, DateTime notBefore, string reason, CancellationToken cancellationToken)
     {
         if (!HlsRenditionPaths.IsValidRelativeDirectory(relativeDirectory))
         {
@@ -341,7 +343,7 @@ public sealed partial class HlsJobStore : IDisposable
         var row = await context.HlsDeletions.FindAsync([relativeDirectory], cancellationToken).ConfigureAwait(false);
         if (row is null)
         {
-            context.HlsDeletions.Add(new HlsDeletion { RelativeDirectory = relativeDirectory, NotBefore = notBefore, Reason = reason });
+            context.HlsDeletions.Add(new HlsDeletion { RelativeDirectory = relativeDirectory, Base = root ?? string.Empty, NotBefore = notBefore, Reason = reason });
         }
         else if (notBefore < row.NotBefore)
         {

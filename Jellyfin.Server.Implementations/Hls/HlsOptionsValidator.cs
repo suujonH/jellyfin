@@ -23,9 +23,9 @@ public static class HlsOptionsValidator
     public static string? Validate(HlsOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
-        if (options.Libraries is null || options.OriginalUsers is null || options.Qualities is null)
+        if (options.Libraries is null || options.Qualities is null)
         {
-            return "The libraries, the users and the qualities must not be null.";
+            return "The libraries and the qualities must not be null.";
         }
 
         if (options.Qualities.Any(q => !HlsEncodingLadder.Heights.Contains(q)) || options.Qualities.Distinct().Count() != options.Qualities.Length)
@@ -37,25 +37,6 @@ public static class HlsOptionsValidator
         if (options.Qualities.Length == 0)
         {
             return "At least one quality is required; turn pre-encoded HLS off instead.";
-        }
-
-        if (string.IsNullOrWhiteSpace(options.Store))
-        {
-            if (options.Enabled)
-            {
-                return "An HLS store is required to enable pre-encoded HLS.";
-            }
-        }
-        else
-        {
-            try
-            {
-                HlsStoreFactory.Validate(options.Store);
-            }
-            catch (ArgumentException ex)
-            {
-                return ex.Message;
-            }
         }
 
         if (options.LeaseMinutes is < 1 or > 60)

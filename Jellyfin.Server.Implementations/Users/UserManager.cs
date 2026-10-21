@@ -517,6 +517,7 @@ namespace Jellyfin.Server.Implementations.Users
                     EnablePublicSharing = user.HasPermission(PermissionKind.EnablePublicSharing),
                     EnableCollectionManagement = user.HasPermission(PermissionKind.EnableCollectionManagement),
                     EnableSubtitleManagement = user.HasPermission(PermissionKind.EnableSubtitleManagement),
+                    EnableOriginalPlayback = user.HasPermission(PermissionKind.EnableOriginalPlayback),
                     AccessSchedules = user.AccessSchedules.ToArray(),
                     BlockedTags = user.GetPreference(PreferenceKind.BlockedTags),
                     AllowedTags = user.GetPreference(PreferenceKind.AllowedTags),
@@ -899,6 +900,7 @@ namespace Jellyfin.Server.Implementations.Users
                     user.SetPermission(PermissionKind.EnableCollectionManagement, policy.EnableCollectionManagement);
                     user.SetPermission(PermissionKind.EnableSubtitleManagement, policy.EnableSubtitleManagement);
                     user.SetPermission(PermissionKind.EnableLyricManagement, policy.EnableLyricManagement);
+                    user.SetPermission(PermissionKind.EnableOriginalPlayback, policy.EnableOriginalPlayback);
                     user.SetPermission(PermissionKind.ForceRemoteSourceTranscoding, policy.ForceRemoteSourceTranscoding);
                     user.SetPermission(PermissionKind.EnablePublicSharing, policy.EnablePublicSharing);
 

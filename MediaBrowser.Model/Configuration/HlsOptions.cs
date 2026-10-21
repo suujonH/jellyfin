@@ -25,19 +25,15 @@ public class HlsOptions
     public int[] Qualities { get; set; } = [1080, 720, 480];
 
     /// <summary>
-    /// Gets or sets where the renditions are kept: an absolute local path, or <c>s3://bucket/prefix</c>.
+    /// Gets or sets a value indicating whether the original file may be played next to its published HLS at all.
     /// </summary>
-    public string Store { get; set; } = string.Empty;
+    public bool AllowOriginal { get; set; }
 
     /// <summary>
-    /// Gets or sets a value indicating whether a request from the local network may play the original file.
+    /// Gets or sets a value indicating whether a request from the local network may play the original file, as a user allowed to
+    /// may anywhere.
     /// </summary>
     public bool AllowLocalOriginal { get; set; }
-
-    /// <summary>
-    /// Gets or sets the users who may always play the original file.
-    /// </summary>
-    public Guid[] OriginalUsers { get; set; } = [];
 
     /// <summary>
     /// Gets or sets how long a worker holds a job without a heartbeat, in minutes.

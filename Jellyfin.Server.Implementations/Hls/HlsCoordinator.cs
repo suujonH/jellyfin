@@ -124,7 +124,7 @@ public sealed class HlsCoordinator : BackgroundService
 
         await StepAsync("refresh the published index", () => _index.RefreshStaleAsync(cancellationToken), cancellationToken).ConfigureAwait(false);
 
-        await StepAsync("reap the expired leases", () => _store.ReapExpiredLeasesAsync(settings.Options.MaxAttempts, settings.UploadGrace, now, cancellationToken), cancellationToken).ConfigureAwait(false);
+        await StepAsync("reap the expired leases", () => _store.ReapExpiredLeasesAsync(settings.Options.MaxAttempts, settings.Lease, now, cancellationToken), cancellationToken).ConfigureAwait(false);
         await StepAsync("schedule", () => ScheduleQueuedAsync(settings, now, cancellationToken), cancellationToken).ConfigureAwait(false);
         if (settings.Options.Enabled && now >= _nextSweep)
         {
@@ -200,7 +200,7 @@ public sealed class HlsCoordinator : BackgroundService
         }
 
         var options = settings.Options;
-        var next = new AppliedSettings(settings.Version, options.Enabled, [.. options.Libraries.Order()], [.. options.Qualities.Order()], options.Store);
+        var next = new AppliedSettings(settings.Version, options.Enabled, [.. options.Libraries.Order()], [.. options.Qualities.Order()]);
         if (!next.Enabled)
         {
             // Turning it off empties the work list; published renditions stay. A rebuild asked for meanwhile still resets the failed renditions.
@@ -232,15 +232,6 @@ public sealed class HlsCoordinator : BackgroundService
         if (last is null || rebuild || !last.Enabled || !last.Libraries.SequenceEqual(next.Libraries))
         {
             await FullScanAsync(settings, now, cancellationToken).ConfigureAwait(false);
-        }
-
-        if (last is not null && !string.Equals(last.Store, next.Store, StringComparison.Ordinal))
-        {
-            _logger.LogWarning(
-                "The HLS store changed from {Old} to {New}. Published renditions are read from the new store by their relative paths, so copy them over together with the marker {Marker}. To start over in the new store instead, create the marker there and verify the published renditions: the missing ones are encoded again, and the old store is not cleaned up",
-                last.Store,
-                next.Store,
-                HlsStorePaths.MarkerName);
         }
 
         Applied(next, rebuild);
@@ -503,5 +494,5 @@ public sealed class HlsCoordinator : BackgroundService
     }
 
     // The arrays are sorted, so a list in another order is no change.
-    private sealed record AppliedSettings(int Version, bool Enabled, Guid[] Libraries, int[] Qualities, string Store);
+    private sealed record AppliedSettings(int Version, bool Enabled, Guid[] Libraries, int[] Qualities);
 }

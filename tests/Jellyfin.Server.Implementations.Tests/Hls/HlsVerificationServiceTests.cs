@@ -79,7 +79,63 @@ public sealed class HlsVerificationServiceTests : IDisposable
 
         Assert.Equal((int)HlsJobStatus.Verifying, (await environment.JobAsync(lease.Id)).Status);
         Assert.Empty(await environment.DeletionsAsync());
-        Assert.NotNull(environment.Monitor.Problem);
+        Assert.Contains(environment.Root, environment.Monitor.GetProblems().Keys);
+    }
+
+    [Fact]
+    public async Task EveryRoot_IsCheckedOnItsOwn()
+    {
+        // The job of the lost root waits, the other is published.
+        var (environment, service) = Create();
+        var other = Path.Combine(environment.TempDirectory, "other");
+        var (_, lost, _) = await environment.SubmitAsync(Sha('a'));
+        var (_, kept, _) = await environment.SubmitAsync(Sha('b'), other);
+        Directory.Delete(environment.Root, true);
+
+        await service.VerifyBatchAsync(environment.Now, CancellationToken);
+
+        Assert.Equal((int)HlsJobStatus.Verifying, (await environment.JobAsync(lost.Id)).Status);
+        Assert.Equal((int)HlsJobStatus.Complete, (await environment.JobAsync(kept.Id)).Status);
+        Assert.All(await environment.Store.GetRenditionsAsync(Sha('b'), CancellationToken), r => Assert.Equal((HlsRenditionState.Published, other), (r.State, r.Base)));
+    }
+
+    [Fact]
+    public async Task ARootThatCannotBeTrusted_DoesNotHoldUpTheOthers()
+    {
+        // More jobs of the lost root wait, and longer, than a batch holds.
+        var (environment, service) = Create();
+        var lost = Path.Combine(environment.TempDirectory, "lost");
+        for (var i = 0; i < 5; i++)
+        {
+            await environment.SubmitAsync(Sha((char)('a' + i)), lost);
+            environment.Now += TimeSpan.FromSeconds(1);
+        }
+
+        Directory.Delete(lost, true);
+        var (_, kept, _) = await environment.SubmitAsync(Sha('f'));
+
+        await service.VerifyBatchAsync(environment.Now, CancellationToken);
+
+        Assert.Equal((int)HlsJobStatus.Complete, (await environment.JobAsync(kept.Id)).Status);
+        Assert.Equal(5, (await environment.JobsAsync()).Count(j => j.Status == (int)HlsJobStatus.Verifying));
+    }
+
+    [Fact]
+    public async Task Reverify_SkipsOnlyTheRootThatCannotBeTrusted()
+    {
+        var (environment, service) = Create();
+        var other = Path.Combine(environment.TempDirectory, "other");
+        await environment.SubmitAsync(Sha('a'));
+        await environment.SubmitAsync(Sha('b'), other);
+        await service.VerifyBatchAsync(environment.Now, CancellationToken);
+        Directory.Delete(environment.Root, true);
+
+        await service.ReverifyAsync(null, CancellationToken);
+
+        Assert.Equal((5, 0), (service.LastReverify!.Checked, service.LastReverify.Failed));
+        Assert.StartsWith(environment.Root + ": ", service.LastReverify.Aborted, StringComparison.Ordinal);
+        Assert.All(await environment.Store.GetRenditionsAsync(Sha('a'), CancellationToken), r => Assert.Equal(HlsRenditionState.Published, r.State));
+        Assert.Empty(await environment.DeletionsAsync());
     }
 
     [Fact]

@@ -8,9 +8,14 @@ namespace Jellyfin.Database.Implementations.Entities;
 public class HlsDeletion
 {
     /// <summary>
-    /// Gets or sets the directory, relative to the root of the HLS store.
+    /// Gets or sets the directory, relative to its root; the lease token in it makes it unique across the roots.
     /// </summary>
     public required string RelativeDirectory { get; set; }
+
+    /// <summary>
+    /// Gets or sets the root of the HLS store the directory is in: an absolute local path, or <c>s3://bucket/prefix</c>.
+    /// </summary>
+    public required string Base { get; set; }
 
     /// <summary>
     /// Gets or sets when the directory may be deleted.

@@ -37,10 +37,10 @@ namespace Jellyfin.Server.Integration.Tests.Controllers
         {
             var client = await CreateAdministratorClientAsync();
 
-            var response = await client.PutAsJsonAsync("Hls/Settings", new HlsOptions { Enabled = true }, TestContext.Current.CancellationToken);
+            var response = await client.PutAsJsonAsync("Hls/Settings", new HlsOptions { Enabled = true, Qualities = [] }, TestContext.Current.CancellationToken);
 
             Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-            Assert.Contains("store", await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken), System.StringComparison.Ordinal);
+            Assert.Contains("quality", await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken), System.StringComparison.Ordinal);
         }
 
         [Fact]

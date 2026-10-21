@@ -8,6 +8,7 @@ namespace Jellyfin.Server.Implementations.Hls;
 /// </summary>
 /// <param name="Id">The job.</param>
 /// <param name="Sha256">The hash of the content.</param>
+/// <param name="Base">The root of the HLS store the worker uploaded to.</param>
 /// <param name="Attempt">How often the job was claimed.</param>
 /// <param name="Outputs">The reported renditions.</param>
-public sealed record HlsVerifyingJob(Guid Id, string Sha256, int Attempt, IReadOnlyList<HlsVerifyingOutput> Outputs);
+public sealed record HlsVerifyingJob(Guid Id, string Sha256, string Base, int Attempt, IReadOnlyList<HlsVerifyingOutput> Outputs);

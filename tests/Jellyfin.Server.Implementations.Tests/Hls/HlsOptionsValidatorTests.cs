@@ -1,5 +1,4 @@
 using System;
-using System.IO;
 using Jellyfin.Server.Implementations.Hls;
 using MediaBrowser.Model.Configuration;
 using Xunit;
@@ -8,18 +7,13 @@ namespace Jellyfin.Server.Implementations.Tests.Hls;
 
 public class HlsOptionsValidatorTests
 {
-    private static readonly string _localStore = Path.Combine(Path.GetTempPath(), "hls");
-
     [Fact]
     public void Validate_Defaults_AreValid()
         => Assert.Null(HlsOptionsValidator.Validate(new HlsOptions()));
 
-    [Theory]
-    [InlineData("")]
-    [InlineData("s3://bucket")]
-    [InlineData("s3://bucket/hls/prefix")]
-    public void Validate_EnabledWithAStore_IsValid(string store)
-        => Assert.Null(HlsOptionsValidator.Validate(new HlsOptions { Enabled = true, Store = store.Length == 0 ? _localStore : store }));
+    [Fact]
+    public void Validate_Enabled_NeedsNoStore()
+        => Assert.Null(HlsOptionsValidator.Validate(new HlsOptions { Enabled = true, AllowOriginal = true }));
 
     [Theory]
     [InlineData(new int[0])]
@@ -27,22 +21,6 @@ public class HlsOptionsValidatorTests
     [InlineData(new[] { 1080, 1000 })]
     public void Validate_Qualities_AreFromTheLadderOnceEachAndAtLeastOne(int[] qualities)
         => Assert.NotNull(HlsOptionsValidator.Validate(new HlsOptions { Qualities = qualities }));
-
-    [Fact]
-    public void Validate_Enabled_NeedsAStore()
-        => Assert.Equal("An HLS store is required to enable pre-encoded HLS.", HlsOptionsValidator.Validate(new HlsOptions { Enabled = true }));
-
-    [Theory]
-    [InlineData("hls")]
-    [InlineData("s3://")]
-    [InlineData("s3:///hls")]
-    [InlineData("s3://bucket/a/../b")]
-    public void Validate_Store_IsAnAbsolutePathOrAPrefixOfABucket(string store)
-    {
-        // Checked even while off, so a store set before turning it on is valid when it is turned on.
-        Assert.NotNull(HlsOptionsValidator.Validate(new HlsOptions { Store = store }));
-        Assert.NotNull(HlsOptionsValidator.Validate(new HlsOptions { Enabled = true, Store = store }));
-    }
 
     [Theory]
     [InlineData(0, 3, 72, 24)]
@@ -78,7 +56,6 @@ public class HlsOptionsValidatorTests
     public void Validate_Lists_AreNotNull()
     {
         Assert.NotNull(HlsOptionsValidator.Validate(new HlsOptions { Libraries = null! }));
-        Assert.NotNull(HlsOptionsValidator.Validate(new HlsOptions { OriginalUsers = null! }));
         Assert.NotNull(HlsOptionsValidator.Validate(new HlsOptions { Qualities = null! }));
     }
 
@@ -97,7 +74,7 @@ public class HlsOptionsValidatorTests
 
         Assert.Equal("hls", store.Key);
         Assert.Equal(typeof(HlsOptions), store.ConfigurationType);
-        store.Validate(new HlsOptions(), new HlsOptions { Enabled = true, Store = _localStore });
-        Assert.Throws<ArgumentException>(() => store.Validate(new HlsOptions(), new HlsOptions { Enabled = true }));
+        store.Validate(new HlsOptions(), new HlsOptions { Enabled = true });
+        Assert.Throws<ArgumentException>(() => store.Validate(new HlsOptions(), new HlsOptions { Enabled = true, Qualities = [] }));
     }
 }

@@ -450,16 +450,6 @@ public sealed class NetworkStorageManagerTests : IDisposable
     }
 
     [Fact]
-    public async Task GetUploadAddress_CoveredObject_IsPresignedForTheLifetime()
-    {
-        await AddAccessAsync("media");
-
-        Assert.Contains("X-Amz-Expires=3600&", _manager.GetUploadAddress("s3://media/hls/a.m4s", TimeSpan.FromHours(1))?.Query, StringComparison.Ordinal);
-        Assert.Null(_manager.GetUploadAddress("s3://other/hls/a.m4s", TimeSpan.FromHours(1)));
-        Assert.Null(_manager.GetUploadAddress("https://cdn.example.com/a.m4s", TimeSpan.FromHours(1)));
-    }
-
-    [Fact]
     public async Task ListAsync_CoveredPrefix_IsListedWithItsAccess()
     {
         await AddAccessAsync("media");
@@ -603,9 +593,6 @@ public sealed class NetworkStorageManagerTests : IDisposable
             OnCheck?.Invoke(expectedSize);
             return Task.FromResult(ResultFor?.Invoke(location) ?? Result);
         }
-
-        public Uri GetUploadAddress(NetworkStorageAccessDto access, StorageLocation location, DateTime now, TimeSpan lifetime)
-            => _inner.GetUploadAddress(access, location, now, lifetime);
 
         public Task<IReadOnlyList<StorageObject>> ListAsync(NetworkStorageAccessDto access, StorageLocation prefix, int? limit, CancellationToken cancellationToken)
         {

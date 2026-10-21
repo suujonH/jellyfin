@@ -1,18 +1,15 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Hls;
-using MediaBrowser.Model.Hls;
-using MediaBrowser.Model.IO;
 
 namespace Jellyfin.Server.Implementations.Hls;
 
 /// <summary>
-/// The HLS store in a local directory, which may be a mount point.
+/// The HLS store in a local directory, which may be a mount point. Workers write it over SFTP; the server only reads and deletes.
 /// </summary>
 internal sealed class LocalHlsStore : IHlsStore
 {
@@ -34,7 +31,7 @@ internal sealed class LocalHlsStore : IHlsStore
     public bool IsLocal => true;
 
     /// <inheritdoc />
-    public async Task<string?> CheckRootAsync(IReadOnlyCollection<string> publishedDirectories, CancellationToken cancellationToken)
+    public Task<string?> CheckRootAsync(IReadOnlyCollection<string> publishedDirectories, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(publishedDirectories);
         var paths = publishedDirectories.Select(GetFullPath).ToArray();
@@ -44,33 +41,20 @@ internal sealed class LocalHlsStore : IHlsStore
             // dropped FUSE mount, ESTALE of NFS.
             if (!Directory.Exists(_root))
             {
-                return "The HLS store does not exist or cannot be read: " + _root;
+                return Task.FromResult<string?>("The HLS store does not exist or cannot be read: " + _root);
             }
 
             // A real read: EACCES and ENOTCONN surface here, not in Directory.Exists.
             _ = Directory.EnumerateFileSystemEntries(_root).Any();
 
-            // Nothing published yet: usable, but nothing is written in it, since it may be a mount point that has to stay
-            // empty until it is mounted.
-            if (HasMarker() || paths.Length == 0)
-            {
-                return null;
-            }
-
-            // Neither marked nor holding a published directory: most likely the mount point without the mount, which must
-            // not get a marker.
-            if (!paths.Any(Directory.Exists))
-            {
-                return "The HLS store has no marker " + HlsStorePaths.MarkerName + " and none of the published renditions; it may not be mounted: " + _root;
-            }
-
-            // The store itself, checked the first time since something was published in it, or a store that predates the marker.
-            await File.WriteAllTextAsync(Path.Combine(_root, HlsStorePaths.MarkerName), HlsStorePaths.MarkerContent, cancellationToken).ConfigureAwait(false);
-            return null;
+            // Neither marked nor holding a published directory: most likely the mount point without the mount.
+            return Task.FromResult(HasMarker() || paths.Length == 0 || paths.Any(Directory.Exists)
+                ? null
+                : "The HLS store has no marker " + HlsStorePaths.MarkerName + " and none of the published renditions; it may not be mounted: " + _root);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return "The HLS store cannot be used: " + ex.Message;
+            return Task.FromResult<string?>("The HLS store cannot be used: " + ex.Message);
         }
     }
 
@@ -131,48 +115,6 @@ internal sealed class LocalHlsStore : IHlsStore
     }
 
     /// <inheritdoc />
-    public async Task WriteAsync(string path, Stream content, CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(content);
-        var fullPath = GetFullPath(path);
-
-        // The root is not created: it may be a mount point.
-        if (!Directory.Exists(_root))
-        {
-            throw new IOException("The HLS store does not exist or cannot be read: " + _root);
-        }
-
-        var temporaryPath = fullPath + "." + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture) + ".tmp";
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-            var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, IODefaults.FileStreamBufferSize, FileOptions.Asynchronous);
-            await using (stream.ConfigureAwait(false))
-            {
-                await content.CopyToAsync(stream, cancellationToken).ConfigureAwait(false);
-            }
-
-            File.Move(temporaryPath, fullPath, true);
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            throw new IOException(ex.Message, ex);
-        }
-        finally
-        {
-            TryDeleteFile(temporaryPath);
-        }
-    }
-
-    /// <inheritdoc />
-    public Uri? GetUploadAddress(string path, TimeSpan lifetime)
-    {
-        // Workers upload to the server, which writes the files.
-        HlsStorePaths.Validate(path, nameof(path));
-        return null;
-    }
-
-    /// <inheritdoc />
     public string? GetServerPath(string path) => GetFullPath(path);
 
     /// <inheritdoc />
@@ -183,34 +125,15 @@ internal sealed class LocalHlsStore : IHlsStore
     }
 
     /// <inheritdoc />
-    public async Task<HlsStoreTestResult> TestAsync(CancellationToken cancellationToken)
+    public Task<bool> HasMarkerAsync(CancellationToken cancellationToken)
     {
-        // The root is not created: it may be a mount point.
-        if (!Directory.Exists(_root))
-        {
-            return new HlsStoreTestResult(false, false, "The HLS store does not exist or cannot be read: " + _root);
-        }
-
-        var hasMarker = false;
-        var path = Path.Combine(_root, HlsStorePaths.TestNamePrefix + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture));
         try
         {
-            hasMarker = HasMarker();
-            var content = Guid.NewGuid().ToByteArray();
-            await File.WriteAllBytesAsync(path, content, cancellationToken).ConfigureAwait(false);
-            var read = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
-            File.Delete(path);
-            return read.AsSpan().SequenceEqual(content)
-                ? new HlsStoreTestResult(true, hasMarker, null)
-                : new HlsStoreTestResult(false, hasMarker, "The test file read back is not what was written.");
+            return Task.FromResult(HasMarker());
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (UnauthorizedAccessException ex)
         {
-            return new HlsStoreTestResult(false, hasMarker, ex.Message);
-        }
-        finally
-        {
-            TryDeleteFile(path);
+            throw new IOException(ex.Message, ex);
         }
     }
 
@@ -226,18 +149,6 @@ internal sealed class LocalHlsStore : IHlsStore
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             // A parent that is not empty, or just got a new entry, stays.
-        }
-    }
-
-    private static void TryDeleteFile(string path)
-    {
-        try
-        {
-            File.Delete(path);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // Left behind; the name tells what it is.
         }
     }
 

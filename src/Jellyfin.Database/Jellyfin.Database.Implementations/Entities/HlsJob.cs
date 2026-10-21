@@ -33,6 +33,11 @@ public class HlsJob
     public string? Sha256 { get; set; }
 
     /// <summary>
+    /// Gets or sets the root of the HLS store the worker uploads the plan to, as it reported it when it identified the file.
+    /// </summary>
+    public string? Base { get; set; }
+
+    /// <summary>
     /// Gets or sets the file the worker reads, a <c>MediaBrowser.Model.Hls.HlsSourceFile</c> as JSON, chosen when the job is claimed.
     /// </summary>
     public string? Input { get; set; }

@@ -1,8 +1,6 @@
 using System;
-using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.IO;
-using System.Linq;
 using System.Net.Mime;
 using System.Threading;
 using System.Threading.Tasks;
@@ -17,9 +15,9 @@ using Microsoft.AspNetCore.Mvc;
 namespace Jellyfin.Api.Controllers;
 
 /// <summary>
-/// The API HLS workers claim, encode and upload jobs of pre-encoded HLS with. Every request carries an API key and the header
-/// <c>X-Jellyfin-Hls-Protocol: 1</c>. A request that does not make sense is answered with 400, a lease that is no longer valid
-/// with 409, and a store that cannot be used with 503, each with the reason.
+/// The API HLS workers claim and report jobs of pre-encoded HLS with; they upload to their own storage. Every request carries an
+/// API key and the header <c>X-Jellyfin-Hls-Protocol: 1</c>. A request that does not make sense is answered with 400, a lease that
+/// is no longer valid with 409, and storage that cannot be reached with 503, each with the reason.
 /// </summary>
 [Route("HlsWorker")]
 [Authorize(Policy = Policies.RequiresElevation)]
@@ -128,10 +126,10 @@ public class HlsWorkerController : BaseJellyfinApiController
     /// Records what the file of a job is, and gets what the job encodes.
     /// </summary>
     /// <param name="jobId">The job.</param>
-    /// <param name="identification">The hash and the ffprobe output of the file.</param>
+    /// <param name="identification">The hash and the ffprobe output of the file, and the root of the HLS store the worker uploads to.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <response code="200">The plan, or that the job is done.</response>
-    /// <response code="400">The hash or the probe is not valid, or the job was identified as other content.</response>
+    /// <response code="400">The hash or the probe is not valid, the worker may not upload to the root, or the job was identified as other content or with another root.</response>
     /// <response code="409">The lease is no longer valid, or the file changed since the claim.</response>
     /// <returns>What the job encodes.</returns>
     [HttpPost("Jobs/{jobId}/Identify")]
@@ -148,66 +146,16 @@ public class HlsWorkerController : BaseJellyfinApiController
                 : Conflict("The lease of the job is no longer valid, or its file changed since it was claimed."));
 
     /// <summary>
-    /// Gets where to upload files of a rendition of the plan.
+    /// Checks whether the worker may upload to a root of an HLS store, as identifying a job does.
     /// </summary>
-    /// <param name="jobId">The job.</param>
-    /// <param name="request">The rendition and its files.</param>
+    /// <param name="request">The root.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
-    /// <response code="200">Addresses returned.</response>
-    /// <response code="400">The plan has no such rendition or file.</response>
-    /// <response code="409">The lease is no longer valid.</response>
-    /// <returns>The addresses.</returns>
-    [HttpPost("Jobs/{jobId}/Uploads")]
+    /// <response code="200">Checked; the result says whether the root can be used and has the marker.</response>
+    /// <returns>The result.</returns>
+    [HttpPost("Bases/Check")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status409Conflict)]
-    public Task<ActionResult<HlsUploadResponse>> GetUploads(
-        [FromRoute, Required] Guid jobId,
-        [FromBody, Required] HlsUploadRequest request,
-        CancellationToken cancellationToken)
-        => GuardAsync<HlsUploadResponse>(async () =>
-        {
-            if (await _taskCenter.GetUploadTargetsAsync(jobId, request, cancellationToken).ConfigureAwait(false) is not { } targets)
-            {
-                return Conflict(LeaseLost);
-            }
-
-            return new HlsUploadResponse(targets
-                .Select(t => ToAddress(
-                    t.Path,
-                    t.Address,
-                    t.ContentType,
-                    "HlsWorker/Jobs/" + jobId.ToString("N") + "/Files/" + Uri.EscapeDataString(request.Key) + "/" + Uri.EscapeDataString(t.Path)
-                        + "?leaseToken=" + Uri.EscapeDataString(request.LeaseToken)))
-                .ToList());
-        });
-
-    /// <summary>
-    /// Uploads a file of a rendition to a local HLS store.
-    /// </summary>
-    /// <param name="jobId">The job.</param>
-    /// <param name="key">The key of the rendition.</param>
-    /// <param name="file">The name of the file.</param>
-    /// <param name="leaseToken">The token of the lease.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <response code="204">File written.</response>
-    /// <response code="400">The plan has no such rendition or file, or the store is network storage.</response>
-    /// <response code="409">The lease is no longer valid.</response>
-    /// <returns>A <see cref="NoContentResult"/>.</returns>
-    [HttpPut("Jobs/{jobId}/Files/{key}/{file}")]
-    [DisableRequestSizeLimit]
-    [AcceptsFile(MediaTypeNames.Application.Octet)]
-    [ProducesResponseType(StatusCodes.Status204NoContent)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status409Conflict)]
-    public Task<ActionResult> PutFile(
-        [FromRoute, Required] Guid jobId,
-        [FromRoute, Required] string key,
-        [FromRoute, Required] string file,
-        [FromQuery, Required] string leaseToken,
-        CancellationToken cancellationToken)
-        => GuardAsync(async () =>
-            await _taskCenter.WriteFileAsync(jobId, leaseToken, key, file, Request.Body, cancellationToken).ConfigureAwait(false) ? NoContent() : Conflict(LeaseLost));
+    public async Task<ActionResult<HlsStoreTestResult>> CheckBase([FromBody, Required] HlsBaseRequest request, CancellationToken cancellationToken)
+        => await _taskCenter.CheckBaseAsync(request.Base, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// Reports the renditions of a job as encoded and uploaded; they are published once verified.
@@ -240,45 +188,6 @@ public class HlsWorkerController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public Task<ActionResult> Fail([FromRoute, Required] Guid jobId, [FromBody, Required] HlsFailure failure, CancellationToken cancellationToken)
         => GuardAsync(async () => await _taskCenter.FailAsync(jobId, failure, cancellationToken).ConfigureAwait(false) ? NoContent() : Conflict(LeaseLost));
-
-    /// <summary>
-    /// Gets where a worker uploads a test file, to see that its uploads reach the HLS store. The file is deleted afterwards.
-    /// </summary>
-    /// <param name="request">The worker.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <response code="200">Address returned.</response>
-    /// <response code="503">No store is set, or no access covers it.</response>
-    /// <returns>The address.</returns>
-    [HttpPost("UploadCheck")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
-    public Task<ActionResult<HlsUploadAddress>> StartUploadCheck([FromBody, Required] HlsWorkerRequest request, CancellationToken cancellationToken)
-        => GuardAsync<HlsUploadAddress>(async () =>
-        {
-            var check = await _taskCenter.StartUploadCheckAsync(request.Worker, cancellationToken).ConfigureAwait(false);
-            return ToAddress(check.Path, check.Address, MediaTypeNames.Application.Octet, "HlsWorker/UploadCheck/" + check.Id.ToString("N"));
-        });
-
-    /// <summary>
-    /// Uploads the test file of an upload check to a local HLS store, which writes and deletes it.
-    /// </summary>
-    /// <param name="checkId">The check.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <response code="204">File written and deleted.</response>
-    /// <response code="404">The check is not known, or it expired.</response>
-    /// <returns>A <see cref="NoContentResult"/>.</returns>
-    [HttpPut("UploadCheck/{checkId}")]
-    [DisableRequestSizeLimit]
-    [AcceptsFile(MediaTypeNames.Application.Octet)]
-    [ProducesResponseType(StatusCodes.Status204NoContent)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public Task<ActionResult> PutUploadCheck([FromRoute, Required] Guid checkId, CancellationToken cancellationToken)
-        => GuardAsync(async () =>
-            await _taskCenter.WriteUploadCheckAsync(checkId, Request.Body, cancellationToken).ConfigureAwait(false) ? NoContent() : NotFound("The upload check is not known, or it expired."));
-
-    // A signed address in the storage, or the route of the server for a local store.
-    private static HlsUploadAddress ToAddress(string path, Uri? address, string contentType, string serverRoute)
-        => new(path, "PUT", address?.AbsoluteUri ?? serverRoute, new Dictionary<string, string> { ["Content-Type"] = contentType });
 
     private async Task<ActionResult> GuardAsync(Func<Task<ActionResult>> action)
     {

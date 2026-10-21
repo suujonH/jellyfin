@@ -9,7 +9,7 @@ namespace MediaBrowser.Controller.Hls;
 
 /// <summary>
 /// The task center of pre-encoded HLS, as the worker API and the management API use it. A request that does not make sense
-/// throws <see cref="ArgumentException"/>; a store that cannot be used throws <see cref="IOException"/>.
+/// throws <see cref="ArgumentException"/>; storage that cannot be reached throws <see cref="IOException"/>.
 /// </summary>
 public interface IHlsTaskCenter
 {
@@ -43,31 +43,19 @@ public interface IHlsTaskCenter
     /// Records what the file of a job is and decides what the job encodes.
     /// </summary>
     /// <param name="jobId">The job.</param>
-    /// <param name="identification">What the worker found.</param>
+    /// <param name="identification">What the worker found, and the root of the HLS store it uploads to.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The plan, or <c>null</c> when the lease is not valid or the file is no longer the one the job was claimed for.</returns>
     Task<HlsIdentifyResponse?> IdentifyAsync(Guid jobId, HlsIdentification identification, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Gets where a worker uploads files of a rendition of its plan.
+    /// Checks whether a worker may upload to a root of an HLS store: the server can read it and trust it, and a local one is
+    /// an existing directory outside the libraries and the data of the server.
     /// </summary>
-    /// <param name="jobId">The job.</param>
-    /// <param name="request">The rendition and its files.</param>
+    /// <param name="root">The root: <c>s3://bucket/prefix</c>, or an absolute path on the server.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>The targets, in the order of the request, or <c>null</c> when the lease is not valid.</returns>
-    Task<IReadOnlyList<HlsUploadTarget>?> GetUploadTargetsAsync(Guid jobId, HlsUploadRequest request, CancellationToken cancellationToken);
-
-    /// <summary>
-    /// Writes a file a worker uploads to the server, for a local store.
-    /// </summary>
-    /// <param name="jobId">The job.</param>
-    /// <param name="leaseToken">The token of the lease.</param>
-    /// <param name="key">The key of the rendition in the plan.</param>
-    /// <param name="file">The name of the file in the directory of the rendition.</param>
-    /// <param name="content">The content.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>Whether the lease was valid.</returns>
-    Task<bool> WriteFileAsync(Guid jobId, string leaseToken, string key, string file, Stream content, CancellationToken cancellationToken);
+    /// <returns>The result.</returns>
+    Task<HlsStoreTestResult> CheckBaseAsync(string root, CancellationToken cancellationToken);
 
     /// <summary>
     /// Records the renditions a worker encoded; they are published once verified.
@@ -86,23 +74,6 @@ public interface IHlsTaskCenter
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>Whether the lease was valid.</returns>
     Task<bool> FailAsync(Guid jobId, HlsFailure failure, CancellationToken cancellationToken);
-
-    /// <summary>
-    /// Starts an upload check of a worker.
-    /// </summary>
-    /// <param name="worker">The name of the worker.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>The check.</returns>
-    Task<HlsUploadCheck> StartUploadCheckAsync(string worker, CancellationToken cancellationToken);
-
-    /// <summary>
-    /// Writes the file of an upload check of a local store, and deletes it again.
-    /// </summary>
-    /// <param name="checkId">The check.</param>
-    /// <param name="content">The content.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>Whether the check is known and has not expired.</returns>
-    Task<bool> WriteUploadCheckAsync(Guid checkId, Stream content, CancellationToken cancellationToken);
 
     /// <summary>
     /// Gets the state of pre-encoded HLS.
