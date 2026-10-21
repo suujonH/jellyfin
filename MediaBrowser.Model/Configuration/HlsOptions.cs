@@ -25,6 +25,11 @@ public class HlsOptions
     public int[] Qualities { get; set; } = [1080, 720, 480];
 
     /// <summary>
+    /// Gets or sets the qualities of the libraries that have their own, which narrow the global ones.
+    /// </summary>
+    public HlsLibraryQualities[] LibraryQualities { get; set; } = [];
+
+    /// <summary>
     /// Gets or sets a value indicating whether the original file may be played next to its published HLS at all.
     /// </summary>
     public bool AllowOriginal { get; set; }

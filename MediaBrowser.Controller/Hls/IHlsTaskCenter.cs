@@ -49,6 +49,20 @@ public interface IHlsTaskCenter
     Task<HlsIdentifyResponse?> IdentifyAsync(Guid jobId, HlsIdentification identification, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Gets the libraries whose files are pre-encoded, with their video qualities.
+    /// </summary>
+    /// <returns>The libraries; none while pre-encoded HLS is off.</returns>
+    IReadOnlyList<HlsWorkerLibrary> GetLibraries();
+
+    /// <summary>
+    /// Starts a job for media a worker adds to a library, which encodes some of its qualities right away.
+    /// </summary>
+    /// <param name="request">The media and what to encode.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The job, that nothing is left to encode, or <c>null</c> when the content has a job in progress.</returns>
+    Task<HlsEagerResponse?> StartEagerJobAsync(HlsEagerRequest request, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Checks whether a worker may upload to a root of an HLS store: the server can read it and trust it, and a local one is
     /// an existing directory outside the libraries and the data of the server.
     /// </summary>

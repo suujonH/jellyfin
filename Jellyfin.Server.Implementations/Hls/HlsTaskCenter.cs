@@ -87,7 +87,7 @@ public sealed class HlsTaskCenter : IHlsTaskCenter
         var lease = await _store.ClaimAsync(new HlsClaimRequest(worker, settings.Lease, settings.IsLibraryEligible, DateTime.UtcNow), cancellationToken).ConfigureAwait(false);
         return lease is null
             ? null
-            : new HlsClaimedJob(new HlsWorkLease(lease.Id, lease.LeaseToken, (int)settings.Lease.TotalSeconds, lease.Attempt), lease.Input);
+            : new HlsClaimedJob(new HlsWorkLease(lease.Id, lease.LeaseToken, (int)settings.Lease.TotalSeconds, lease.Attempt), lease.Input!);
     }
 
     /// <inheritdoc />
@@ -96,6 +96,12 @@ public sealed class HlsTaskCenter : IHlsTaskCenter
         if (await _store.GetLeaseAsync(jobId, leaseToken, DateTime.UtcNow, cancellationToken).ConfigureAwait(false) is not { } lease)
         {
             return null;
+        }
+
+        // A job started for media being added reads the file of its worker.
+        if (lease.Input is null)
+        {
+            return new HlsJobInput(null, null);
         }
 
         // A file that changed since the claim is sent as it is now: identifying it finds the change, and the job waits again.
@@ -128,10 +134,11 @@ public sealed class HlsTaskCenter : IHlsTaskCenter
             return null;
         }
 
-        var previousSha256 = (await _store.GetSourceAsync(lease.Input.ItemId, cancellationToken).ConfigureAwait(false))?.Sha256;
+        var itemId = lease.Input?.ItemId;
+        var previousSha256 = itemId is { } id ? (await _store.GetSourceAsync(id, cancellationToken).ConfigureAwait(false))?.Sha256 : null;
         var settings = _settings.Current;
         var result = await _store.IdentifyAsync(
-            new HlsIdentifyRequest(jobId, identification.LeaseToken, sha256, probe, root, settings.Options.Qualities, HlsEncodingProfile.Version, settings.IsLibraryEligible, now),
+            new HlsIdentifyRequest(jobId, identification.LeaseToken, sha256, probe, root, settings.GetQualities, HlsEncodingProfile.Version, settings.IsLibraryEligible, now),
             cancellationToken).ConfigureAwait(false);
         if (result.Outcome == HlsIdentifyOutcome.LeaseLost)
         {
@@ -147,13 +154,65 @@ public sealed class HlsTaskCenter : IHlsTaskCenter
         // The file now has its hash, or lost it, and the renditions of both contents may have changed hands.
         // The change is committed, so a worker that hangs up now does not get to leave the index behind.
         string[] shas = previousSha256 is null || previousSha256 == sha256 ? [sha256] : [sha256, previousSha256];
-        await FollowAsync(lease.Input.ItemId, shas).ConfigureAwait(false);
+        await FollowAsync(itemId, shas).ConfigureAwait(false);
         return result.Outcome switch
         {
             HlsIdentifyOutcome.Done => new HlsIdentifyResponse(true, null),
             HlsIdentifyOutcome.Planned => new HlsIdentifyResponse(false, result.Plan),
             _ => null
         };
+    }
+
+    /// <inheritdoc />
+    public IReadOnlyList<HlsWorkerLibrary> GetLibraries()
+    {
+        var settings = _settings.Current;
+        var libraries = new List<HlsWorkerLibrary>();
+        foreach (var folder in _libraryManager.GetVirtualFolders())
+        {
+            if (Guid.TryParse(folder.ItemId, out var id) && settings.GetQualities(id) is { Count: > 0 } qualities)
+            {
+                libraries.Add(new HlsWorkerLibrary(id, folder.Name, HlsEncodingLadder.Heights.Where(qualities.Contains).ToList()));
+            }
+        }
+
+        return libraries;
+    }
+
+    /// <inheritdoc />
+    public async Task<HlsEagerResponse?> StartEagerJobAsync(HlsEagerRequest request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ValidateWorker(request.Worker);
+        var settings = _settings.Current;
+        var library = GetLibraries().FirstOrDefault(l => l.Id.Equals(request.LibraryId))
+            ?? throw new ArgumentException("Library " + request.LibraryId + " does not exist or is not pre-encoded.", nameof(request));
+        if (request.Qualities is not { Count: > 0 } || request.Qualities.Any(q => !library.Qualities.Contains(q)))
+        {
+            throw new ArgumentException("The qualities must be some of those of the library: " + string.Join(", ", library.Qualities) + ".", nameof(request));
+        }
+
+        var sha256 = HlsProbeReader.NormalizeSha256(request.Sha256);
+        var probe = ParseProbe(request.ProbeJson);
+        var root = await GetUsableBaseAsync(request.Base, cancellationToken).ConfigureAwait(false);
+        var result = await _store.StartEagerJobAsync(
+            new HlsEagerJobRequest(request.Worker, library.Id, sha256, probe, root, request.Qualities.ToHashSet(), settings.GetQualities, HlsEncodingProfile.Version, settings.Lease, DateTime.UtcNow),
+            cancellationToken).ConfigureAwait(false);
+        if (result.KeptStoredProbe)
+        {
+            _logger.LogWarning("The probe of {Sha256} differs from the stored one, perhaps from another ffprobe; the stored one is kept", sha256);
+        }
+
+        // The renditions were synced even when the content is busy.
+        await FollowAsync(null, [sha256]).ConfigureAwait(false);
+        if (result.Outcome == HlsEagerJobOutcome.Busy)
+        {
+            return null;
+        }
+
+        return result.Lease is { } lease
+            ? new HlsEagerResponse(false, new HlsWorkLease(lease.Id, lease.LeaseToken, (int)settings.Lease.TotalSeconds, lease.Attempt), lease.Plan)
+            : new HlsEagerResponse(true, null, null);
     }
 
     /// <inheritdoc />
@@ -311,20 +370,23 @@ public sealed class HlsTaskCenter : IHlsTaskCenter
 
     // After a commit: playback and scheduling follow. The two refreshes are separate, as a refresh that fails is repeated by the index,
     // but only for what it was asked to read.
-    private async Task FollowAsync(Guid itemId, IReadOnlyList<string> sha256s)
+    private async Task FollowAsync(Guid? itemId, IReadOnlyList<string> sha256s)
     {
         foreach (var sha256 in sha256s)
         {
             _coordinator.EnqueueSchedule(sha256);
         }
 
-        try
+        if (itemId is { } id)
         {
-            await _index.RefreshItemsAsync([itemId], CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Refreshing the HLS index of item {ItemId} failed, it is tried again", itemId);
+            try
+            {
+                await _index.RefreshItemsAsync([id], CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Refreshing the HLS index of item {ItemId} failed, it is tried again", id);
+            }
         }
 
         try

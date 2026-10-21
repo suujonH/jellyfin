@@ -158,7 +158,7 @@ public sealed class HlsJobStoreTests : IDisposable
 
         var lease = await ClaimAsync(eligible: l => l.Equals(LibraryId));
 
-        Assert.Equal(item, lease!.Input.ItemId);
+        Assert.Equal(item, lease!.Input!.ItemId);
         Assert.Equal((int)HlsJobStatus.Cancelled, (await SourceJobAsync(other)).Status);
 
         // The file keeps no hash, so its job comes back once its library is enabled.
@@ -257,7 +257,7 @@ public sealed class HlsJobStoreTests : IDisposable
         var first = await AddSourceAsync();
         var second = await AddSourceAsync();
         var (lease, plan) = await ClaimAndPlanAsync(Sha('a'));
-        Assert.Equal(first, lease.Input.ItemId);
+        Assert.Equal(first, lease.Input!.ItemId);
 
         var duplicate = (await ClaimAsync())!;
         Assert.Equal(HlsIdentifyOutcome.Done, (await IdentifyAsync(duplicate, Sha('a'))).Outcome);
@@ -308,7 +308,7 @@ public sealed class HlsJobStoreTests : IDisposable
         Assert.Null(await _store.GetMediaAsync(Sha('a'), TestContext.Current.CancellationToken));
         var again = (await ClaimAsync())!;
         Assert.Equal(lease.Id, again.Id);
-        Assert.Equal(2000, again.Input.Length);
+        Assert.Equal(2000, again.Input!.Length);
         Assert.Equal(1, again.Attempt);
     }
 
@@ -332,7 +332,7 @@ public sealed class HlsJobStoreTests : IDisposable
         var (item, published, _) = await EncodeAndPublishAsync(Sha('a'));
         var id = await EnsureMediaJobAsync(Sha('a'), NextProfile);
         var lease = (await ClaimAsync())!;
-        Assert.Equal((id, HlsJobKind.Media, item), (lease.Id, lease.Kind, lease.Input.ItemId));
+        Assert.Equal((id, HlsJobKind.Media, item), (lease.Id, lease.Kind, lease.Input!.ItemId));
         _now += TimeSpan.FromSeconds(1);
 
         Assert.Equal(HlsIdentifyOutcome.SourceChanged, (await IdentifyAsync(lease, Sha('b'), NextProfile)).Outcome);
@@ -399,7 +399,7 @@ public sealed class HlsJobStoreTests : IDisposable
         var id = await EnsureMediaJobAsync(Sha('a'), NextProfile, item);
         Assert.NotNull(id);
         Assert.Null(await EnsureMediaJobAsync(Sha('a'), NextProfile));
-        Assert.True(await _store.SyncRenditionsAsync(Sha('a'), [1080, 720, 480], _now, TestContext.Current.CancellationToken));
+        Assert.True(await _store.SyncRenditionsAsync(Sha('a'), _ => [1080, 720, 480], _now, TestContext.Current.CancellationToken));
         Assert.Equal(id, await EnsureMediaJobAsync(Sha('a'), NextProfile));
         Assert.All(await _store.GetRenditionsAsync(Sha('a'), TestContext.Current.CancellationToken), r => Assert.Equal(id, r.JobId));
 
@@ -407,7 +407,7 @@ public sealed class HlsJobStoreTests : IDisposable
         Assert.Equal(id, lease.Id);
         Assert.Equal(HlsJobKind.Media, lease.Kind);
         Assert.Contains("v480", plan.Renditions.Select(r => r.Key));
-        Assert.True(await _store.SyncRenditionsAsync(Sha('a'), [1080, 720, 480, 360], _now, TestContext.Current.CancellationToken));
+        Assert.True(await _store.SyncRenditionsAsync(Sha('a'), _ => [1080, 720, 480, 360], _now, TestContext.Current.CancellationToken));
         Assert.Null(await EnsureMediaJobAsync(Sha('a'), NextProfile));
 
         await PublishAsync(lease, plan);
@@ -438,11 +438,11 @@ public sealed class HlsJobStoreTests : IDisposable
         var id = await EnsureMediaJobAsync(Sha('a'), NextProfile, second);
 
         var lease = (await ClaimAsync())!;
-        Assert.Equal((id, second), (lease.Id, lease.Input.ItemId));
+        Assert.Equal((id, second), (lease.Id, lease.Input!.ItemId));
         Assert.True(await ReleaseAsync(lease));
 
         lease = (await ClaimAsync(eligible: l => l.Equals(LibraryId)))!;
-        Assert.Equal((id, first, 2), (lease.Id, lease.Input.ItemId, lease.Attempt));
+        Assert.Equal((id, first, 2), (lease.Id, lease.Input!.ItemId, lease.Attempt));
     }
 
     [Fact]
@@ -456,6 +456,127 @@ public sealed class HlsJobStoreTests : IDisposable
 
         Assert.Equal((int)HlsJobStatus.Cancelled, (await JobAsync(id!.Value)).Status);
         Assert.All(await _store.GetRenditionsAsync(Sha('a'), TestContext.Current.CancellationToken), r => Assert.Null(r.JobId));
+    }
+
+    // ---- Qualities of the libraries
+
+    [Fact]
+    public async Task Identify_EncodesTheQualitiesOfEveryLibraryTheContentIsIn()
+    {
+        // The second file of the content is in a library with another quality, which its job encodes.
+        static IReadOnlyCollection<int> Qualities(Guid library) => library.Equals(LibraryId) ? [720] : [1080];
+        await AddSourceAsync();
+        await AddSourceAsync(OtherLibraryId);
+        var first = (await ClaimAsync())!;
+        var second = (await ClaimAsync())!;
+
+        var firstPlan = (await IdentifyAsync(first, Sha('a'), getQualities: Qualities)).Plan!;
+        var secondPlan = (await IdentifyAsync(second, Sha('a'), getQualities: Qualities)).Plan!;
+
+        Assert.Equal(["v720", "a1", "s2", "preview"], firstPlan.Renditions.Select(r => r.Key));
+        Assert.Equal(["v1080"], secondPlan.Renditions.Select(r => r.Key));
+    }
+
+    [Fact]
+    public async Task Sync_OfAContentInNoChosenLibrary_LeavesItsRenditions()
+    {
+        await EncodeAndPublishAsync(Sha('a'));
+
+        Assert.False(await _store.SyncRenditionsAsync(Sha('a'), _ => [], _now, TestContext.Current.CancellationToken));
+
+        Assert.Equal(_sortedKeys, (await _store.GetRenditionsAsync(Sha('a'), TestContext.Current.CancellationToken)).Select(r => r.Key));
+    }
+
+    // ---- Eager jobs
+
+    [Fact]
+    public async Task Eager_OfANewContent_IsLeasedAtOnce_WithTheQualitiesAskedFor_AndTheContentIsAnOrphanOfTheLibrary()
+    {
+        var result = await StartEagerAsync(Sha('a'), [720]);
+
+        Assert.Equal(HlsEagerJobOutcome.Started, result.Outcome);
+        var lease = result.Lease!;
+        Assert.Equal((HlsJobKind.Media, null, 1), (lease.Kind, lease.Input, lease.Attempt));
+        Assert.Equal(["v720", "a1", "s2", "preview"], lease.Plan!.Renditions.Select(r => r.Key));
+        var job = await _environment.JobAsync(lease.Id);
+        Assert.Equal(((int)HlsJobStatus.Running, "worker", _environment.Root, (Guid?)null), (job.Status, job.Worker, job.Base, job.ItemId));
+        var media = await _store.GetMediaAsync(Sha('a'), TestContext.Current.CancellationToken);
+        Assert.Equal((LibraryId, (DateTime?)_now), (media!.LibraryId, media.DateOrphaned));
+
+        // The quality not asked for is left to the usual jobs.
+        var renditions = await _store.GetRenditionsAsync(Sha('a'), TestContext.Current.CancellationToken);
+        Assert.Null(Assert.Single(renditions, r => r.Key == "v1080").JobId);
+        Assert.All(renditions.Where(r => r.Key != "v1080"), r => Assert.Equal(lease.Id, r.JobId));
+    }
+
+    [Fact]
+    public async Task Eager_IsBusy_WhileTheContentHasAJobOrItsRenditionsAreHeld()
+    {
+        var started = (await StartEagerAsync(Sha('a'), [720])).Lease!;
+        Assert.Equal(HlsEagerJobOutcome.Busy, (await StartEagerAsync(Sha('a'), [1080])).Outcome);
+
+        await AddSourceAsync();
+        await ClaimAndPlanAsync(Sha('b'));
+        Assert.Equal(HlsEagerJobOutcome.Busy, (await StartEagerAsync(Sha('b'), [720])).Outcome);
+
+        // Once it is done, the rest can be started.
+        await PublishAsync(started, started.Plan!);
+        var rest = await StartEagerAsync(Sha('a'), [1080]);
+        Assert.Equal(["v1080"], rest.Lease!.Plan!.Renditions.Select(r => r.Key));
+    }
+
+    [Fact]
+    public async Task Eager_WithNothingAskedForLeft_IsDone_AndKeepsTheContent()
+    {
+        await EncodeAndPublishAsync(Sha('a'));
+
+        Assert.Equal(HlsEagerJobOutcome.Done, (await StartEagerAsync(Sha('a'), [720], OtherLibraryId)).Outcome);
+
+        var media = await _store.GetMediaAsync(Sha('a'), TestContext.Current.CancellationToken);
+        Assert.Equal((LibraryId, (DateTime?)null), (media!.LibraryId, media.DateOrphaned));
+        Assert.DoesNotContain(await _environment.JobsAsync(), j => j.Kind == (int)HlsJobKind.Media);
+    }
+
+    [Fact]
+    public async Task Eager_IntoAnotherLibrary_EncodesTheQualitiesOfThatLibrary()
+    {
+        // The content is published for its library; the library the media is added to wants another quality.
+        static IReadOnlyCollection<int> Qualities(Guid library) => library.Equals(LibraryId) ? [720] : [1080];
+        await AddSourceAsync();
+        var lease = (await ClaimAsync())!;
+        var plan = (await IdentifyAsync(lease, Sha('a'), getQualities: Qualities)).Plan!;
+        await PublishAsync(lease, plan);
+
+        var result = await StartEagerAsync(Sha('a'), [1080], OtherLibraryId, Qualities);
+
+        Assert.Equal(["v1080"], result.Lease!.Plan!.Renditions.Select(r => r.Key));
+        Assert.Equal(LibraryId, (await _store.GetMediaAsync(Sha('a'), TestContext.Current.CancellationToken))!.LibraryId);
+    }
+
+    [Fact]
+    public async Task Eager_Job_IsPublished_AndGivesItsPlanOnIdentify()
+    {
+        var lease = (await StartEagerAsync(Sha('a'), [720])).Lease!;
+
+        var again = await IdentifyAsync(lease, Sha('a'));
+        Assert.Equal(HlsIdentifyOutcome.Planned, again.Outcome);
+        Assert.Equal(JsonSerializer.Serialize(lease.Plan), JsonSerializer.Serialize(again.Plan));
+        await PublishAsync(lease, lease.Plan!);
+
+        Assert.All(
+            (await _store.GetRenditionsAsync(Sha('a'), TestContext.Current.CancellationToken)).Where(r => r.Key != "v1080"),
+            r => Assert.Equal((HlsRenditionState.Published, _environment.Root), (r.State, r.Base)));
+    }
+
+    [Fact]
+    public async Task Eager_JobThatFails_IsCancelledOnTheNextClaim_AsNoFileOfItIsInALibrary()
+    {
+        var lease = (await StartEagerAsync(Sha('a'), [720])).Lease!;
+
+        Assert.True(await _store.ReleaseAsync(lease.Id, lease.LeaseToken, "ffmpeg failed", MaxAttempts, Lease, _now, TestContext.Current.CancellationToken));
+
+        Assert.Null(await ClaimAsync());
+        Assert.Equal((int)HlsJobStatus.Cancelled, (await _environment.JobAsync(lease.Id)).Status);
     }
 
     // ---- Outputs and publishing
@@ -537,7 +658,7 @@ public sealed class HlsJobStoreTests : IDisposable
     {
         await AddSourceAsync();
         var (lease, plan) = await ClaimAndPlanAsync(Sha('a'));
-        Assert.True(await _store.SyncRenditionsAsync(Sha('a'), [720], _now, TestContext.Current.CancellationToken));
+        Assert.True(await _store.SyncRenditionsAsync(Sha('a'), _ => [720], _now, TestContext.Current.CancellationToken));
 
         var result = await PublishAsync(lease, plan);
 
@@ -817,10 +938,10 @@ public sealed class HlsJobStoreTests : IDisposable
     public async Task SyncRenditions_AddsNewKeys_AndRemovesThoseNoLongerWanted()
     {
         var (_, _, plan) = await EncodeAndPublishAsync(Sha('a'));
-        Assert.False(await _store.SyncRenditionsAsync(Sha('a'), Qualities, _now, TestContext.Current.CancellationToken));
-        Assert.False(await _store.SyncRenditionsAsync(Sha('b'), Qualities, _now, TestContext.Current.CancellationToken));
+        Assert.False(await _store.SyncRenditionsAsync(Sha('a'), _ => Qualities, _now, TestContext.Current.CancellationToken));
+        Assert.False(await _store.SyncRenditionsAsync(Sha('b'), _ => Qualities, _now, TestContext.Current.CancellationToken));
 
-        Assert.True(await _store.SyncRenditionsAsync(Sha('a'), [720, 480], _now, TestContext.Current.CancellationToken));
+        Assert.True(await _store.SyncRenditionsAsync(Sha('a'), _ => [720, 480], _now, TestContext.Current.CancellationToken));
 
         var renditions = await _store.GetRenditionsAsync(Sha('a'), TestContext.Current.CancellationToken);
         Assert.Equal(["a1", "preview", "s2", "v480", "v720"], renditions.Select(r => r.Key));
@@ -954,8 +1075,23 @@ public sealed class HlsJobStoreTests : IDisposable
     private Task<HlsJobLease?> ClaimAsync(string worker = "worker", Func<Guid, bool>? eligible = null)
         => _store.ClaimAsync(new HlsClaimRequest(worker, Lease, eligible ?? (_ => true), _now), TestContext.Current.CancellationToken);
 
-    private Task<HlsIdentifyResult> IdentifyAsync(HlsJobLease lease, string sha, string profile = Profile, Func<Guid, bool>? eligible = null, HlsProbe? probe = null, int[]? qualities = null, string? root = null)
-        => _store.IdentifyAsync(new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, probe ?? Probe, root ?? _environment.Root, qualities ?? Qualities, profile, eligible ?? (_ => true), _now), TestContext.Current.CancellationToken);
+    private Task<HlsIdentifyResult> IdentifyAsync(
+        HlsJobLease lease,
+        string sha,
+        string profile = Profile,
+        Func<Guid, bool>? eligible = null,
+        HlsProbe? probe = null,
+        int[]? qualities = null,
+        string? root = null,
+        Func<Guid, IReadOnlyCollection<int>>? getQualities = null)
+        => _store.IdentifyAsync(
+            new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, probe ?? Probe, root ?? _environment.Root, getQualities ?? (_ => qualities ?? Qualities), profile, eligible ?? (_ => true), _now),
+            TestContext.Current.CancellationToken);
+
+    private Task<HlsEagerJobResult> StartEagerAsync(string sha, int[] qualities, Guid? libraryId = null, Func<Guid, IReadOnlyCollection<int>>? getQualities = null)
+        => _store.StartEagerJobAsync(
+            new HlsEagerJobRequest("worker", libraryId ?? LibraryId, sha, Probe, _environment.Root, qualities, getQualities ?? (_ => Qualities), Profile, Lease, _now),
+            TestContext.Current.CancellationToken);
 
     // Claims the oldest pending job and identifies its file as the content, which it must then encode.
     private async Task<(HlsJobLease Lease, HlsEncodePlan Plan)> ClaimAndPlanAsync(string sha, string profile = Profile, int[]? qualities = null)
@@ -983,7 +1119,7 @@ public sealed class HlsJobStoreTests : IDisposable
     {
         var item = await AddSourceAsync();
         var (lease, plan) = await ClaimAndPlanAsync(sha);
-        Assert.Equal(item, lease.Input.ItemId);
+        Assert.Equal(item, lease.Input!.ItemId);
         await PublishAsync(lease, plan);
         return (item, lease, plan);
     }

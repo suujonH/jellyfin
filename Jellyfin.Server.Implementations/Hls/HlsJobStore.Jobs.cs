@@ -226,7 +226,7 @@ public sealed partial class HlsJobStore
                     ? new HlsJobLease(
                         job.Id,
                         (HlsJobKind)job.Kind,
-                        Deserialize<HlsSourceFile>(job.Input!),
+                        job.Input is null ? null : Deserialize<HlsSourceFile>(job.Input),
                         leaseToken,
                         job.LeaseExpires.GetValueOrDefault(),
                         job.Attempt,
@@ -270,8 +270,14 @@ public sealed partial class HlsJobStore
                         : throw new ArgumentException("The job was already identified with another root of the HLS store: " + job.Base, nameof(request));
                 }
 
+                // A job a worker started for media it adds has its plan from the start.
+                if (job.Input is null)
+                {
+                    throw new ArgumentException("The job was started for media being added and has no file to identify.", nameof(request));
+                }
+
                 // The attempt is not counted: the worker read a file that is no longer the one recorded.
-                var input = Deserialize<HlsSourceFile>(job.Input!);
+                var input = Deserialize<HlsSourceFile>(job.Input);
                 var source = await context.HlsSources.FindAsync([input.ItemId], cancellationToken).ConfigureAwait(false);
                 if (source is null && job.Kind == (int)HlsJobKind.Source)
                 {
@@ -320,8 +326,15 @@ public sealed partial class HlsJobStore
                 job.Sha256 = sha256;
                 job.DateModified = now;
                 var storedProbe = Deserialize<HlsProbe>(media.Probe);
-                var desired = HlsRenditionPlanner.GetDesired(storedProbe, request.Qualities);
-                await SyncRenditionsAsync(context, sha256, desired, now, cancellationToken).ConfigureAwait(false);
+
+                // A content in no chosen library keeps its renditions, for the orphan rules.
+                var qualities = await GetContentQualitiesAsync(context, media, request.GetQualities, cancellationToken).ConfigureAwait(false);
+                IReadOnlyList<HlsRenditionSpec> desired = qualities.Count == 0 ? [] : HlsRenditionPlanner.GetDesired(storedProbe, qualities);
+                if (qualities.Count > 0)
+                {
+                    await SyncRenditionsAsync(context, sha256, desired, now, cancellationToken).ConfigureAwait(false);
+                }
+
                 if (!request.IsLibraryEligible(source.LibraryId))
                 {
                     await CompleteAsync(context, job, now, cancellationToken).ConfigureAwait(false);
@@ -346,20 +359,110 @@ public sealed partial class HlsJobStore
                     return new HlsIdentifyResult(HlsIdentifyOutcome.Done, KeptStoredProbe: keptStoredProbe);
                 }
 
-                var token = job.LeaseToken!;
-                var plan = new HlsEncodePlan(
-                    sha256,
-                    media.MediaKey,
-                    request.Profile,
-                    storedProbe,
-                    HlsEncodingProfile.SegmentSeconds,
-                    HlsEncodingProfile.KeyframeSeconds,
-                    HlsEncodingProfile.AudioSampleRate,
-                    HlsEncodingProfile.GetExpectedSegments(storedProbe.DurationSeconds),
-                    specs.Select(s => new HlsPlannedRendition(s.Key, s.Kind, HlsRenditionPaths.GetRelativeDirectory(media.MediaKey, s, token), s.Video, s.SourceIndex, s.Channels)).ToList());
+                var plan = CreatePlan(media, request.Profile, storedProbe, specs, job.LeaseToken!);
                 job.Plan = JsonSerializer.Serialize(plan);
                 job.Base = request.Base;
                 return new HlsIdentifyResult(HlsIdentifyOutcome.Planned, plan, keptStoredProbe);
+            },
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Starts a job for media a worker adds, before its file is in the library: the job holds the renditions of the qualities asked
+    /// for, the audio, the text subtitles and the preview, and is leased to the worker at once. The library counts as one of the
+    /// content, so its qualities are wanted. A new content is recorded as an orphan of the library, until a library file of it is
+    /// found. The renditions left are encoded by the usual jobs later.
+    /// </summary>
+    /// <param name="request">The request.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>What starting the job led to.</returns>
+    public Task<HlsEagerJobResult> StartEagerJobAsync(HlsEagerJobRequest request, CancellationToken cancellationToken)
+    {
+        var sha256 = request.Sha256;
+        var now = request.Now;
+        return WriteAsync(
+            async context =>
+            {
+                // A content keeps its first probe, as on identification.
+                var probe = JsonSerializer.Serialize(request.Probe);
+                var media = await context.HlsMedia.FindAsync([sha256], cancellationToken).ConfigureAwait(false);
+                var keptStoredProbe = false;
+                if (media is null)
+                {
+                    media = new HlsMedia
+                    {
+                        Sha256 = sha256,
+                        MediaKey = HlsRenditionPaths.GetMediaKey(sha256),
+                        LibraryId = request.LibraryId,
+                        Probe = probe,
+                        DateOrphaned = now,
+                        DateCreated = now
+                    };
+                    context.HlsMedia.Add(media);
+                }
+                else
+                {
+                    keptStoredProbe = !string.Equals(media.Probe, probe, StringComparison.Ordinal);
+                }
+
+                // The library the media is added to counts as if its file were already there.
+                var storedProbe = Deserialize<HlsProbe>(media.Probe);
+                var qualities = (await GetContentQualitiesAsync(context, media, request.GetQualities, cancellationToken).ConfigureAwait(false))
+                    .Union(request.GetQualities(request.LibraryId))
+                    .ToList();
+
+                var desired = HlsRenditionPlanner.GetDesired(storedProbe, qualities);
+                await SyncRenditionsAsync(context, sha256, desired, now, cancellationToken).ConfigureAwait(false);
+                await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+                // The worker would encode what another job is encoding, or wait for it.
+                var workKey = GetMediaWorkKey(sha256);
+                var job = await context.HlsJobs.FirstOrDefaultAsync(j => j.WorkKey == workKey, cancellationToken).ConfigureAwait(false);
+                if (job is not null && !CanBeCreatedAgain(job) && job.Status != (int)HlsJobStatus.Failed)
+                {
+                    return new HlsEagerJobResult(HlsEagerJobOutcome.Busy, KeptStoredProbe: keptStoredProbe);
+                }
+
+                if (await context.HlsRenditions.AnyAsync(r => r.Sha256 == sha256 && r.JobId.HasValue, cancellationToken).ConfigureAwait(false))
+                {
+                    return new HlsEagerJobResult(HlsEagerJobOutcome.Busy, KeptStoredProbe: keptStoredProbe);
+                }
+
+                var needed = await context.HlsRenditions.Where(r => r.Sha256 == sha256).Where(NeedsJob(request.Profile)).ToListAsync(cancellationToken).ConfigureAwait(false);
+                var specs = desired
+                    .Where(s => needed.Any(r => r.Key == s.Key) && (s.Kind != HlsRenditionKind.Video || request.Qualities.Contains(s.Video!.Name)))
+                    .ToList();
+                if (specs.Count == 0)
+                {
+                    return new HlsEagerJobResult(HlsEagerJobOutcome.Done, KeptStoredProbe: keptStoredProbe);
+                }
+
+                if (job is not null)
+                {
+                    // The new row has the same work key.
+                    context.HlsJobs.Remove(job);
+                    await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                // The token also names the directories of this attempt.
+                var token = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
+                var plan = CreatePlan(media, request.Profile, storedProbe, specs, token);
+                job = NewJob(HlsJobKind.Media, workKey, null, sha256, now);
+                job.Status = (int)HlsJobStatus.Running;
+                job.Worker = request.Worker;
+                job.LeaseToken = token;
+                job.LeaseExpires = now + request.Lease;
+                job.Attempt = 1;
+                job.Plan = JsonSerializer.Serialize(plan);
+                job.Base = request.Base;
+                context.HlsJobs.Add(job);
+                foreach (var rendition in needed.Where(r => specs.Any(s => s.Key == r.Key)))
+                {
+                    rendition.JobId = job.Id;
+                }
+
+                var lease = new HlsJobLease(job.Id, HlsJobKind.Media, null, token, job.LeaseExpires.Value, job.Attempt, plan);
+                return new HlsEagerJobResult(HlsEagerJobOutcome.Started, lease, keptStoredProbe);
             },
             cancellationToken);
     }
@@ -655,6 +758,19 @@ public sealed partial class HlsJobStore
             && job.Status == (int)HlsJobStatus.Running
             && string.Equals(job.LeaseToken, leaseToken, StringComparison.Ordinal)
             && job.LeaseExpires > now;
+
+    // The plan of the renditions a job encodes, in the directories named by its lease token.
+    private static HlsEncodePlan CreatePlan(HlsMedia media, string profile, HlsProbe probe, IEnumerable<HlsRenditionSpec> specs, string token)
+        => new(
+            media.Sha256,
+            media.MediaKey,
+            profile,
+            probe,
+            HlsEncodingProfile.SegmentSeconds,
+            HlsEncodingProfile.KeyframeSeconds,
+            HlsEncodingProfile.AudioSampleRate,
+            HlsEncodingProfile.GetExpectedSegments(probe.DurationSeconds),
+            specs.Select(s => new HlsPlannedRendition(s.Key, s.Kind, HlsRenditionPaths.GetRelativeDirectory(media.MediaKey, s, token), s.Video, s.SourceIndex, s.Channels)).ToList());
 
     // The file the job reads, or null when the job is stale.
     private static async Task<HlsSourceFile?> FindInputAsync(JellyfinDbContext context, HlsJob job, Func<Guid, bool> isLibraryEligible, CancellationToken cancellationToken)

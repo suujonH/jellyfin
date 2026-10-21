@@ -12,7 +12,7 @@ namespace Jellyfin.Server.Implementations.Hls;
 /// <param name="Sha256">The hash of the file.</param>
 /// <param name="Probe">The probe of the file.</param>
 /// <param name="Base">The root of the HLS store the worker uploads to, checked and in its normal form.</param>
-/// <param name="Qualities">The qualities chosen in the settings.</param>
+/// <param name="GetQualities">The video qualities of a library.</param>
 /// <param name="Profile">The current encoding profile.</param>
 /// <param name="IsLibraryEligible">Whether pre-encoded HLS is enabled for a library.</param>
 /// <param name="Now">The current time.</param>
@@ -22,7 +22,7 @@ public sealed record HlsIdentifyRequest(
     string Sha256,
     HlsProbe Probe,
     string Base,
-    IReadOnlyCollection<int> Qualities,
+    Func<Guid, IReadOnlyCollection<int>> GetQualities,
     string Profile,
     Func<Guid, bool> IsLibraryEligible,
     DateTime Now);
