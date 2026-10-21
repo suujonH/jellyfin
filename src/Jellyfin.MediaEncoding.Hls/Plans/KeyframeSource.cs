@@ -142,7 +142,7 @@ public class KeyframeSource : IKeyframeSource
                             _probes.Remove(itemId);
 
                             // A file ffprobe finds no keyframes in is not read again until the server restarts.
-                            if (completed.Result is null)
+                            if (completed.GetAwaiter().GetResult() is null)
                             {
                                 _failedProbes.Add(itemId);
                             }

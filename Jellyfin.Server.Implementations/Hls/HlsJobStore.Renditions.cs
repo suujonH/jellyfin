@@ -167,7 +167,7 @@ public sealed partial class HlsJobStore
 
     // A rendition needs a job when no job holds it and it is missing or published under another encoding profile.
     private static Expression<Func<HlsRendition, bool>> NeedsJob(string profile)
-        => r => r.JobId == null
+        => r => !r.JobId.HasValue
             && (r.State == (int)HlsRenditionState.Missing || (r.State == (int)HlsRenditionState.Published && (r.Profile == null || r.Profile != profile)));
 
     private static HlsRenditionRecord ToRecord(HlsRendition rendition)

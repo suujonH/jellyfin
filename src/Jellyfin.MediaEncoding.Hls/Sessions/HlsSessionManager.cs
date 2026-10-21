@@ -322,8 +322,8 @@ public sealed class HlsSessionManager : IDisposable
         }
         catch
         {
-            run.Dispose();
             _ = DeleteFilesAsync(run);
+            run.Dispose();
             throw;
         }
 
@@ -352,8 +352,8 @@ public sealed class HlsSessionManager : IDisposable
         }
 
         session.Run = null;
-        run.Dispose();
         _ = DeleteFilesAsync(run);
+        run.Dispose();
     }
 
     // A playback plays one variant at a time; like the transcodes before, the run of another stops when this one starts.

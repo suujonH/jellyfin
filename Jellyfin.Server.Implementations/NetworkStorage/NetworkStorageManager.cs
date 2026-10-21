@@ -123,7 +123,7 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
         var context = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using (context.ConfigureAwait(false))
         {
-            if (await context.NetworkStorageAccesses.AnyAsync(e => e.Protocol == access.Protocol && e.Bucket == access.Bucket && e.Id != access.Id, cancellationToken).ConfigureAwait(false))
+            if (await context.NetworkStorageAccesses.AnyAsync(e => e.Protocol == access.Protocol && e.Bucket == access.Bucket && !e.Id.Equals(access.Id), cancellationToken).ConfigureAwait(false))
             {
                 throw new ArgumentException("Another access already covers " + access.Bucket + ".", nameof(access));
             }
@@ -137,7 +137,7 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
             }
             else
             {
-                entity = await context.NetworkStorageAccesses.FirstOrDefaultAsync(e => e.Id == access.Id, cancellationToken).ConfigureAwait(false)
+                entity = await context.NetworkStorageAccesses.FirstOrDefaultAsync(e => e.Id.Equals(access.Id), cancellationToken).ConfigureAwait(false)
                     ?? throw new ResourceNotFoundException("No access has id " + access.Id + ".");
             }
 
@@ -167,7 +167,7 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
         var context = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using (context.ConfigureAwait(false))
         {
-            var deleted = await context.NetworkStorageAccesses.Where(e => e.Id == id).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+            var deleted = await context.NetworkStorageAccesses.Where(e => e.Id.Equals(id)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
             ReloadAccesses();
             return deleted > 0;
         }
@@ -214,7 +214,7 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
         var context = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using (context.ConfigureAwait(false))
         {
-            var entity = await context.NetworkStorageExternalAddresses.FirstOrDefaultAsync(e => e.AccessId == access.Id, cancellationToken).ConfigureAwait(false);
+            var entity = await context.NetworkStorageExternalAddresses.FirstOrDefaultAsync(e => e.AccessId.Equals(access.Id), cancellationToken).ConfigureAwait(false);
             if (entity is null)
             {
                 entity = new NetworkStorageExternalAddress { AccessId = access.Id };
@@ -478,7 +478,7 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
             var context = await _dbProvider.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
             await using (context.ConfigureAwait(false))
             {
-                var row = (await LoadRowsAsync(context.BaseItems.Where(e => e.Id == itemId), cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+                var row = (await LoadRowsAsync(context.BaseItems.Where(e => e.Id.Equals(itemId)), cancellationToken).ConfigureAwait(false)).FirstOrDefault();
                 if (row is not null && !string.IsNullOrEmpty(target))
                 {
                     row = row with { Target = target };
@@ -794,7 +794,7 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
         try
         {
             var now = DateTime.UtcNow;
-            var failure = await context.NetworkStorageFailures.FirstOrDefaultAsync(f => f.ItemId == itemId, cancellationToken).ConfigureAwait(false);
+            var failure = await context.NetworkStorageFailures.FirstOrDefaultAsync(f => f.ItemId.Equals(itemId), cancellationToken).ConfigureAwait(false);
             if (failure is null || !string.Equals(failure.Target, location.Target, StringComparison.Ordinal))
             {
                 // A failure of another target the .strm named before says nothing of this one.

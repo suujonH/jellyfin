@@ -586,7 +586,7 @@ public sealed partial class HlsJobStore
                     .ExecuteUpdateAsync(s => s.SetProperty(r => r.State, (int)HlsRenditionState.Missing).SetProperty(r => r.JobId, (Guid?)null), cancellationToken)
                     .ConfigureAwait(false);
                 await context.HlsRenditions
-                    .Where(r => r.JobId != null
+                    .Where(r => r.JobId.HasValue
                         && !context.HlsJobs.Any(j => r.JobId.Equals(j.Id) && (j.Status == (int)HlsJobStatus.Running || j.Status == (int)HlsJobStatus.Verifying)))
                     .ExecuteUpdateAsync(s => s.SetProperty(r => r.JobId, (Guid?)null), cancellationToken)
                     .ConfigureAwait(false);

@@ -43,7 +43,7 @@ public class NetworkStorageController : BaseJellyfinApiController
     /// the storage: the statistics come from what the library already knows.
     /// </summary>
     /// <param name="cancellationToken">The cancellation token.</param>
-    /// <response code="200">The storages.</response>
+    /// <response code="200">Storages returned.</response>
     /// <returns>The storages.</returns>
     [HttpGet("Storages")]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -58,7 +58,7 @@ public class NetworkStorageController : BaseJellyfinApiController
     /// <param name="startIndex">The index of the first resource.</param>
     /// <param name="limit">The most resources to return; none returns all.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
-    /// <response code="200">The resources.</response>
+    /// <response code="200">Resources returned.</response>
     /// <returns>The resources.</returns>
     [HttpGet("Storages/{key}/Resources")]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -99,7 +99,7 @@ public class NetworkStorageController : BaseJellyfinApiController
     /// <summary>
     /// Gets the accesses. Secrets are not returned.
     /// </summary>
-    /// <response code="200">The accesses.</response>
+    /// <response code="200">Accesses returned.</response>
     /// <returns>The accesses.</returns>
     [HttpGet("Accesses")]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -200,7 +200,7 @@ public class NetworkStorageController : BaseJellyfinApiController
     /// Gets how the storage of an access is published to clients. The secret is not returned.
     /// </summary>
     /// <param name="id">The id of the access.</param>
-    /// <response code="200">The settings.</response>
+    /// <response code="200">Settings returned.</response>
     /// <response code="404">No access has the id.</response>
     /// <returns>The settings.</returns>
     [HttpGet("Accesses/{id}/External")]

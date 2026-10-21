@@ -36,6 +36,9 @@ namespace Jellyfin.Api.Helpers;
 /// </summary>
 public class DynamicHlsHelper
 {
+    // What a variant whose copy cannot be planned is transcoded to, when the client names no codec.
+    private const string DefaultTranscodeVideoCodec = "h264";
+
     private readonly ILibraryManager _libraryManager;
     private readonly IUserManager _userManager;
     private readonly IMediaSourceManager _mediaSourceManager;
@@ -48,9 +51,6 @@ public class DynamicHlsHelper
     private readonly EncodingHelper _encodingHelper;
     private readonly ITrickplayManager _trickplayManager;
     private readonly IKeyframeSource _keyframeSource;
-
-    // What a variant whose copy cannot be planned is transcoded to, when the client names no codec.
-    private const string DefaultTranscodeVideoCodec = "h264";
 
     /// <summary>
     /// Initializes a new instance of the <see cref="DynamicHlsHelper"/> class.
@@ -448,8 +448,12 @@ public class DynamicHlsHelper
             throw;
         }
 
-        _logger.LogInformation("The keyframes of {Path} are unknown; transcoding its video for HLS", state.MediaPath);
-        state.Dispose();
+        // The video is transcoded instead, with a state of its own.
+        using (state)
+        {
+            _logger.LogInformation("The keyframes of {Path} are unknown; transcoding its video for HLS", state.MediaPath);
+        }
+
         DisableVideoStreamCopy(streamingRequest, videoCodec);
         return await GetStreamingStateAsync(streamingRequest, transcodingJobType, cancellationToken).ConfigureAwait(false);
     }
