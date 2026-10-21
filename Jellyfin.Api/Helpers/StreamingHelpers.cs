@@ -19,6 +19,7 @@ using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.Streaming;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.MediaInfo;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Net.Http.Headers;
@@ -125,6 +126,15 @@ public static class StreamingHelpers
             if (currentJob is not null)
             {
                 mediaSource = currentJob.MediaSource;
+
+                // The address of a network storage source is signed when the source is built; each new ffmpeg reads it at
+                // an address signed anew.
+                if (!string.IsNullOrEmpty(mediaSource?.ShortcutTarget)
+                    && mediaSource.Protocol != MediaProtocol.File
+                    && httpContext.RequestServices?.GetService<INetworkStorageManager>()?.ResolveShortcutTarget(mediaSource.ShortcutTarget) is { } resolved)
+                {
+                    mediaSource.Path = resolved;
+                }
             }
 
             if (mediaSource is null)

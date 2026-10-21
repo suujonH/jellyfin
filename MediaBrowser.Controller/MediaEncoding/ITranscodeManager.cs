@@ -43,6 +43,14 @@ public interface ITranscodeManager
     public Task KillTranscodingJobs(string deviceId, string? playSessionId, Func<string, bool> deleteFiles);
 
     /// <summary>
+    /// Kills a transcoding job.
+    /// </summary>
+    /// <param name="job">The job.</param>
+    /// <param name="deleteFiles">Whether to delete the files of the job.</param>
+    /// <returns>A task that completes once the process has stopped and, when asked, its files are deleted.</returns>
+    public Task KillTranscodingJob(TranscodingJob job, bool deleteFiles);
+
+    /// <summary>
     /// Report the transcoding progress to the session manager.
     /// </summary>
     /// <param name="job">The <see cref="TranscodingJob"/> of which the progress will be reported.</param>

@@ -12,6 +12,7 @@ using Jellyfin.Api.Extensions;
 using Jellyfin.Data.Enums;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Extensions;
+using Jellyfin.MediaEncoding.Hls.Plans;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Extensions;
 using MediaBrowser.Common.Net;
@@ -46,6 +47,10 @@ public class DynamicHlsHelper
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly EncodingHelper _encodingHelper;
     private readonly ITrickplayManager _trickplayManager;
+    private readonly IKeyframeSource _keyframeSource;
+
+    // What a variant whose copy cannot be planned is transcoded to, when the client names no codec.
+    private const string DefaultTranscodeVideoCodec = "h264";
 
     /// <summary>
     /// Initializes a new instance of the <see cref="DynamicHlsHelper"/> class.
@@ -61,6 +66,7 @@ public class DynamicHlsHelper
     /// <param name="httpContextAccessor">Instance of the <see cref="IHttpContextAccessor"/> interface.</param>
     /// <param name="encodingHelper">Instance of <see cref="EncodingHelper"/>.</param>
     /// <param name="trickplayManager">Instance of <see cref="ITrickplayManager"/>.</param>
+    /// <param name="keyframeSource">Instance of the <see cref="IKeyframeSource"/> interface.</param>
     public DynamicHlsHelper(
         ILibraryManager libraryManager,
         IUserManager userManager,
@@ -72,7 +78,8 @@ public class DynamicHlsHelper
         ILogger<DynamicHlsHelper> logger,
         IHttpContextAccessor httpContextAccessor,
         EncodingHelper encodingHelper,
-        ITrickplayManager trickplayManager)
+        ITrickplayManager trickplayManager,
+        IKeyframeSource keyframeSource)
     {
         _libraryManager = libraryManager;
         _userManager = userManager;
@@ -85,6 +92,7 @@ public class DynamicHlsHelper
         _httpContextAccessor = httpContextAccessor;
         _encodingHelper = encodingHelper;
         _trickplayManager = trickplayManager;
+        _keyframeSource = keyframeSource;
     }
 
     /// <summary>
@@ -122,18 +130,8 @@ public class DynamicHlsHelper
             throw new ResourceNotFoundException(nameof(_httpContextAccessor.HttpContext));
         }
 
-        using var state = await StreamingHelpers.GetStreamingState(
-                streamingRequest,
-                _httpContextAccessor.HttpContext,
-                _mediaSourceManager,
-                _userManager,
-                _libraryManager,
-                _serverConfigurationManager,
-                _mediaEncoder,
-                _encodingHelper,
-                _transcodeManager,
-                transcodingJobType,
-                cancellationTokenSource.Token)
+        var allowVideoStreamCopy = streamingRequest.AllowVideoStreamCopy;
+        using var state = await GetVariantStreamingStateAsync(streamingRequest, transcodingJobType, !isHeadRequest, cancellationTokenSource.Token)
             .ConfigureAwait(false);
 
         _httpContextAccessor.HttpContext.Response.Headers.Append(HeaderNames.Expires, "0");
@@ -151,6 +149,12 @@ public class DynamicHlsHelper
         var isLiveStream = state.IsSegmentedLiveStream;
 
         var queryString = _httpContextAccessor.HttpContext.Request.QueryString.ToString();
+
+        // The variant transcodes the video, as its codecs say, rather than leave main.m3u8 to decide it again.
+        if (allowVideoStreamCopy && !streamingRequest.AllowVideoStreamCopy)
+        {
+            queryString = DisableVideoStreamCopy(new QueryString(queryString)).ToString();
+        }
 
         // from universal audio service, need to override the AudioCodec when the actual request differs from original query
         if (!string.Equals(state.OutputAudioCodec, _httpContextAccessor.HttpContext.Request.Query["AudioCodec"].ToString(), StringComparison.OrdinalIgnoreCase))
@@ -342,6 +346,127 @@ public class DynamicHlsHelper
 
         return new FileContentResult(Encoding.UTF8.GetBytes(builder.ToString()), MimeTypes.GetMimeType("playlist.m3u8"));
     }
+
+    /// <summary>
+    /// Gets what decides the cuts of the live HLS stream a state describes.
+    /// </summary>
+    /// <param name="state">The state of the stream.</param>
+    /// <returns>The cut mode.</returns>
+    internal HlsCutMode GetCutMode(StreamState state)
+    {
+        if (state.IsOutputVideo && state.VideoStream is not null)
+        {
+            // Without a codec, the video is copied.
+            return EncodingHelper.IsCopyCodec(_encodingHelper.GetVideoEncoder(state, _serverConfigurationManager.GetEncodingOptions()))
+                ? HlsCutMode.CopyVideo
+                : HlsCutMode.TranscodeVideo;
+        }
+
+        return EncodingHelper.IsCopyCodec(_encodingHelper.GetAudioEncoder(state)) ? HlsCutMode.CopyAudio : HlsCutMode.TranscodeAudio;
+    }
+
+    /// <summary>
+    /// Plans a copy of a video at its keyframes.
+    /// </summary>
+    /// <param name="state">The state of the stream, which copies the video.</param>
+    /// <param name="totalTicks">The duration of the media.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The plan, or null when the keyframes are unknown; the video is then transcoded.</returns>
+    internal async Task<SegmentPlan?> CreateKeyframePlanAsync(StreamState state, long totalTicks, CancellationToken cancellationToken)
+    {
+        // The keyframe data of a video is that of its first video stream.
+        var isFirstVideoStream = state.VideoStream is not null
+            && state.VideoStream.Index == state.MediaSource.MediaStreams.Where(s => s.Type == MediaStreamType.Video).Min(s => (int?)s.Index);
+        if (!isFirstVideoStream || !Guid.TryParse(state.MediaSource.Id, out var itemId))
+        {
+            return null;
+        }
+
+        var keyframes = await _keyframeSource.GetKeyframesAsync(itemId, state.MediaPath, state.MediaSource.Protocol, cancellationToken).ConfigureAwait(false);
+        return keyframes is null
+            ? null
+            : SegmentPlanner.CreateKeyframePlan(
+                keyframes,
+                totalTicks,
+                TimeSpan.FromSeconds(state.SegmentLength).Ticks,
+                _encodingHelper.GetOutputFramerate(state, _serverConfigurationManager.GetEncodingOptions()));
+    }
+
+    /// <summary>
+    /// Gets a query that asks for the video to be transcoded: to H.264, which every HLS client plays, unless it names codecs.
+    /// </summary>
+    /// <param name="query">The query.</param>
+    /// <returns>The query with <c>AllowVideoStreamCopy=false</c> and a video codec.</returns>
+    internal static QueryString DisableVideoStreamCopy(QueryString query)
+    {
+        var parameters = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(query.Value);
+        parameters.Remove("allowVideoStreamCopy");
+        parameters["AllowVideoStreamCopy"] = "false";
+        if (!parameters.TryGetValue("videoCodec", out var videoCodec) || string.IsNullOrEmpty(videoCodec.ToString()))
+        {
+            parameters["VideoCodec"] = DefaultTranscodeVideoCodec;
+        }
+
+        return QueryString.Create(parameters);
+    }
+
+    /// <summary>
+    /// Asks a request for the video to be transcoded, as <see cref="DisableVideoStreamCopy(QueryString)"/> does its query.
+    /// </summary>
+    /// <param name="streamingRequest">The request.</param>
+    /// <param name="videoCodec">The video codecs the client asked for, before the state took the first of them.</param>
+    internal static void DisableVideoStreamCopy(StreamingRequestDto streamingRequest, string? videoCodec)
+    {
+        streamingRequest.AllowVideoStreamCopy = false;
+        streamingRequest.VideoCodec = string.IsNullOrEmpty(videoCodec) ? DefaultTranscodeVideoCodec : videoCodec;
+    }
+
+    // Gets the state of the stream of the variant. Like main.m3u8, it transcodes a video whose copy cannot be planned.
+    private async Task<StreamState> GetVariantStreamingStateAsync(
+        StreamingRequestDto streamingRequest,
+        TranscodingJobType transcodingJobType,
+        bool planCopy,
+        CancellationToken cancellationToken)
+    {
+        var videoCodec = streamingRequest.VideoCodec;
+        var state = await GetStreamingStateAsync(streamingRequest, transcodingJobType, cancellationToken).ConfigureAwait(false);
+        if (!planCopy || state.IsSegmentedLiveStream || (state.RunTimeTicks ?? 0) <= 0 || GetCutMode(state) != HlsCutMode.CopyVideo)
+        {
+            return state;
+        }
+
+        try
+        {
+            if (await CreateKeyframePlanAsync(state, state.RunTimeTicks!.Value, cancellationToken).ConfigureAwait(false) is not null)
+            {
+                return state;
+            }
+        }
+        catch
+        {
+            state.Dispose();
+            throw;
+        }
+
+        _logger.LogInformation("The keyframes of {Path} are unknown; transcoding its video for HLS", state.MediaPath);
+        state.Dispose();
+        DisableVideoStreamCopy(streamingRequest, videoCodec);
+        return await GetStreamingStateAsync(streamingRequest, transcodingJobType, cancellationToken).ConfigureAwait(false);
+    }
+
+    private Task<StreamState> GetStreamingStateAsync(StreamingRequestDto streamingRequest, TranscodingJobType transcodingJobType, CancellationToken cancellationToken)
+        => StreamingHelpers.GetStreamingState(
+            streamingRequest,
+            _httpContextAccessor.HttpContext!,
+            _mediaSourceManager,
+            _userManager,
+            _libraryManager,
+            _serverConfigurationManager,
+            _mediaEncoder,
+            _encodingHelper,
+            _transcodeManager,
+            transcodingJobType,
+            cancellationToken);
 
     private StringBuilder AppendPlaylist(StringBuilder builder, StreamState state, string url, int bitrate, string? subtitleGroup)
     {
@@ -697,7 +822,7 @@ public class DynamicHlsHelper
                 stream.Index.ToString(CultureInfo.InvariantCulture),
                 30.ToString(CultureInfo.InvariantCulture),
                 user.GetToken(),
-                GetVttTimestampMapMpegts(state.Request.SegmentContainer).ToString(CultureInfo.InvariantCulture));
+                GetVttTimestampMapMpegts(state.Request.SegmentContainer, state.IsSegmentedLiveStream).ToString(CultureInfo.InvariantCulture));
 
             var line = string.Format(
                 CultureInfo.InvariantCulture,
@@ -714,14 +839,16 @@ public class DynamicHlsHelper
 
     /// <summary>
     /// Gets the WebVTT X-TIMESTAMP-MAP MPEGTS offset appropriate for the given HLS segment container.
-    /// fMP4 segments start at PTS 0, unlike legacy MPEG-TS segments which start at the historical 10 second offset.
+    /// The segments of main.m3u8 and MPEG-TS segments start at the historical 10 second offset; the fMP4 segments of
+    /// live.m3u8 start at PTS 0.
     /// </summary>
     /// <param name="segmentContainer">The HLS segment container, e.g. "ts" or "mp4".</param>
+    /// <param name="isLiveStream">Whether the stream is that of live.m3u8.</param>
     /// <returns>The MPEGTS offset to embed in the WebVTT X-TIMESTAMP-MAP header.</returns>
-    internal static long GetVttTimestampMapMpegts(string? segmentContainer)
+    internal static long GetVttTimestampMapMpegts(string? segmentContainer, bool isLiveStream)
     {
         var segmentExtension = EncodingHelper.GetSegmentFileExtension(segmentContainer);
-        return string.Equals(segmentExtension, ".mp4", StringComparison.OrdinalIgnoreCase)
+        return isLiveStream && string.Equals(segmentExtension, ".mp4", StringComparison.OrdinalIgnoreCase)
             ? 0
             : SubtitleController.DefaultVttTimestampMapMpegts;
     }

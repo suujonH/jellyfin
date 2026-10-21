@@ -146,6 +146,25 @@ public sealed class KeyframeSourceTests : IDisposable
         VerifyNotRead(probe);
     }
 
+    [Theory]
+    [InlineData("testfile.mkv", new string[0], false)]
+    [InlineData("testfile.flv", new[] { ".mp4", ".mkv", ".ts" }, false)]
+    [InlineData("testfile.flv", new[] { ".mp4", ".mkv", ".ts", ".flv" }, true)]
+    [InlineData("/some/arbitrarily/long/path/testfile.mkv", new[] { "mkv" }, true)]
+    [InlineData("https://bucket.s3.amazonaws.com/Film.mkv?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=abc", new[] { "mkv" }, true)]
+    [InlineData("https://bucket.s3.amazonaws.com/Film.mp4?X-Amz-Date=20130524T000000Z", new[] { "mkv" }, false)]
+    public void IsExtractionAllowedForFile_Valid_Success(string filePath, string[] allowedExtensions, bool isAllowed)
+    {
+        Assert.Equal(isAllowed, KeyframeSource.IsExtractionAllowedForFile(filePath, allowedExtensions));
+    }
+
+    [Theory]
+    [InlineData("testfile", new[] { ".mp4" })]
+    public void IsExtractionAllowedForFile_Invalid_ReturnsFalse(string filePath, string[] allowedExtensions)
+    {
+        Assert.False(KeyframeSource.IsExtractionAllowedForFile(filePath, allowedExtensions));
+    }
+
     private static TrueCacheEntry CreateEntry(string path, KeyframeData keyframes)
         => new(path, "/media/__true_cache__/Film.mkv", "hash", new TrueCacheManifest(), null, null, keyframes, new Dictionary<ImageType, string>(), new Dictionary<int, string>());
 

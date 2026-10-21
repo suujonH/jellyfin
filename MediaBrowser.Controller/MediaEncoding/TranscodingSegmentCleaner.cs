@@ -124,7 +124,14 @@ public class TranscodingSegmentCleaner : IDisposable
         {
             if (job.Type == TranscodingJobType.Hls)
             {
-                DeleteHlsSegmentFiles(path, idxMin, idxMax);
+                if (job.SegmentFiles is { } segmentFiles)
+                {
+                    DeleteFiles(segmentFiles((int)idxMax).Where(File.Exists));
+                }
+                else
+                {
+                    DeleteHlsSegmentFiles(path, idxMin, idxMax);
+                }
             }
         }
         catch (Exception ex)
@@ -144,6 +151,11 @@ public class TranscodingSegmentCleaner : IDisposable
             .Where(f => long.TryParse(Path.GetFileNameWithoutExtension(f).Replace(name, string.Empty, StringComparison.Ordinal), out var idx)
                         && (idx >= idxMin && idx <= idxMax));
 
+        DeleteFiles(filesToDelete);
+    }
+
+    private void DeleteFiles(IEnumerable<string> filesToDelete)
+    {
         List<Exception>? exs = null;
         foreach (var file in filesToDelete)
         {

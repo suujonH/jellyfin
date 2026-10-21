@@ -148,7 +148,7 @@ public class TranscodingThrottler : IDisposable
     private bool IsThrottleAllowed(TranscodingJob job, int thresholdSeconds)
     {
         var bytesDownloaded = job.BytesDownloaded;
-        var transcodingPositionTicks = job.TranscodingPositionTicks ?? 0;
+        var transcodingPositionTicks = job.CompletedPositionTicks ?? job.TranscodingPositionTicks ?? 0;
         var downloadPositionTicks = job.DownloadPositionTicks ?? 0;
 
         var path = job.Path ?? throw new ArgumentException("Path can't be null.");

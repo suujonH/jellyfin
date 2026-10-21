@@ -5,7 +5,6 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.MediaEncoding.Hls.Extractors;
-using Jellyfin.MediaEncoding.Hls.Playlist;
 using Jellyfin.MediaEncoding.Keyframes;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Configuration;
@@ -85,7 +84,7 @@ public class KeyframeSource : IKeyframeSource
         }
 
         var options = _serverConfigurationManager.GetEncodingOptions();
-        if (DynamicHlsPlaylistGenerator.IsExtractionAllowedForFile(mediaPath, options.AllowOnDemandMetadataBasedKeyframeExtractionForExtensions))
+        if (IsExtractionAllowedForFile(mediaPath, options.AllowOnDemandMetadataBasedKeyframeExtractionForExtensions))
         {
             foreach (var extractor in _metadataExtractors)
             {
@@ -177,5 +176,35 @@ public class KeyframeSource : IKeyframeSource
         }
 
         return null;
+    }
+
+    internal static bool IsExtractionAllowedForFile(ReadOnlySpan<char> filePath, IReadOnlyList<string> allowedExtensions)
+    {
+        // A remote source, such as the presigned address of a .strm target, has its extension in the path, not in the query.
+        if (filePath.Contains("://", StringComparison.Ordinal)
+            && Uri.TryCreate(filePath.ToString(), UriKind.Absolute, out var uri)
+            && !uri.IsFile)
+        {
+            filePath = uri.AbsolutePath;
+        }
+
+        var extension = Path.GetExtension(filePath);
+        if (extension.IsEmpty)
+        {
+            return false;
+        }
+
+        // Remove the leading dot
+        var extensionWithoutDot = extension[1..];
+        for (var i = 0; i < allowedExtensions.Count; i++)
+        {
+            var allowedExtension = allowedExtensions[i].AsSpan().TrimStart('.');
+            if (extensionWithoutDot.Equals(allowedExtension, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

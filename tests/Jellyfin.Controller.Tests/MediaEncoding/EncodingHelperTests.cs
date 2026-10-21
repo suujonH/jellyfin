@@ -205,6 +205,28 @@ public class EncodingHelperTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GetInputArgument_ExternalSubtitle_TakesTheOffsetOfTheMediaWhenSynced(bool isSynced)
+    {
+        var sub = new MediaStream
+        {
+            Index = 2,
+            Type = MediaStreamType.Subtitle,
+            Codec = "pgssub",
+            IsExternal = true,
+            SupportsExternalStream = true,
+            Path = "/media/movie.sup"
+        };
+        var state = BuildState(sub, SubtitleDeliveryMethod.Encode);
+        state.IsSubtitleInputSynced = isSynced;
+        var inputArgs = CreateHelper().GetInputArgument(state, new EncodingOptions(), null);
+
+        Assert.Contains("-i file:\"/media/movie.sup\"", inputArgs, StringComparison.Ordinal);
+        Assert.Equal(isSynced, inputArgs.Contains("-isync 0 -i file:\"/media/movie.sup\"", StringComparison.Ordinal));
+    }
+
+    [Theory]
     [InlineData("aac", 44100, 44100)] // non-opus: requested rate must be preserved (issue #17026)
     [InlineData("aac", 48000, 48000)]
     [InlineData("mp3", 22050, 22050)]

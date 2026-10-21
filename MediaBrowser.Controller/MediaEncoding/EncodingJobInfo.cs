@@ -140,6 +140,18 @@ namespace MediaBrowser.Controller.MediaEncoding
 
         public long? StartTimeTicks => BaseRequest.StartTimeTicks;
 
+        /// <summary>
+        /// Gets or sets a value indicating whether the input seeks to <see cref="StartTimeTicks"/> as it is, as a live HLS run
+        /// does: its segment plan gives the time.
+        /// </summary>
+        public bool IsExactSeek { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether an external subtitle input takes the timestamp offset of the media input
+        /// (<c>-isync 0</c>), so that <c>-start_at_zero</c> shifts both alike rather than each by its own start.
+        /// </summary>
+        public bool IsSubtitleInputSynced { get; set; }
+
         public bool CopyTimestamps => BaseRequest.CopyTimestamps;
 
         public bool IsSegmentedLiveStream

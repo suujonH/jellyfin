@@ -12,9 +12,13 @@ using Jellyfin.Api.Attributes;
 using Jellyfin.Api.Extensions;
 using Jellyfin.Api.Helpers;
 using Jellyfin.Api.Models.StreamingDtos;
+using Jellyfin.Api.Results;
 using Jellyfin.Data.Enums;
 using Jellyfin.Extensions;
+using Jellyfin.MediaEncoding.Hls.Plans;
 using Jellyfin.MediaEncoding.Hls.Playlist;
+using Jellyfin.MediaEncoding.Hls.Sessions;
+using MediaBrowser.Common;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Library;
@@ -23,11 +27,11 @@ using MediaBrowser.Controller.Streaming;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Entities;
-using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Net;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Api.Controllers;
@@ -47,17 +51,17 @@ public class DynamicHlsController : BaseJellyfinApiController
     private readonly Version _minFFmpegFlacInMp4 = new Version(6, 0);
     private readonly Version _minFFmpegX265BframeInFmp4 = new Version(7, 0, 1);
     private readonly Version _minFFmpegHlsSegmentOptions = new Version(5, 0);
+    private readonly Version _minFFmpegInputSync = new Version(5, 1);
 
     private readonly ILibraryManager _libraryManager;
     private readonly IUserManager _userManager;
     private readonly IMediaSourceManager _mediaSourceManager;
     private readonly IServerConfigurationManager _serverConfigurationManager;
     private readonly IMediaEncoder _mediaEncoder;
-    private readonly IFileSystem _fileSystem;
     private readonly ITranscodeManager _transcodeManager;
     private readonly ILogger<DynamicHlsController> _logger;
     private readonly EncodingHelper _encodingHelper;
-    private readonly IDynamicHlsPlaylistGenerator _dynamicHlsPlaylistGenerator;
+    private readonly HlsSessionManager _hlsSessionManager;
     private readonly DynamicHlsHelper _dynamicHlsHelper;
     private readonly EncodingOptions _encodingOptions;
 
@@ -69,36 +73,33 @@ public class DynamicHlsController : BaseJellyfinApiController
     /// <param name="mediaSourceManager">Instance of the <see cref="IMediaSourceManager"/> interface.</param>
     /// <param name="serverConfigurationManager">Instance of the <see cref="IServerConfigurationManager"/> interface.</param>
     /// <param name="mediaEncoder">Instance of the <see cref="IMediaEncoder"/> interface.</param>
-    /// <param name="fileSystem">Instance of the <see cref="IFileSystem"/> interface.</param>
     /// <param name="transcodeManager">Instance of the <see cref="ITranscodeManager"/> interface.</param>
     /// <param name="logger">Instance of the <see cref="ILogger{DynamicHlsController}"/> interface.</param>
     /// <param name="dynamicHlsHelper">Instance of <see cref="DynamicHlsHelper"/>.</param>
     /// <param name="encodingHelper">Instance of <see cref="EncodingHelper"/>.</param>
-    /// <param name="dynamicHlsPlaylistGenerator">Instance of <see cref="IDynamicHlsPlaylistGenerator"/>.</param>
+    /// <param name="hlsSessionManager">Instance of <see cref="HlsSessionManager"/>.</param>
     public DynamicHlsController(
         ILibraryManager libraryManager,
         IUserManager userManager,
         IMediaSourceManager mediaSourceManager,
         IServerConfigurationManager serverConfigurationManager,
         IMediaEncoder mediaEncoder,
-        IFileSystem fileSystem,
         ITranscodeManager transcodeManager,
         ILogger<DynamicHlsController> logger,
         DynamicHlsHelper dynamicHlsHelper,
         EncodingHelper encodingHelper,
-        IDynamicHlsPlaylistGenerator dynamicHlsPlaylistGenerator)
+        HlsSessionManager hlsSessionManager)
     {
         _libraryManager = libraryManager;
         _userManager = userManager;
         _mediaSourceManager = mediaSourceManager;
         _serverConfigurationManager = serverConfigurationManager;
         _mediaEncoder = mediaEncoder;
-        _fileSystem = fileSystem;
         _transcodeManager = transcodeManager;
         _logger = logger;
         _dynamicHlsHelper = dynamicHlsHelper;
         _encodingHelper = encodingHelper;
-        _dynamicHlsPlaylistGenerator = dynamicHlsPlaylistGenerator;
+        _hlsSessionManager = hlsSessionManager;
 
         _encodingOptions = serverConfigurationManager.GetEncodingOptions();
     }
@@ -1029,8 +1030,8 @@ public class DynamicHlsController : BaseJellyfinApiController
     /// <param name="playlistId">The playlist id.</param>
     /// <param name="segmentId">The segment id.</param>
     /// <param name="container">The video container. Possible values are: ts, webm, asf, wmv, ogv, mp4, m4v, mkv, mpeg, mpg, avi, 3gp, wmv, wtv, m2ts, mov, iso, flv. </param>
-    /// <param name="runtimeTicks">The position of the requested segment in ticks.</param>
-    /// <param name="actualSegmentLengthTicks">The length of the requested segment in ticks.</param>
+    /// <param name="runtimeTicks">Unused: the position of the segment in playlists of earlier versions, which the plan now gives.</param>
+    /// <param name="actualSegmentLengthTicks">Unused: the length of the segment in playlists of earlier versions, which the plan now gives.</param>
     /// <param name="static">Optional. If true, the original file will be streamed statically without any encoding. Use either no url extension or the original file extension. true/false.</param>
     /// <param name="params">The streaming parameters.</param>
     /// <param name="tag">The tag.</param>
@@ -1092,8 +1093,8 @@ public class DynamicHlsController : BaseJellyfinApiController
         [FromRoute, Required] string playlistId,
         [FromRoute, Required] int segmentId,
         [FromRoute, Required][RegularExpression(EncodingHelper.ContainerValidationRegexStr)] string container,
-        [FromQuery, Required] long runtimeTicks,
-        [FromQuery, Required] long actualSegmentLengthTicks,
+        [FromQuery] long? runtimeTicks,
+        [FromQuery] long? actualSegmentLengthTicks,
         [FromQuery] bool? @static,
         [FromQuery] string? @params,
         [FromQuery] string? tag,
@@ -1148,8 +1149,8 @@ public class DynamicHlsController : BaseJellyfinApiController
         var streamingRequest = new VideoRequestDto
         {
             Id = itemId,
-            CurrentRuntimeTicks = runtimeTicks,
-            ActualSegmentLengthTicks = actualSegmentLengthTicks,
+            CurrentRuntimeTicks = runtimeTicks ?? 0,
+            ActualSegmentLengthTicks = actualSegmentLengthTicks ?? 0,
             Container = container,
             Static = @static ?? false,
             Params = @params,
@@ -1213,8 +1214,8 @@ public class DynamicHlsController : BaseJellyfinApiController
     /// <param name="playlistId">The playlist id.</param>
     /// <param name="segmentId">The segment id.</param>
     /// <param name="container">The video container. Possible values are: ts, webm, asf, wmv, ogv, mp4, m4v, mkv, mpeg, mpg, avi, 3gp, wmv, wtv, m2ts, mov, iso, flv. </param>
-    /// <param name="runtimeTicks">The position of the requested segment in ticks.</param>
-    /// <param name="actualSegmentLengthTicks">The length of the requested segment in ticks.</param>
+    /// <param name="runtimeTicks">Unused: the position of the segment in playlists of earlier versions, which the plan now gives.</param>
+    /// <param name="actualSegmentLengthTicks">Unused: the length of the segment in playlists of earlier versions, which the plan now gives.</param>
     /// <param name="static">Optional. If true, the original file will be streamed statically without any encoding. Use either no url extension or the original file extension. true/false.</param>
     /// <param name="params">The streaming parameters.</param>
     /// <param name="tag">The tag.</param>
@@ -1274,8 +1275,8 @@ public class DynamicHlsController : BaseJellyfinApiController
         [FromRoute, Required] string playlistId,
         [FromRoute, Required] int segmentId,
         [FromRoute, Required][RegularExpression(EncodingHelper.ContainerValidationRegexStr)] string container,
-        [FromQuery, Required] long runtimeTicks,
-        [FromQuery, Required] long actualSegmentLengthTicks,
+        [FromQuery] long? runtimeTicks,
+        [FromQuery] long? actualSegmentLengthTicks,
         [FromQuery] bool? @static,
         [FromQuery] string? @params,
         [FromQuery] string? tag,
@@ -1329,8 +1330,8 @@ public class DynamicHlsController : BaseJellyfinApiController
         {
             Id = itemId,
             Container = container,
-            CurrentRuntimeTicks = runtimeTicks,
-            ActualSegmentLengthTicks = actualSegmentLengthTicks,
+            CurrentRuntimeTicks = runtimeTicks ?? 0,
+            ActualSegmentLengthTicks = actualSegmentLengthTicks ?? 0,
             Static = @static ?? false,
             Params = @params,
             Tag = tag,
@@ -1386,40 +1387,24 @@ public class DynamicHlsController : BaseJellyfinApiController
 
     private async Task<ActionResult> GetVariantPlaylistInternal(StreamingRequestDto streamingRequest, CancellationTokenSource cancellationTokenSource)
     {
-        using var state = await StreamingHelpers.GetStreamingState(
-                streamingRequest,
-                HttpContext,
-                _mediaSourceManager,
-                _userManager,
-                _libraryManager,
-                _serverConfigurationManager,
-                _mediaEncoder,
-                _encodingHelper,
-                _transcodeManager,
-                TranscodingJobType,
-                cancellationTokenSource.Token)
-            .ConfigureAwait(false);
-        var mediaSourceId = state.BaseRequest.MediaSourceId;
-        double fps = state.TargetFramerate ?? 0.0f;
-        int segmentLength = state.SegmentLength * 1000;
+        var (plan, mode, segmentExtension, isVideoCopyDisabled) = await CreatePlanAsync(streamingRequest, cancellationTokenSource.Token).ConfigureAwait(false);
 
-        // If video is transcoded and framerate is fractional (i.e. 23.976), we need to slightly adjust segment length
-        if (!EncodingHelper.IsCopyCodec(state.OutputVideoCodec) && Math.Abs(fps - Math.Floor(fps + 0.001f)) > 0.001)
-        {
-            double nearestIntFramerate = Math.Ceiling(fps);
-            segmentLength = (int)Math.Ceiling(segmentLength * (nearestIntFramerate / fps));
-        }
+        // The segment URLs carry the query of the playlist, from which a lost session is rebuilt, with the transcode decided here.
+        var query = isVideoCopyDisabled ? DynamicHlsHelper.DisableVideoStreamCopy(Request.QueryString) : Request.QueryString;
+        var session = _hlsSessionManager.AddSession(new HlsSession(
+            GetSessionKey(User.GetUserId(), streamingRequest is VideoRequestDto, streamingRequest.Id, query),
+            plan,
+            mode,
+            _serverConfigurationManager.GetTranscodePath(),
+            segmentExtension,
+            streamingRequest.PlaySessionId,
+            streamingRequest.DeviceId));
 
-        var request = new CreateMainPlaylistRequest(
-            mediaSourceId is null ? null : Guid.Parse(mediaSourceId),
-            state.MediaPath,
-            segmentLength,
-            state.RunTimeTicks ?? 0,
-            state.Request.SegmentContainer ?? string.Empty,
-            "hls1/main/",
-            Request.QueryString.ToString(),
-            EncodingHelper.IsCopyCodec(state.OutputVideoCodec) && IsFirstVideoStream(state));
-        var playlist = _dynamicHlsPlaylistGenerator.CreateMainPlaylist(request);
+        var prefix = "hls1/" + session.Id + "/";
+        var playlist = HlsPlaylistWriter.WriteMedia(
+            session.Plan,
+            session.IsFragmented ? prefix + "-1.mp4" + query : null,
+            index => prefix + index.ToString(CultureInfo.InvariantCulture) + session.SegmentExtension + query);
 
         return new FileContentResult(Encoding.UTF8.GetBytes(playlist), MimeTypes.GetMimeType("playlist.m3u8"));
     }
@@ -1431,153 +1416,263 @@ public class DynamicHlsController : BaseJellyfinApiController
             throw new ArgumentException("StartTimeTicks is not allowed.");
         }
 
-        // CTS lifecycle is managed internally.
-        var cancellationTokenSource = new CancellationTokenSource();
-        var cancellationToken = cancellationTokenSource.Token;
+        var cancellationToken = HttpContext.RequestAborted;
+        var key = GetSessionKey(User.GetUserId(), streamingRequest is VideoRequestDto, streamingRequest.Id, Request.QueryString);
+        var session = _hlsSessionManager.GetSession(key);
+        if (session is null)
+        {
+            // A session lost with a restart of the server is rebuilt from the query; its plan comes out the same.
+            var (plan, mode, segmentExtension, _) = await CreatePlanAsync(streamingRequest, cancellationToken).ConfigureAwait(false);
+            session = _hlsSessionManager.AddSession(new HlsSession(
+                key,
+                plan,
+                mode,
+                _serverConfigurationManager.GetTranscodePath(),
+                segmentExtension,
+                streamingRequest.PlaySessionId,
+                streamingRequest.DeviceId));
+        }
 
-        var state = await StreamingHelpers.GetStreamingState(
-                streamingRequest,
-                HttpContext,
-                _mediaSourceManager,
-                _userManager,
-                _libraryManager,
-                _serverConfigurationManager,
-                _mediaEncoder,
-                _encodingHelper,
-                _transcodeManager,
-                TranscodingJobType,
-                cancellationToken)
-            .ConfigureAwait(false);
+        Task<TranscodingJob> StartRunAsync(HlsEncoderRun run, CancellationTokenSource cancellationTokenSource)
+            => StartHlsRunAsync(streamingRequest, run, cancellationTokenSource);
 
-        var playlistPath = Path.ChangeExtension(state.OutputFilePath, ".m3u8");
+        if (segmentId == -1)
+        {
+            var initPath = await _hlsSessionManager.GetInitAsync(session, StartRunAsync, cancellationToken).ConfigureAwait(false);
+            return FileStreamResponseHelpers.GetStaticFileResult(initPath, MimeTypes.GetMimeType(initPath));
+        }
 
-        var segmentPath = GetSegmentPath(state, playlistPath, segmentId);
+        var lease = await _hlsSessionManager.GetSegmentAsync(session, segmentId, StartRunAsync, cancellationToken).ConfigureAwait(false);
+        Response.OnCompleted(() =>
+        {
+            _logger.LogDebug("Finished serving HLS segment {SegmentId} of session {SessionId}", segmentId, session.Id);
+            lease.Release();
+            return Task.CompletedTask;
+        });
 
+        return new ConcatenatedFileResult(lease.Files, MimeTypes.GetMimeType("segment" + session.SegmentExtension));
+    }
+
+    /// <summary>
+    /// Gets the key of the live HLS session of a variant: the user, the item and the parameters of the stream, without those
+    /// that segment URLs of old playlists carry and the plan now gives.
+    /// </summary>
+    /// <param name="userId">The user.</param>
+    /// <param name="isVideo">Whether the stream is a video one.</param>
+    /// <param name="itemId">The item.</param>
+    /// <param name="query">The query of the segment URLs.</param>
+    /// <returns>The key.</returns>
+    internal static string GetSessionKey(Guid userId, bool isVideo, Guid itemId, QueryString query)
+    {
+        var builder = new StringBuilder(isVideo ? "video" : "audio")
+            .Append('|')
+            .Append(userId.ToString("N", CultureInfo.InvariantCulture))
+            .Append('|')
+            .Append(itemId.ToString("N", CultureInfo.InvariantCulture));
+        foreach (var (name, values) in QueryHelpers.ParseQuery(query.Value)
+                     .Where(p => !string.Equals(p.Key, "runtimeTicks", StringComparison.OrdinalIgnoreCase)
+                                 && !string.Equals(p.Key, "actualSegmentLengthTicks", StringComparison.OrdinalIgnoreCase))
+                     .OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            builder.Append('|').Append(name.ToLowerInvariant()).Append('=').Append(values.ToString());
+        }
+
+        return builder.ToString();
+    }
+
+    private Task<StreamState> GetStreamingStateAsync(StreamingRequestDto streamingRequest, CancellationToken cancellationToken)
+        => StreamingHelpers.GetStreamingState(
+            streamingRequest,
+            HttpContext,
+            _mediaSourceManager,
+            _userManager,
+            _libraryManager,
+            _serverConfigurationManager,
+            _mediaEncoder,
+            _encodingHelper,
+            _transcodeManager,
+            TranscodingJobType,
+            cancellationToken);
+
+    // Plans a variant. A copy of a video whose keyframes are unknown transcodes it instead, which the segment URLs then ask
+    // for; the master playlist has decided it already, unless the client asked for this playlist itself.
+    private async Task<(SegmentPlan Plan, HlsCutMode Mode, string SegmentExtension, bool IsVideoCopyDisabled)> CreatePlanAsync(
+        StreamingRequestDto streamingRequest,
+        CancellationToken cancellationToken)
+    {
+        var videoCodec = streamingRequest.VideoCodec;
+        var state = await GetStreamingStateAsync(streamingRequest, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var totalTicks = state.RunTimeTicks ?? 0;
+            if (totalTicks <= 0)
+            {
+                throw new ArgumentException("HLS needs the duration of the media.");
+            }
+
+            var segmentExtension = EncodingHelper.GetSegmentFileExtension(state.Request.SegmentContainer);
+            var mode = _dynamicHlsHelper.GetCutMode(state);
+            var isVideoCopyDisabled = false;
+            if (mode == HlsCutMode.CopyVideo)
+            {
+                var keyframePlan = await _dynamicHlsHelper.CreateKeyframePlanAsync(state, totalTicks, cancellationToken).ConfigureAwait(false);
+                if (keyframePlan is not null)
+                {
+                    return (keyframePlan, mode, segmentExtension, false);
+                }
+
+                _logger.LogInformation("The keyframes of {Path} are unknown; transcoding its video for HLS", state.MediaPath);
+                DynamicHlsHelper.DisableVideoStreamCopy(streamingRequest, videoCodec);
+                state.Dispose();
+                state = await GetStreamingStateAsync(streamingRequest, cancellationToken).ConfigureAwait(false);
+                mode = _dynamicHlsHelper.GetCutMode(state);
+                if (mode != HlsCutMode.TranscodeVideo)
+                {
+                    throw new ArgumentException("User does not have access to video transcoding.");
+                }
+
+                isVideoCopyDisabled = true;
+            }
+
+            // Audio is cut by time; a transcode at frames.
+            var framerate = mode == HlsCutMode.TranscodeVideo ? _encodingHelper.GetOutputFramerate(state, _encodingOptions) : null;
+            var plan = SegmentPlanner.CreateUniformPlan(totalTicks, TimeSpan.FromSeconds(state.SegmentLength).Ticks, framerate);
+            return (plan, mode, segmentExtension, isVideoCopyDisabled);
+        }
+        finally
+        {
+            state.Dispose();
+        }
+    }
+
+    // Starts the ffmpeg process of a run, reading the source anew from where the run starts.
+    private async Task<TranscodingJob> StartHlsRunAsync(StreamingRequestDto streamingRequest, HlsEncoderRun run, CancellationTokenSource cancellationTokenSource)
+    {
+        if (run.Mode == HlsCutMode.TranscodeVideo)
+        {
+            streamingRequest.AllowVideoStreamCopy = false;
+        }
+
+        var state = await GetStreamingStateAsync(streamingRequest, cancellationTokenSource.Token).ConfigureAwait(false);
+        try
+        {
+            // Set once the legacy parameters are parsed, which may carry a start of their own.
+            state.Request.StartTimeTicks = run.Start.InputSeekTicks;
+
+            // The cuts of the plan hold for the codecs it was made for.
+            if (_dynamicHlsHelper.GetCutMode(state) != run.Mode)
+            {
+                throw new FfmpegException($"The stream of HLS run {run.Id} is no longer {run.Mode}.");
+            }
+
+            state.IsExactSeek = true;
+            return await _transcodeManager.StartFfMpeg(
+                    state,
+                    run.ListPath,
+                    GetSegmentCommandLineArguments(state, run),
+                    User.GetUserId(),
+                    TranscodingJobType,
+                    cancellationTokenSource)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            state.Dispose();
+            throw;
+        }
+    }
+
+    // The segment muxer writes a GOP file at every keyframe, or every segment length of audio, and lists them; the timeline
+    // of the files is the plan's in every run, as appendix A of the plan describes.
+    private string GetSegmentCommandLineArguments(StreamState state, HlsEncoderRun run)
+    {
+        // An external graphical subtitle burned in is an input of its own, which -start_at_zero would shift by its own start;
+        // it takes the offset of the media instead, which keeps it where it was without the option. Older ffmpeg keeps the
+        // timestamps of the source, which are the plan's when the source starts at zero.
+        var hasExternalGraphicalSubtitle = !EncodingHelper.IsCopyCodec(state.OutputVideoCodec)
+            && state.SubtitleStream is { IsExternal: true, IsTextSubtitleStream: false };
+        state.IsSubtitleInputSynced = hasExternalGraphicalSubtitle && _mediaEncoder.EncoderVersion >= _minFFmpegInputSync;
+        var startAtZero = !hasExternalGraphicalSubtitle || state.IsSubtitleInputSynced;
+
+        var plan = run.Plan;
+        var videoCodec = _encodingHelper.GetVideoEncoder(state, _encodingOptions);
+        var threads = EncodingHelper.GetNumberOfThreads(state, _encodingOptions, videoCodec);
+        var mapArgs = state.IsOutputVideo ? _encodingHelper.GetMapArgs(state) : string.Empty;
         var segmentExtension = EncodingHelper.GetSegmentFileExtension(state.Request.SegmentContainer);
+        var segmentContainer = segmentExtension.TrimStart('.');
+        var inputModifier = _encodingHelper.GetInputModifier(state, _encodingOptions, segmentContainer);
+        var videoArgs = GetVideoArguments(state, false, segmentContainer, codec => GetPlanKeyFrameArguments(state, codec, run), false);
+        var audioArgs = GetAudioArguments(state);
 
-        // Keep segment selection and transcoding replacement under the same playlist lock.
-        // An out-of-order request must not replace a job while another request is using its output.
-        using (await _transcodeManager.LockAsync(playlistPath, cancellationToken).ConfigureAwait(false))
+        var outputArgs = string.Empty;
+        if (run.Start.OutputSeekTicks > 0)
         {
-            TranscodingJob? job;
-            var startTranscoding = false;
-            if (System.IO.File.Exists(segmentPath))
-            {
-                job = _transcodeManager.OnTranscodeBeginRequest(playlistPath, TranscodingJobType);
-                _logger.LogDebug("returning {0} [it exists]", segmentPath);
-                return await GetSegmentResult(state, playlistPath, segmentPath, segmentExtension, segmentId, job, cancellationToken).ConfigureAwait(false);
-            }
-
-            var currentTranscodingIndex = GetCurrentTranscodingIndex(playlistPath, segmentExtension);
-            var segmentGapRequiringTranscodingChange = 24 / state.SegmentLength;
-
-            if (segmentId == -1)
-            {
-                _logger.LogDebug("Starting transcoding because fmp4 init file is being requested");
-                startTranscoding = true;
-                segmentId = 0;
-            }
-            else if (currentTranscodingIndex is null)
-            {
-                _logger.LogDebug("Starting transcoding because currentTranscodingIndex=null");
-                startTranscoding = true;
-            }
-            else if (segmentId < currentTranscodingIndex.Value)
-            {
-                _logger.LogDebug("Starting transcoding because requestedIndex={0} and currentTranscodingIndex={1}", segmentId, currentTranscodingIndex);
-                startTranscoding = true;
-            }
-            else if (segmentId - currentTranscodingIndex.Value > segmentGapRequiringTranscodingChange)
-            {
-                _logger.LogDebug("Starting transcoding because segmentGap is {0} and max allowed gap is {1}. requestedIndex={2}", segmentId - currentTranscodingIndex.Value, segmentGapRequiringTranscodingChange, segmentId);
-                startTranscoding = true;
-            }
-
-            if (startTranscoding)
-            {
-                // If the playlist doesn't already exist, startup ffmpeg
-                try
-                {
-                    var currentJob = _transcodeManager.GetTranscodingJob(playlistPath, TranscodingJobType);
-                    await WaitForActiveTranscodingRequests(currentJob, cancellationToken).ConfigureAwait(false);
-
-                    await _transcodeManager.KillTranscodingJobs(streamingRequest.DeviceId, streamingRequest.PlaySessionId, p => false)
-                        .ConfigureAwait(false);
-
-                    if (currentTranscodingIndex.HasValue)
-                    {
-                        await DeleteLastFile(playlistPath, segmentExtension, 0).ConfigureAwait(false);
-                    }
-
-                    streamingRequest.StartTimeTicks = streamingRequest.CurrentRuntimeTicks;
-
-                    state.WaitForPath = segmentPath;
-                    job = await _transcodeManager.StartFfMpeg(
-                        state,
-                        playlistPath,
-                        GetCommandLineArguments(playlistPath, state, false, segmentId),
-                        Request.HttpContext.User.GetUserId(),
-                        TranscodingJobType,
-                        cancellationTokenSource).ConfigureAwait(false);
-                }
-                catch
-                {
-                    state.Dispose();
-                    throw;
-                }
-
-                // await WaitForMinimumSegmentCount(playlistPath, 1, cancellationTokenSource.Token).ConfigureAwait(false);
-            }
-            else
-            {
-                job = _transcodeManager.OnTranscodeBeginRequest(playlistPath, TranscodingJobType);
-                if (job?.TranscodingThrottler is not null)
-                {
-                    await job.TranscodingThrottler.UnpauseTranscoding().ConfigureAwait(false);
-                }
-            }
-
-            _logger.LogDebug("returning {0} [general case]", segmentPath);
-            job ??= _transcodeManager.OnTranscodeBeginRequest(playlistPath, TranscodingJobType);
-            return await GetSegmentResult(state, playlistPath, segmentPath, segmentExtension, segmentId, job, cancellationToken).ConfigureAwait(false);
+            // An output seek shifts the timestamps; the offset shifts them back.
+            var at = HlsCuts.FormatSeconds(run.Start.OutputSeekTicks);
+            outputArgs += " -ss " + at + " -output_ts_offset " + at;
         }
+
+        if (run.EndIndex < plan.Segments.Count)
+        {
+            // Stop before the frame of the boundary after the last segment, which starts the next run.
+            outputArgs += " -to " + HlsCuts.FormatSeconds(plan.Segments[run.EndIndex].StartTicks - plan.ToleranceTicks);
+        }
+
+        string segmentFormat;
+        if (string.Equals(segmentContainer, "mp4", StringComparison.OrdinalIgnoreCase))
+        {
+            // No edit list, which would move tfdt by the composition offset of the first packet, and no shift: tfdt stays on the
+            // timeline. The offset keeps the first B-frame delay above zero; empty_moov keeps samples out of the init segment.
+            var formatOptions = "movflags=+frag_custom+empty_moov+frag_discont+skip_sidx+default_base_moof:use_editlist=0:avoid_negative_ts=disabled:output_ts_offset=10";
+            if (videoArgs.Contains("-strict -2", StringComparison.Ordinal) || audioArgs.Contains("-strict -2", StringComparison.Ordinal))
+            {
+                // The inner muxer does not see the option of the outer one.
+                formatOptions += ":strict=-2";
+            }
+
+            segmentFormat = "-segment_format mp4 -segment_header_filename \"" + run.InitPath.EscapeProcessArgument() + "\" -segment_format_options " + formatOptions;
+        }
+        else
+        {
+            segmentFormat = "-segment_format mpegts -segment_format_options avoid_negative_ts=disabled";
+        }
+
+        var maxMuxingQueueSize = _encodingOptions.MaxMuxingQueueSize > 128
+            ? _encodingOptions.MaxMuxingQueueSize.ToString(CultureInfo.InvariantCulture)
+            : "128";
+
+        // Every audio packet is a keyframe: audio alone is cut by time.
+        var segmentTime = run.Mode is HlsCutMode.CopyAudio or HlsCutMode.TranscodeAudio
+            ? state.SegmentLength.ToString(CultureInfo.InvariantCulture)
+            : "0.001";
+
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            "{0} {1} -map_metadata -1 -map_chapters -1 -threads {2} {3} {4} {5}{6} -copyts{7} -avoid_negative_ts disabled -max_muxing_queue_size {8} -f segment -max_delay 5000000 -segment_time {9} -segment_list \"{10}\" -segment_list_type csv -individual_header_trailer 0 {11} -y \"{12}\"",
+            inputModifier,
+            _encodingHelper.GetInputArgument(state, _encodingOptions, segmentContainer),
+            threads,
+            mapArgs,
+            videoArgs,
+            audioArgs,
+            outputArgs,
+            startAtZero ? " -start_at_zero" : string.Empty,
+            maxMuxingQueueSize,
+            segmentTime,
+            run.ListPath.EscapeProcessArgument(),
+            segmentFormat,
+            run.SegmentPattern.EscapeProcessArgument()).Trim();
     }
 
-    // The keyframe data of a video is that of its first video stream.
-    private static bool IsFirstVideoStream(StreamState state)
-        => state.VideoStream is not null
-           && state.VideoStream.Index == state.MediaSource.MediaStreams.Where(s => s.Type == MediaStreamType.Video).Min(s => (int?)s.Index);
-
-    internal static async Task WaitForActiveTranscodingRequests(TranscodingJob? job, CancellationToken cancellationToken)
+    // Forces a keyframe at each boundary of the run. The encoders that cannot get a GOP of a segment, which a uniform plan
+    // whole in frames lines up with when the video starts on its grid; otherwise the files of a run from the start begin
+    // late by that offset, and still make up the segments their starts fall in.
+    private string GetPlanKeyFrameArguments(StreamState state, string codec, HlsEncoderRun run)
     {
-        while (job?.ActiveRequestCount > 0)
-        {
-            await Task.Delay(100, cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    private static double[] GetSegmentLengths(StreamState state)
-        => GetSegmentLengthsInternal(state.RunTimeTicks ?? 0, state.SegmentLength);
-
-    internal static double[] GetSegmentLengthsInternal(long runtimeTicks, int segmentlength)
-    {
-        var segmentLengthTicks = TimeSpan.FromSeconds(segmentlength).Ticks;
-        var wholeSegments = runtimeTicks / segmentLengthTicks;
-        var remainingTicks = runtimeTicks % segmentLengthTicks;
-
-        var segmentsLen = wholeSegments + (remainingTicks == 0 ? 0 : 1);
-        var segments = new double[segmentsLen];
-        for (int i = 0; i < wholeSegments; i++)
-        {
-            segments[i] = segmentlength;
-        }
-
-        if (remainingTicks != 0)
-        {
-            segments[^1] = TimeSpan.FromTicks(remainingTicks).TotalSeconds;
-        }
-
-        return segments;
+        var times = string.Join(',', HlsCuts.GetForcedKeyframeTicks(run.Plan, run.StartIndex, run.EndIndex).Select(HlsCuts.FormatSeconds));
+        var framerate = _encodingHelper.GetOutputFramerate(state, _encodingOptions);
+        int? gopFrames = framerate > 0 ? (int)Math.Ceiling((state.SegmentLength * framerate.Value) - 1e-6) : null;
+        return _encodingHelper.GetHlsVideoKeyFrameArguments(codec, times, gopFrames);
     }
 
     private string GetCommandLineArguments(string outputPath, StreamState state, bool isEventPlaylist, int startNumber)
@@ -1801,6 +1896,23 @@ public class DynamicHlsController : BaseJellyfinApiController
     /// <param name="segmentContainer">The segment container.</param>
     /// <returns>The command line arguments for video transcoding.</returns>
     private string GetVideoArguments(StreamState state, int startNumber, bool isEventPlaylist, string segmentContainer)
+        => GetVideoArguments(
+            state,
+            isEventPlaylist,
+            segmentContainer,
+            codec => _encodingHelper.GetHlsVideoKeyFrameArguments(state, codec, state.SegmentLength, isEventPlaylist, startNumber),
+            true);
+
+    /// <summary>
+    /// Gets the video arguments for transcoding.
+    /// </summary>
+    /// <param name="state">The <see cref="StreamState"/>.</param>
+    /// <param name="isEventPlaylist">Whether the playlist is EVENT or VOD.</param>
+    /// <param name="segmentContainer">The segment container.</param>
+    /// <param name="getKeyFrameArguments">Gets the key frame arguments of a video encoder.</param>
+    /// <param name="addStartAtZero">Whether to add <c>-start_at_zero</c>, which a live HLS run adds itself.</param>
+    /// <returns>The command line arguments for video transcoding.</returns>
+    private string GetVideoArguments(StreamState state, bool isEventPlaylist, string segmentContainer, Func<string, string> getKeyFrameArguments, bool addStartAtZero)
     {
         if (state.VideoStream is null)
         {
@@ -1867,14 +1979,17 @@ public class DynamicHlsController : BaseJellyfinApiController
                 }
             }
 
-            args += " -start_at_zero";
+            if (addStartAtZero)
+            {
+                args += " -start_at_zero";
+            }
         }
         else
         {
             args += _encodingHelper.GetVideoQualityParam(state, codec, _encodingOptions, isEventPlaylist ? DefaultEventEncoderPreset : DefaultVodEncoderPreset);
 
             // Set the key frame params for video encoding to match the hls segment time.
-            args += _encodingHelper.GetHlsVideoKeyFrameArguments(state, codec, state.SegmentLength, isEventPlaylist, startNumber);
+            args += getKeyFrameArguments(codec);
 
             // Currently b-frames in libx265 breaks the FMP4-HLS playback on iOS, disable it for now.
             if (string.Equals(codec, "libx265", StringComparison.OrdinalIgnoreCase)
@@ -1892,7 +2007,7 @@ public class DynamicHlsController : BaseJellyfinApiController
 
             // -start_at_zero is necessary to use with -ss when seeking,
             // otherwise the target position cannot be determined.
-            if (state.SubtitleStream is not null)
+            if (addStartAtZero && state.SubtitleStream is not null)
             {
                 // Disable start_at_zero for external graphical subs
                 if (!(state.SubtitleStream.IsExternal && !state.SubtitleStream.IsTextSubtitleStream))
@@ -1916,187 +2031,5 @@ public class DynamicHlsController : BaseJellyfinApiController
         args += _encodingHelper.GetOutputFFlags(state);
 
         return args;
-    }
-
-    private string GetSegmentPath(StreamState state, string playlist, int index)
-    {
-        var folder = Path.GetDirectoryName(playlist) ?? throw new ArgumentException($"Provided path ({playlist}) is not valid.", nameof(playlist));
-        var filename = Path.GetFileNameWithoutExtension(playlist);
-
-        return Path.Combine(folder, filename + index.ToString(CultureInfo.InvariantCulture) + EncodingHelper.GetSegmentFileExtension(state.Request.SegmentContainer));
-    }
-
-    private async Task<ActionResult> GetSegmentResult(
-        StreamState state,
-        string playlistPath,
-        string segmentPath,
-        string segmentExtension,
-        int segmentIndex,
-        TranscodingJob? transcodingJob,
-        CancellationToken cancellationToken)
-    {
-        var segmentExists = System.IO.File.Exists(segmentPath);
-        if (segmentExists)
-        {
-            if (transcodingJob is not null && transcodingJob.HasExited)
-            {
-                // Transcoding job is over, so assume all existing files are ready
-                _logger.LogDebug("serving up {0} as transcode is over", segmentPath);
-                return GetSegmentResult(state, segmentPath, segmentIndex, transcodingJob);
-            }
-
-            var currentTranscodingIndex = GetCurrentTranscodingIndex(playlistPath, segmentExtension);
-
-            // If requested segment is less than transcoding position, we can't transcode backwards, so assume it's ready
-            if (segmentIndex < currentTranscodingIndex)
-            {
-                _logger.LogDebug("serving up {0} as transcode index {1} is past requested point {2}", segmentPath, currentTranscodingIndex, segmentIndex);
-                return GetSegmentResult(state, segmentPath, segmentIndex, transcodingJob);
-            }
-        }
-
-        var nextSegmentPath = GetSegmentPath(state, playlistPath, segmentIndex + 1);
-        if (transcodingJob is not null)
-        {
-            while (!cancellationToken.IsCancellationRequested && !transcodingJob.HasExited)
-            {
-                // To be considered ready, the segment file has to exist AND
-                // either the transcoding job should be done or next segment should also exist
-                if (segmentExists)
-                {
-                    if (transcodingJob.HasExited || System.IO.File.Exists(nextSegmentPath))
-                    {
-                        _logger.LogDebug("Serving up {SegmentPath} as it deemed ready", segmentPath);
-                        return GetSegmentResult(state, segmentPath, segmentIndex, transcodingJob);
-                    }
-                }
-                else
-                {
-                    segmentExists = System.IO.File.Exists(segmentPath);
-                    if (segmentExists)
-                    {
-                        continue; // avoid unnecessary waiting if segment just became available
-                    }
-                }
-
-                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
-            }
-
-            if (!System.IO.File.Exists(segmentPath))
-            {
-                _logger.LogWarning("cannot serve {0} as transcoding quit before we got there", segmentPath);
-            }
-            else
-            {
-                _logger.LogDebug("serving {0} as it's on disk and transcoding stopped", segmentPath);
-            }
-
-            cancellationToken.ThrowIfCancellationRequested();
-        }
-        else
-        {
-            _logger.LogWarning("cannot serve {0} as it doesn't exist and no transcode is running", segmentPath);
-        }
-
-        return GetSegmentResult(state, segmentPath, segmentIndex, transcodingJob);
-    }
-
-    private ActionResult GetSegmentResult(StreamState state, string segmentPath, int segmentIndex, TranscodingJob? transcodingJob)
-    {
-        var segmentEndingPositionTicks = state.Request.CurrentRuntimeTicks + state.Request.ActualSegmentLengthTicks;
-
-        Response.OnCompleted(() =>
-        {
-            _logger.LogDebug("Finished serving {SegmentPath}", segmentPath);
-            if (transcodingJob is not null)
-            {
-                transcodingJob.DownloadPositionTicks = Math.Max(transcodingJob.DownloadPositionTicks ?? segmentEndingPositionTicks, segmentEndingPositionTicks);
-                transcodingJob.ReportSegmentDownloaded(segmentIndex, segmentEndingPositionTicks);
-                _transcodeManager.OnTranscodeEndRequest(transcodingJob);
-            }
-
-            return Task.CompletedTask;
-        });
-
-        return FileStreamResponseHelpers.GetStaticFileResult(segmentPath, MimeTypes.GetMimeType(segmentPath));
-    }
-
-    private int? GetCurrentTranscodingIndex(string playlist, string segmentExtension)
-    {
-        var job = _transcodeManager.GetTranscodingJob(playlist, TranscodingJobType);
-
-        if (job is null || job.HasExited)
-        {
-            return null;
-        }
-
-        var file = GetLastTranscodingFile(playlist, segmentExtension, _fileSystem);
-
-        if (file is null)
-        {
-            return null;
-        }
-
-        var playlistFilename = Path.GetFileNameWithoutExtension(playlist.AsSpan());
-
-        var indexString = Path.GetFileNameWithoutExtension(file.Name.AsSpan()).Slice(playlistFilename.Length);
-
-        return int.Parse(indexString, NumberStyles.Integer, CultureInfo.InvariantCulture);
-    }
-
-    private static FileSystemMetadata? GetLastTranscodingFile(string playlist, string segmentExtension, IFileSystem fileSystem)
-    {
-        var folder = Path.GetDirectoryName(playlist) ?? throw new ArgumentException("Path can't be a root directory.", nameof(playlist));
-
-        var filePrefix = Path.GetFileNameWithoutExtension(playlist);
-
-        try
-        {
-            return fileSystem.GetFiles(folder, new[] { segmentExtension }, true, false)
-                .Where(i => Path.GetFileNameWithoutExtension(i.Name).StartsWith(filePrefix, StringComparison.OrdinalIgnoreCase))
-                .MaxBy(fileSystem.GetLastWriteTimeUtc);
-        }
-        catch (IOException)
-        {
-            return null;
-        }
-    }
-
-    private async Task DeleteLastFile(string playlistPath, string segmentExtension, int retryCount)
-    {
-        var file = GetLastTranscodingFile(playlistPath, segmentExtension, _fileSystem);
-
-        if (file is null)
-        {
-            return;
-        }
-
-        await DeleteFile(file.FullName, retryCount).ConfigureAwait(false);
-    }
-
-    private async Task DeleteFile(string path, int retryCount)
-    {
-        if (retryCount >= 5)
-        {
-            return;
-        }
-
-        _logger.LogDebug("Deleting partial HLS file {Path}", path);
-
-        try
-        {
-            _fileSystem.DeleteFile(path);
-        }
-        catch (IOException ex)
-        {
-            _logger.LogError(ex, "Error deleting partial stream file(s) {Path}", path);
-
-            await Task.Delay(100).ConfigureAwait(false);
-            await DeleteFile(path, retryCount + 1).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error deleting partial stream file(s) {Path}", path);
-        }
     }
 }

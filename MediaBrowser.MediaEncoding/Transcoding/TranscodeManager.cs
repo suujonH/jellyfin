@@ -221,6 +221,10 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
         }
     }
 
+    /// <inheritdoc />
+    public Task KillTranscodingJob(TranscodingJob job, bool deleteFiles)
+        => KillTranscodingJob(job, false, _ => deleteFiles);
+
     private async Task KillTranscodingJob(TranscodingJob job, bool closeLiveStream, Func<string, bool> delete)
     {
         job.DisposeKillTimer();
@@ -646,8 +650,7 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
 
     private void OnFfMpegProcessExited(Process process, TranscodingJob job, StreamState state)
     {
-        job.HasExited = true;
-        job.ExitCode = process.ExitCode;
+        job.ReportExited(process.ExitCode);
 
         ReportTranscodingProgress(job, state, null, null, null, null, null);
 

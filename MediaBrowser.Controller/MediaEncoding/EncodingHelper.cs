@@ -1324,6 +1324,11 @@ namespace MediaBrowser.Controller.MediaEncoding
                     arg.Append(canvasArgs);
                 }
 
+                if (state.IsSubtitleInputSynced)
+                {
+                    arg.Append(" -isync 0");
+                }
+
                 arg.Append(" -i file:\"").Append(subtitlePath.EscapeProcessArgument()).Append('\"');
             }
 
@@ -2028,6 +2033,36 @@ namespace MediaBrowser.Controller.MediaEncoding
             return null;
         }
 
+        /// <summary>
+        /// Gets the frame rate of the output video: that of the source when the video is copied, otherwise the requested rate
+        /// or that of the source, doubled by a double-rate deinterlace.
+        /// </summary>
+        /// <param name="state">The state.</param>
+        /// <param name="options">The encoding options.</param>
+        /// <returns>The frame rate, or null when it is unknown.</returns>
+        public double? GetOutputFramerate(EncodingJobInfo state, EncodingOptions options)
+        {
+            var sourceRate = state.VideoStream?.ReferenceFrameRate;
+            if (IsCopyCodec(state.OutputVideoCodec))
+            {
+                return sourceRate;
+            }
+
+            var framerate = GetFramerateParam(state);
+            if (framerate.HasValue)
+            {
+                return framerate;
+            }
+
+            // As the deinterlace filters decide.
+            if (sourceRate <= 30 && options.DeinterlaceDoubleRate && IsDeinterlaceAvailable(state))
+            {
+                return sourceRate * 2;
+            }
+
+            return sourceRate;
+        }
+
         public string GetHlsVideoKeyFrameArguments(
             EncodingJobInfo state,
             string codec,
@@ -2035,7 +2070,6 @@ namespace MediaBrowser.Controller.MediaEncoding
             bool isEventPlaylist,
             int? startNumber)
         {
-            var args = string.Empty;
             var gopArg = string.Empty;
 
             var keyFrameArg = string.Format(
@@ -2056,6 +2090,33 @@ namespace MediaBrowser.Controller.MediaEncoding
                     " -g:v:0 {0} -keyint_min:v:0 {0}",
                     Math.Ceiling(segmentLength * framerate.Value));
             }
+
+            return GetHlsVideoKeyFrameArguments(codec, keyFrameArg, gopArg);
+        }
+
+        /// <summary>
+        /// Gets the arguments that force a keyframe at each of the given times, for a live HLS run whose segments a plan gives.
+        /// The encoders that cannot force keyframes get a fixed GOP of a segment instead.
+        /// </summary>
+        /// <param name="codec">The video encoder.</param>
+        /// <param name="keyframeTimes">The times in seconds on the output timeline, separated by commas; empty for none.</param>
+        /// <param name="gopFrames">The frames of a segment, or null when the frame rate is unknown.</param>
+        /// <returns>The arguments.</returns>
+        public string GetHlsVideoKeyFrameArguments(string codec, string keyframeTimes, int? gopFrames)
+        {
+            var keyFrameArg = string.IsNullOrEmpty(keyframeTimes)
+                ? string.Empty
+                : " -force_key_frames:0 \"" + keyframeTimes + "\"";
+            var gopArg = gopFrames.HasValue
+                ? string.Format(CultureInfo.InvariantCulture, " -g:v:0 {0} -keyint_min:v:0 {0}", gopFrames.Value)
+                : string.Empty;
+
+            return GetHlsVideoKeyFrameArguments(codec, keyFrameArg, gopArg);
+        }
+
+        private string GetHlsVideoKeyFrameArguments(string codec, string keyFrameArg, string gopArg)
+        {
+            var args = string.Empty;
 
             // Unable to force key frames using these encoders, set key frames by GOP.
             if (string.Equals(codec, "h264_qsv", StringComparison.OrdinalIgnoreCase)
@@ -3098,6 +3159,15 @@ namespace MediaBrowser.Controller.MediaEncoding
             var time = state.BaseRequest.StartTimeTicks ?? 0;
             var maxTime = state.RunTimeTicks ?? 0;
             var seekParam = string.Empty;
+
+            if (time > 0 && state.IsExactSeek)
+            {
+                // To the microsecond, the precision of the segment list.
+                return string.Format(
+                    CultureInfo.InvariantCulture,
+                    "-ss {0}",
+                    ((decimal)time / TimeSpan.TicksPerSecond).ToString("0.######", CultureInfo.InvariantCulture));
+            }
 
             if (time > 0)
             {

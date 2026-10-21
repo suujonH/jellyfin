@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
+using System.Threading.Tasks;
 using MediaBrowser.Model.Dto;
 using Microsoft.Extensions.Logging;
 
@@ -16,6 +18,7 @@ public sealed class TranscodingJob : IDisposable
     private readonly Lock _processLock = new();
     private readonly Lock _timerLock = new();
     private readonly ConcurrentDictionary<int, long> _segmentEndPositionTicks = new();
+    private readonly TaskCompletionSource<int> _exited = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private int _activeRequestCount;
     private Timer? _killTimer;
@@ -94,6 +97,11 @@ public sealed class TranscodingJob : IDisposable
     public int ExitCode { get; set; }
 
     /// <summary>
+    /// Gets a task that completes with the exit code once the process has exited.
+    /// </summary>
+    public Task<int> Exited => _exited.Task;
+
+    /// <summary>
     /// Gets or sets a value indicating whether is user paused.
     /// </summary>
     public bool IsUserPaused { get; set; }
@@ -139,6 +147,18 @@ public sealed class TranscodingJob : IDisposable
     public long? DownloadPositionTicks { get; set; }
 
     /// <summary>
+    /// Gets or sets the end of the last segment the output has completed, when its segments are known in advance. The
+    /// throttler prefers it to <see cref="TranscodingPositionTicks"/>.
+    /// </summary>
+    public long? CompletedPositionTicks { get; set; }
+
+    /// <summary>
+    /// Gets or sets a function that gives the files holding the segments up to and including a segment index, when the
+    /// files are not named by their segment. The segment cleaner deletes these instead of matching file names.
+    /// </summary>
+    public Func<int, IEnumerable<string>>? SegmentFiles { get; set; }
+
+    /// <summary>
     /// Gets or sets transcoding throttler.
     /// </summary>
     public TranscodingThrottler? TranscodingThrottler { get; set; }
@@ -157,6 +177,17 @@ public sealed class TranscodingJob : IDisposable
     /// Gets or sets ping timeout.
     /// </summary>
     public int PingTimeout { get; set; }
+
+    /// <summary>
+    /// Records that the process has exited.
+    /// </summary>
+    /// <param name="exitCode">The exit code.</param>
+    public void ReportExited(int exitCode)
+    {
+        ExitCode = exitCode;
+        HasExited = true;
+        _exited.TrySetResult(exitCode);
+    }
 
     /// <summary>
     /// Records the end position of a served segment.

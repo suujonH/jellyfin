@@ -42,7 +42,7 @@ using Jellyfin.Api.Helpers;
 using Jellyfin.Data;
 using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Drawing;
-using Jellyfin.MediaEncoding.Hls.Playlist;
+using Jellyfin.MediaEncoding.Hls.Sessions;
 using Jellyfin.Networking.Manager;
 using Jellyfin.Networking.Udp;
 using Jellyfin.Server.Implementations.FullSystemBackup;
@@ -925,7 +925,7 @@ namespace Emby.Server.Implementations
             yield return typeof(NetworkManager).Assembly;
 
             // Hls
-            yield return typeof(DynamicHlsPlaylistGenerator).Assembly;
+            yield return typeof(HlsSessionManager).Assembly;
 
             foreach (var i in GetAssembliesWithPartsInternal())
             {

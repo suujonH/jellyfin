@@ -147,6 +147,13 @@ public sealed class FfmpegFixture : IAsyncLifetime
     public Task<string> FfmpegAsync(string workingDirectory, IEnumerable<string> arguments, CancellationToken cancellationToken)
         => RunAsync(FfmpegPath, ["-hide_banner", "-y", "-v", "error", .. arguments], workingDirectory, cancellationToken);
 
+    /// <summary>Runs ffmpeg like the transcode manager does, which reads the exit code rather than failing on it.</summary>
+    public async Task<(int ExitCode, string Error)> TryFfmpegAsync(string workingDirectory, IEnumerable<string> arguments, CancellationToken cancellationToken)
+    {
+        var result = await ExecuteAsync(FfmpegPath, ["-hide_banner", "-y", "-v", "error", .. arguments], workingDirectory, cancellationToken).ConfigureAwait(false);
+        return (result.ExitCode, result.Error);
+    }
+
     /// <summary>Gets the video keyframe times relative to the format start, the timeline of <c>-copyts -start_at_zero</c>.</summary>
     public async Task<IReadOnlyList<double>> GetKeyframesAsync(string path, CancellationToken cancellationToken)
     {

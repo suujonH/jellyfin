@@ -86,7 +86,7 @@ public sealed class SegmentPlan
   - 字幕、章节、时间码等其他轨道早于音视频开始（早不到 1 秒时 ffmpeg 以它为格式起点，但要看探测时是否读到这条轨道）；
   - 分片 MP4（有 `mvex`，样本可能一部分在 moov、其余在 moof）。
 - **数据库**：旧版本存的 ffprobe 结果是绝对时间。这些数据只来自手动运行的计划任务，只有本地文件（旧链路按需提取只用元数据提取器）。迁移 `DeleteUnalignedKeyframeData` 随第 2 阶段加入，删除所有已存的关键帧，由关键帧来源按需重新读取：容器不能说明起点（MP4 的轨道也可以都晚开始），而第 1 阶段的旧链路重建不了 ffprobe 的数据，所以那时不删。MP4 的按需提取也随第 2 阶段启用（见关键帧来源第 4 项）：旧链路经 `CacheDecorator` 先查数据库，在删除之前启用，旧链路会读到这些绝对时间的数据。
-- **TrueCache**：旧工具为 TS 等容器生成的 `keyframes.json` 是绝对时间，需要重新生成（第 8 阶段写进文档）。时间轴对不上时，第 2 阶段的检查会改为转码视频，不会播错。
+- **TrueCache**：旧工具为 TS 等容器生成的 `keyframes.json` 是绝对时间，需要重新生成（第 8 阶段写进文档）。时间轴对不上时，文件仍按起点归入计划的段（附录 A.2），播放连续，只是段长与播放列表不符。
 
 **`SegmentPlanner`**：
 - 是纯函数：相同输入得出相同计划。
@@ -131,7 +131,7 @@ public sealed class SegmentPlan
   - 转码：精确 seek 到边界前半帧，第一个文件就是第 n 段。
   - 纯音频：从边界开始。
   - 不再使用 hls muxer 的 `-start_number` 和 0.5 秒补偿。
-- 实时 HLS 的切片始终放在本地转码目录，每次 run 一个子目录。
+- 实时 HLS 的切片始终放在本地转码目录。一次 run 的文件平铺在转码目录中，都以 run id 开头（`{id}.csv`、`{id}-init.mp4`、`{id}-{n}.ts`），与其他转码相同：`TranscodeManager` 结束任务时按前缀删除。
 
 ### 3.2 会话与编码运行
 
@@ -140,36 +140,37 @@ public sealed class SegmentPlan
 ```csharp
 sealed class HlsSession        // 一次播放中的一个变体
 {
-    string Id;                    // 短随机 id，出现在切片 URL 中
-    StreamingRequestDto Request;  // 规范化后的请求，包括「无关键帧 → 转码视频」这类决定
+    string Key;                   // 用户、条目和切片 URL 的查询（去掉旧参数，按名称排序）
+    string Id;                    // Key 的 MD5，出现在切片 URL 中；重建的会话 id 不变
     SegmentPlan Plan;
+    HlsCutMode Mode;              // 复制或转码视频、复制或转码音频，整个会话不变
     HlsEncoderRun? Run;
-    string? InitPath;             // fMP4：第一次 run 的 init.mp4，整个会话只发送这一个
-    int LastServedIndex;
+    string InitPath;              // fMP4：第一次取得的 init，整个会话只发送这一个
     SemaphoreSlim Lock;
+    bool IsClosed;                // 闲置 30 分钟后关闭；之后又来的请求把它加回去
 }
 
 sealed class HlsEncoderRun     // 一次 ffmpeg
 {
+    string Id;                    // 文件名前缀
     int StartIndex;
-    int EndIndex;                 // 转码时一次 run 覆盖的段数有上限（附录 A.4）
-    string Directory;             // GOP 文件、list.csv、init.mp4
+    int EndIndex;                 // 转码时一次 run 最多 600 段（附录 A.4）
     TranscodingJob Job;           // 复用 TranscodeManager 的进程管理、进度上报和 Kill
-    int CompletedThrough;         // 由 list.csv 读取器更新
-    Task WaitForAsync(int index, CancellationToken ct);
+    Task<HlsSegmentLocation> WaitForAsync(int index, CancellationToken ct);
+    Task<bool> WaitForInitAsync(CancellationToken ct);
 }
 ```
 
 **会话的创建与重建**：
-- `main.m3u8` 按 PlaySessionId 加变体参数创建或取得会话。
-- 切片请求按 id 查找会话。找不到时（例如服务器重启后）从查询串重建，计划是确定的，所以结果与原来相同。
+- `main.m3u8` 按会话键创建或取得会话。不知道关键帧而改为转码视频时，切片 URL 的查询加上 `AllowVideoStreamCopy=false`，重建时得到同样的决定。`master.m3u8` 先做同样的判断：变体 URL 带上 `AllowVideoStreamCopy=false`，CODECS 等属性按转码后的流写出。客户端没有指定视频编码时同时带上 `VideoCodec=h264`：没有编码时 ffmpeg 复制视频，切法也按复制判断。
+- 切片请求用同样的键查找会话。找不到时（例如服务器重启后）从查询重建，计划是确定的，所以结果与原来相同。
 
 **切片请求的流程**：
 1. 取得会话锁。
 2. 第 n 段已完成且文件存在：直接发送（拼接该段的 GOP 文件）。
-3. 以下情况结束旧 run，从计划中第 n 段开始一次新 run，并**重新解析源地址**（`INetworkStorageManager.ResolveShortcutTarget`）：没有 run；n 在 run 的起点之前；n 在 run 的终点之后；n 比已完成位置超前约 24 秒以上。
-4. 等待第 n 段完成。读取器增量读取 `list.csv`，按附录 A.2 的规则判断完成，由文件变化事件唤醒，不轮询。以下情况返回错误：run 异常退出（同时上报网络存储失效）；remux 的 run 中没有出现起点为该段边界的文件（关键帧数据与实际不符，改为转码视频重开）。
-5. 更新 `LastServedIndex`。
+3. 以下情况结束旧 run（等它正在发送的请求结束），从计划中第 n 段开始一次新 run，并**重新解析源地址**（`INetworkStorageManager.ResolveShortcutTarget`）：没有 run；run 失败或已停止；n 在 run 的起点之前；n 在 run 的终点之后；n 已完成但文件已被清理；n 比已完成位置超前约 24 秒以上。开始新 run 时，同一播放（PlaySessionId，没有时按 DeviceId）的其他变体的 run 停止。
+4. 等待第 n 段完成。读取器增量读取 `list.csv`，按附录 A.2 的规则判断完成，由文件变化事件唤醒，不轮询。run 异常退出时返回错误。会话中途不改为转码：客户端已经取得复制的 init，转码后的片段与之不符。
+5. 发送完成后释放请求计数，记录已发送位置和该段的终点，供节流和清理使用。
 
 **结束会话**：入口不变，仍是 ping 超时、`DELETE /Videos/ActiveEncodings` 和停止播放。
 
@@ -179,7 +180,7 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 
 - `TranscodingThrottler` 改为按段序号：已完成位置超出已发送位置约 `ThrottleDelaySeconds` 时暂停 run。
 - `TranscodingSegmentCleaner` 改为按段序号：删除已发送位置之前、超出 `SegmentKeepSeconds` 的 GOP 文件。
-- 每次 run 都重新签发源地址，有效期只需覆盖一次 run。S3.md 中「有效期要长于最长一次播放」的说法随之更新。
+- 每次 run 都重新签发源地址；复用已有任务的媒体源时也重新解析。但复制和纯音频的 run 不截断，可以一直持续到播放结束，所以 S3.md 中「有效期要长于最长一次播放」的要求不变，只补充重新开始时会换新地址。
 
 ## 四、HLS 存储（预编码成果）
 
@@ -528,6 +529,8 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
   - 终点等于下一个文件的起点，误差不超过 1 毫秒。
   - 第 j 行在文件 j 关闭之前写出；文件 j+1 在文件 j 关闭之后才创建。
 - **计划的第 k 段** = 同一次 run 中、首个文件以外、起点落在 [B_k − tol, B_{k+1} − tol) 的文件，按顺序拼接。tol 取半帧左右。
+  - 文件起点晚于边界（关键帧数据与实际不符，或只能按 GOP 长度出关键帧的编码器从不在网格上的首帧数起）时，仍属于起点所在的段。各段首尾相接，各次 run 相同，只是段长与播放列表不符，与旧链路相当。
+  - 范围内没有文件时，跨过该段的那个文件（下一个文件之前的一个；run 已结束时为最后一个）同时作为该段发送。
 - **就绪**：某行的终点 ≥ B_{k+1} − tol，且下一个文件已存在或 ffmpeg 已正常退出，第 k 段即完成。
 - 关键帧之间的距离不影响正确性：一段可以由多个 GOP 文件组成，转码时额外的关键帧也只是多一个文件。
 
@@ -541,6 +544,7 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
   - `output_ts_offset=10` 只作用于内层 muxer，让开头的负 dts 变为正数；CSV 列表仍是原时间轴。
   - init 不含样本。mkv、mp4 源各次 run 的 init 字节相同；TS 源只有码率字段不同。混用不同 run 的切片、配第一次 run 的 init，可以正常解码。会话只发送第一次 run 的 init。
 - **复制的音频**：ffmpeg 按采样数从本次 run 的首包重建时间戳，毫秒精度的源（mkv）各次 run 相差不到 1 毫秒。视频时间戳原样保留，各次 run 完全相同。
+- **外挂图形字幕烧录**：字幕是另一个输入，`-start_at_zero` 会按它自己的起点平移，与视频错开。字幕输入加 `-isync 0`（ffmpeg 5.1 起），改按媒体输入的起点平移，与旧链路不加 `-start_at_zero` 时的相对位置相同（已用两个起点不同的输入验证）。更早的 ffmpeg 照旧不加 `-start_at_zero`，时间轴只在源从 0 开始时与计划一致。
 
 ### A.4 重新开始
 
@@ -549,13 +553,13 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
   - TS 没有索引，seek 落在任意包上，复制从其后的第一个关键帧开始；mkv、mp4 落在 seek 点之前的关键帧。所以 B_n 总是 run 中的非首个文件，起点有记录。
   - run 的首个文件丢弃：起点未知，而且带着关键帧之前的音频。
   - 从边界起的文件与完整 run 的包和时间戳相同（复制的音频见 A.3）；把完整 run 的第 n−1 段和重开 run 的第 n 段接起来，解码无错误，包与完整 run 相同。
-  - 列表中出现了起点大于 B_n + tol 的文件却没有 B_n：说明关键帧数据与实际不符，改为转码视频重开。
 - **转码**：
   - 段长按帧取整：L' = ceil(L × fps) / fps。
   - 精确 seek：`-ss (B_n − 半帧)`；run 的首个文件就是第 n 段。
   - `-force_key_frames:0` 用绝对时间列表 `B_k − 半帧`（k ≥ max(n, 1)），加 `-sc_threshold:v:0 0`，`-g` 取三段的帧数。每段正好一个文件，起点是离边界最近的帧，各次 run 相同。
   - 不能用表达式 `expr:gte(t,n_forced*L'-半帧)`：t 从本次 run 的首帧算起，视频起点不在计划网格上时（例如晚 0.3 秒开始），重开后强制的帧与完整 run 不同。
-  - 列表长度：一次 run 只覆盖有限段数（例如 300 段，约 30 分钟），到达后 run 正常结束；之后的请求开始新的 run。这样命令行不会超过 Windows 的 32K 上限。
+  - 不能强制关键帧的编码器（QSV、NVENC、AMF、RKMPP、SVT-AV1）只设 GOP 为一段的帧数，从 run 的首帧数起。视频晚于音频开始时，从头开始的 run 的文件都晚这个偏移，按 A.2 仍归入各段；重开的 run 从边界开始，与之交界处重叠这个偏移。
+  - 列表长度：一次转码 run 最多 600 段（6 秒一段约 1 小时），用输出 `-to (B_End − 半帧)` 在下一次 run 的边界之前正常结束；之后的请求开始新的 run。这样命令行不会超过 Windows 的 32K 上限。`-copyts` 下输出 `-to` 是时间轴上的绝对位置，从中途开始的 run 也在 B_End 之前停止（已用测试验证）。
 - **纯音频**：
   - 每个音频包都是关键帧，按时间切：`-segment_time L`，在「本次 run 首包 + k × L」之后的第一个包切开。
   - 转码重开：`-ss B_n`（精确 seek）。复制重开：输入 `-ss (B_n − 2)`，输出 `-ss B_n -output_ts_offset B_n`；输出 seek 会平移时间戳，offset 把它抵消。
@@ -572,4 +576,5 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - 2026-10-21：计划获批。第 0 阶段完成：切点测试在 `tests/Jellyfin.MediaEncoding.Hls.Tests/Ffmpeg/`，结论见附录。构建 0 警告；配置 ffmpeg 时 47 个测试全部通过，未配置时 23 个跳过。`feature/hls` 推送到 origin，以便在其他电脑上继续。
 - 2026-10-21：第 0 阶段提交的 Codex review 补跑完成，没有问题。
 - 2026-10-21：第 1 阶段完成：`Plans/`（`SegmentPlan`、`SegmentPlanner`、`HlsCuts`、`KeyframeSource`）、`Playlist/HlsPlaylistWriter`、MP4 提取器（只注册，旧链路的 MP4 默认值与迁移随第 2 阶段）、ffprobe 提取器减去 start_time 并只读第一条非封面视频流、设置 `KeyframeExtractionTimeoutSeconds`、旧链路只在复制第一条视频流时用关键帧。核对结论写在第二节。配置 ffmpeg 时 MediaEncoding.Hls 109 个、Keyframes 38 个测试全部通过。
-- 下一步：第 2 阶段（会话与编码运行，控制器改用新链路）。
+- 2026-10-22：第 2 阶段完成：`Sessions/`（`HlsSessionManager`、`HlsSession`、`HlsEncoderRun`、`list.csv` 读取器与 `HlsSegmentLocator`）、控制器改用新链路（新的切片 URL、由计划写出的 `main.m3u8`、segment muxer 命令行、拼接发送 GOP 文件的 `ConcatenatedFileResult`）、节流与清理改用 run 给出的位置和文件、复用任务时重新解析源地址、迁移 `DeleteUnalignedKeyframeData` 与 `AddMp4KeyframeExtraction`。旧的 `DynamicHlsPlaylistGenerator` 删除，`IsExtractionAllowedForFile` 移入 `KeyframeSource`。配置 ffmpeg 时 MediaEncoding.Hls 142 个测试全部通过（含真实 ffmpeg 的 run 测试），Api 169 个、Controller 218 个、MediaEncoding 194 个、Server 41 个、Integration 129 个通过。
+- 下一步：第 3 阶段（HLS 存储与网络存储扩展）。
