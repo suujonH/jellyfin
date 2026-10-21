@@ -14,10 +14,13 @@ using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.Net;
+using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.Streaming;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Net.Http.Headers;
 
 namespace Jellyfin.Api.Helpers;
@@ -158,6 +161,12 @@ public static class StreamingHelpers
             {
                 streamingRequest.VideoBitRate = Math.Min(streamingRequest.VideoBitRate.Value, mediaSource.FallbackMaxStreamingBitrate.Value);
             }
+        }
+
+        // An archive is only kept: the server neither streams nor transcodes it for clients.
+        if (httpContext.RequestServices?.GetService<INetworkStorageManager>()?.IsArchived(mediaSource?.ShortcutTarget) == true)
+        {
+            throw new SecurityException("The media is in an archived network storage and cannot be played.");
         }
 
         var encodingOptions = serverConfigurationManager.GetEncodingOptions();
@@ -376,7 +385,10 @@ public static class StreamingHelpers
     /// <returns>The complete file path, including the folder, for the transcoding file.</returns>
     private static string GetOutputFilePath(StreamState state, string outputFileExtension, IServerConfigurationManager serverConfigurationManager, string? deviceId, string? playSessionId)
     {
-        var data = $"{state.MediaPath}-{state.UserAgent}-{deviceId!}-{playSessionId!}";
+        // A network storage source is read from an address signed anew for each request; the output of one
+        // resource must not change with it, or each HLS segment request would start another transcode.
+        var media = string.IsNullOrEmpty(state.MediaSource?.ShortcutTarget) ? state.MediaPath : state.MediaSource.ShortcutTarget;
+        var data = $"{media}-{state.UserAgent}-{deviceId!}-{playSessionId!}";
 
         var filename = data.GetMD5().ToString("N", CultureInfo.InvariantCulture);
         var ext = outputFileExtension.ToLowerInvariant();

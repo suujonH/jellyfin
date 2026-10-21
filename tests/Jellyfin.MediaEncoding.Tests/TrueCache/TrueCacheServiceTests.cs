@@ -93,6 +93,26 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
         }
 
         [Fact]
+        public void GetResourceSize_DeclaredStrm_IsTheSizeOfItsTarget()
+        {
+            // The .strm itself is a few bytes of text; its declared size is the size of the media it names, which the library records.
+            var path = _fixture.CreateResource("Film.strm");
+            var files = TrueCacheFixture.CompleteVideoFiles();
+            files[TrueCacheLayout.MetaFile] = TrueCacheFixture.VideoMeta.Replace("size = 4", "size = 123456789", StringComparison.Ordinal);
+            _fixture.WriteEntry(path, files);
+
+            Assert.Equal(123456789, _service.GetResourceSize(path, 4));
+        }
+
+        [Fact]
+        public void GetResourceSize_WithoutEntry_IsTheFileLength()
+        {
+            var path = _fixture.CreateResource("Film.strm");
+
+            Assert.Equal(4, _service.GetResourceSize(path, 4));
+        }
+
+        [Fact]
         public void HasDeclarationChanged_ItemRefreshedWithTheEntry_IsFalseAfterARestart()
         {
             // An entry that is already there when the server starts is not new: a restart must not refresh every declared item.

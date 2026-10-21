@@ -21,6 +21,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -46,6 +47,7 @@ public class MediaInfoHelper
     private readonly INetworkManager _networkManager;
     private readonly IDeviceManager _deviceManager;
     private readonly IServerApplicationHost _appHost;
+    private readonly INetworkStorageManager _networkStorage;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MediaInfoHelper"/> class.
@@ -59,6 +61,7 @@ public class MediaInfoHelper
     /// <param name="networkManager">Instance of the <see cref="INetworkManager"/> interface.</param>
     /// <param name="deviceManager">Instance of the <see cref="IDeviceManager"/> interface.</param>
     /// <param name="appHost">Instance of the <see cref="IServerApplicationHost"/> interface.</param>
+    /// <param name="networkStorage">Instance of the <see cref="INetworkStorageManager"/> interface.</param>
     public MediaInfoHelper(
         IUserManager userManager,
         ILibraryManager libraryManager,
@@ -68,7 +71,8 @@ public class MediaInfoHelper
         ILogger<MediaInfoHelper> logger,
         INetworkManager networkManager,
         IDeviceManager deviceManager,
-        IServerApplicationHost appHost)
+        IServerApplicationHost appHost,
+        INetworkStorageManager networkStorage)
     {
         _userManager = userManager;
         _libraryManager = libraryManager;
@@ -79,6 +83,7 @@ public class MediaInfoHelper
         _networkManager = networkManager;
         _deviceManager = deviceManager;
         _appHost = appHost;
+        _networkStorage = networkStorage;
     }
 
     /// <summary>
@@ -119,14 +124,24 @@ public class MediaInfoHelper
                 for (int i = 0; i < mediaSourcesClone.Length && i < mediaSources.Length; i++)
                 {
                     mediaSourcesClone[i].DefaultAudioIndexSource = mediaSources[i].DefaultAudioIndexSource;
+                    mediaSourcesClone[i].ShortcutTarget = mediaSources[i].ShortcutTarget;
                 }
 
                 foreach (var mediaSource in mediaSourcesClone)
                 {
                     RewritePublishedLiveStreamPath(mediaSource, request);
+
+                    // The server's own address of network storage carries its credentials.
+                    _networkStorage.PrepareForClient(mediaSource);
                 }
 
                 result.MediaSources = mediaSourcesClone;
+
+                // An archive cannot be played from; say so instead of leaving the client to find no way to play.
+                if (mediaSourcesClone.Length > 0 && mediaSourcesClone.All(s => _networkStorage.IsArchived(s.ShortcutTarget)))
+                {
+                    result.ErrorCode ??= PlaybackErrorCode.NotAllowed;
+                }
             }
 
             result.PlaySessionId = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
@@ -200,6 +215,16 @@ public class MediaInfoHelper
         bool alwaysBurnInSubtitleWhenTranscoding,
         IPAddress ipAddress)
     {
+        // An archive stays unplayable whatever the device supports: no stream is negotiated for it.
+        if (_networkStorage.IsArchived(mediaSource.ShortcutTarget))
+        {
+            mediaSource.SupportsDirectPlay = false;
+            mediaSource.SupportsDirectStream = false;
+            mediaSource.SupportsTranscoding = false;
+            mediaSource.TranscodingUrl = null;
+            return;
+        }
+
         var streamBuilder = new StreamBuilder(_mediaEncoder, _logger);
 
         var options = new MediaOptions

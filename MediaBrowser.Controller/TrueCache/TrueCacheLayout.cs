@@ -75,6 +75,14 @@ public static class TrueCacheLayout
         => name.Equals(FolderName, StringComparison.Ordinal);
 
     /// <summary>
+    /// Gets whether a resource is a .strm, whose declared size is the size of the media it names.
+    /// </summary>
+    /// <param name="resourcePath">The path of the resource.</param>
+    /// <returns><c>true</c> for a .strm.</returns>
+    public static bool IsShortcut(string resourcePath)
+        => resourcePath.EndsWith(".strm", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Gets the entry folder that describes a resource.
     /// </summary>
     /// <param name="resourcePath">The absolute path of the media file or disc folder.</param>

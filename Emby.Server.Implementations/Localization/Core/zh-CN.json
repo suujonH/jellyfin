@@ -84,6 +84,8 @@
     "TaskCleanCache": "清理缓存目录",
     "TasksApplicationCategory": "应用程序",
     "TasksMaintenanceCategory": "维护",
+    "TaskCheckNetworkStorage": "检查网络存储",
+    "TaskCheckNetworkStorageDescription": "检查每个网络资源是否存在、大小是否与声明一致，并替换之前记录的失效信息。",
     "TaskCleanActivityLog": "清理程序日志",
     "TaskCleanActivityLogDescription": "删除早于设置时间的活动日志条目。",
     "Undefined": "未定义",

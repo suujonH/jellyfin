@@ -19,12 +19,14 @@ using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Controller.Streaming;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.MediaInfo;
+using MediaBrowser.Model.NetworkStorage;
 using MediaBrowser.Model.Session;
 using Microsoft.Extensions.Logging;
 
@@ -44,6 +46,7 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
     private readonly IMediaEncoder _mediaEncoder;
     private readonly IMediaSourceManager _mediaSourceManager;
     private readonly IAttachmentExtractor _attachmentExtractor;
+    private readonly INetworkStorageManager _networkStorage;
 
     private readonly List<TranscodingJob> _activeTranscodingJobs = new();
     private readonly AsyncKeyedLocker<string> _transcodingLocks = new(o =>
@@ -67,6 +70,7 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
     /// <param name="mediaEncoder">The <see cref="IMediaEncoder"/>.</param>
     /// <param name="mediaSourceManager">The <see cref="IMediaSourceManager"/>.</param>
     /// <param name="attachmentExtractor">The <see cref="IAttachmentExtractor"/>.</param>
+    /// <param name="networkStorage">The <see cref="INetworkStorageManager"/>.</param>
     public TranscodeManager(
         ILoggerFactory loggerFactory,
         IFileSystem fileSystem,
@@ -77,7 +81,8 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
         EncodingHelper encodingHelper,
         IMediaEncoder mediaEncoder,
         IMediaSourceManager mediaSourceManager,
-        IAttachmentExtractor attachmentExtractor)
+        IAttachmentExtractor attachmentExtractor,
+        INetworkStorageManager networkStorage)
     {
         _loggerFactory = loggerFactory;
         _fileSystem = fileSystem;
@@ -89,6 +94,7 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
         _mediaEncoder = mediaEncoder;
         _mediaSourceManager = mediaSourceManager;
         _attachmentExtractor = attachmentExtractor;
+        _networkStorage = networkStorage;
 
         _logger = loggerFactory.CreateLogger<TranscodeManager>();
         DeleteEncodedMediaCache();
@@ -645,6 +651,9 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
 
         ReportTranscodingProgress(job, state, null, null, null, null, null);
 
+        var shortcutTarget = state.MediaSource?.ShortcutTarget;
+        var mediaSourceId = state.MediaSource?.Id;
+
         _logger.LogDebug("Disposing stream resources");
         state.Dispose();
 
@@ -655,6 +664,12 @@ public sealed class TranscodeManager : ITranscodeManager, IDisposable
         else
         {
             _logger.LogError("FFmpeg exited with code {0}", process.ExitCode);
+
+            if (!string.IsNullOrEmpty(shortcutTarget) && Guid.TryParse(mediaSourceId, out var itemId))
+            {
+                // The network resource is checked in the background and recorded only when it is missing or not permitted.
+                _ = _networkStorage.ReportAccessFailureAsync(itemId, NetworkStorageFailureSource.Playback, null, CancellationToken.None);
+            }
         }
 
         job.Dispose();

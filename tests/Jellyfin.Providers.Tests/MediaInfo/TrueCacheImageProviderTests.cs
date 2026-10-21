@@ -8,11 +8,13 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Drawing;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
+using MediaBrowser.Model.MediaInfo;
 using MediaBrowser.Providers.Books;
 using MediaBrowser.Providers.MediaInfo;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -119,6 +121,29 @@ namespace Jellyfin.Providers.Tests.MediaInfo
             Assert.True(response.HasImage);
             Assert.Equal(ImageFormat.Webp, response.Format);
             await response.Stream.DisposeAsync();
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void Supports_Strm_OnlyWithAnEntry(bool declared)
+        {
+            // A .strm with an entry gets the images a local file gets; without one, its target is never read.
+            var mediaSourceManager = new Mock<IMediaSourceManager>();
+            mediaSourceManager.Setup(m => m.GetPathProtocol(It.IsAny<string>())).Returns(MediaProtocol.File);
+            BaseItem.MediaSourceManager = mediaSourceManager.Object;
+            Video.RecordingsManager = Mock.Of<IRecordingsManager>();
+
+            var (movie, entry) = CreateEntry("Film.strm", new TrueCacheManifest { Kind = TrueCacheKind.Video }, new Dictionary<ImageType, string>());
+            movie.IsShortcut = true;
+            var song = new Audio { Path = Path.Combine(_root, "Song.strm"), IsShortcut = true };
+            var trueCache = new Mock<ITrueCacheService>();
+            trueCache.Setup(t => t.Lookup(movie.Path)).Returns(declared ? TrueCacheLookup.Valid(entry) : TrueCacheLookup.None);
+            trueCache.Setup(t => t.Lookup(song.Path)).Returns(declared ? TrueCacheLookup.Rejected("missing probe.json") : TrueCacheLookup.None);
+
+            Assert.Equal(declared, new VideoImageProvider(mediaSourceManager.Object, Mock.Of<IMediaEncoder>(), NullLogger<VideoImageProvider>.Instance, trueCache.Object).Supports(movie));
+            Assert.Equal(declared, new EmbeddedImageProvider(mediaSourceManager.Object, Mock.Of<IMediaEncoder>(), NullLogger<EmbeddedImageProvider>.Instance, trueCache.Object).Supports(movie));
+            Assert.Equal(declared, new AudioImageProvider(mediaSourceManager.Object, Mock.Of<IMediaEncoder>(), Mock.Of<IServerConfigurationManager>(), Mock.Of<IFileSystem>(), trueCache.Object).Supports(song));
         }
 
         private static ITrueCacheService Valid(TrueCacheEntry entry)

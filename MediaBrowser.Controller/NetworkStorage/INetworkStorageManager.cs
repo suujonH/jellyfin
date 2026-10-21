@@ -1,0 +1,143 @@
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.NetworkStorage;
+using MediaBrowser.Model.Querying;
+
+namespace MediaBrowser.Controller.NetworkStorage;
+
+/// <summary>
+/// The storages <c>.strm</c> files name resources in: how the server reaches them, whether clients may reach them
+/// directly, and which resources can be read.
+/// </summary>
+public interface INetworkStorageManager
+{
+    /// <summary>
+    /// Gets the accesses, with their secrets.
+    /// </summary>
+    /// <returns>The accesses.</returns>
+    IReadOnlyList<NetworkStorageAccessDto> GetAccesses();
+
+    /// <summary>
+    /// Gets an access, with its secrets.
+    /// </summary>
+    /// <param name="id">The id.</param>
+    /// <returns>The access, or <c>null</c>.</returns>
+    NetworkStorageAccessDto? GetAccess(Guid id);
+
+    /// <summary>
+    /// Adds an access, or changes the one with the same id. A <c>null</c> secret keeps the stored one.
+    /// </summary>
+    /// <param name="access">The access.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The stored access.</returns>
+    /// <exception cref="ArgumentException">The access is incomplete or another one covers the same storage.</exception>
+    /// <exception cref="MediaBrowser.Common.Extensions.ResourceNotFoundException">The id names no access.</exception>
+    Task<NetworkStorageAccessDto> SaveAccessAsync(NetworkStorageAccessDto access, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Removes an access and how its storage is published.
+    /// </summary>
+    /// <param name="id">The id.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns><c>true</c> when there was such an access.</returns>
+    Task<bool> DeleteAccessAsync(Guid id, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Tests that the root of a storage can be read with an access, saved or not. A <c>null</c> secret
+    /// of a saved access is taken from the stored one.
+    /// </summary>
+    /// <param name="access">The access.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The result.</returns>
+    Task<NetworkStorageTestResult> TestAccessAsync(NetworkStorageAccessDto access, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Gets how the storage of an access is published, with its secret.
+    /// </summary>
+    /// <param name="accessId">The id of the access.</param>
+    /// <returns>The settings; a storage that was never published is not public.</returns>
+    NetworkStorageExternalAddressDto GetExternalAddress(Guid accessId);
+
+    /// <summary>
+    /// Sets how the storage of an access is published. A <c>null</c> secret keeps the stored one.
+    /// </summary>
+    /// <param name="external">The settings.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The stored settings.</returns>
+    /// <exception cref="ArgumentException">A public storage lacks what its authentication needs.</exception>
+    /// <exception cref="MediaBrowser.Common.Extensions.ResourceNotFoundException">The id names no access.</exception>
+    Task<NetworkStorageExternalAddressDto> SaveExternalAddressAsync(NetworkStorageExternalAddressDto external, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Gets the address the server and ffmpeg read the target of a <c>.strm</c> file from, to stream, transcode or
+    /// probe it: the external address when the storage is published at one, otherwise the endpoint of its access.
+    /// Maintenance, such as checks and tests, always uses the endpoint. An S3 target becomes a freshly signed address
+    /// each time, so it is never stored; a target of no network storage is returned as it is.
+    /// </summary>
+    /// <param name="target">The target the <c>.strm</c> file names.</param>
+    /// <returns>The address, or <c>null</c> when the target needs an access and none covers it.</returns>
+    string? ResolveShortcutTarget(string target);
+
+    /// <summary>
+    /// Replaces the server's own address of a network storage source before the source is sent to a client:
+    /// with the address the storage is published at, or, when it is not public, with none, so that the client
+    /// has the server stream it. The server's address carries its credentials. A source in an archive is marked
+    /// as not playable in any way.
+    /// </summary>
+    /// <param name="source">A source sent to a client.</param>
+    void PrepareForClient(MediaSourceInfo source);
+
+    /// <summary>
+    /// Gets a value indicating whether a target lies in an archive, which clients cannot play from and the server
+    /// neither streams nor transcodes for them. Probing and checks still read it.
+    /// </summary>
+    /// <param name="target">The target a <c>.strm</c> file names, or <c>null</c>.</param>
+    /// <returns><c>true</c> when an archived access covers the target.</returns>
+    bool IsArchived(string? target);
+
+    /// <summary>
+    /// Gets statistics of every storage the library has resources in, from what the library already knows.
+    /// </summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The storages.</returns>
+    Task<IReadOnlyList<NetworkStorageSummary>> GetStoragesAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Gets the resources of one storage.
+    /// </summary>
+    /// <param name="storageKey">The key of the storage.</param>
+    /// <param name="states">The states to include; empty includes all.</param>
+    /// <param name="startIndex">The index of the first resource.</param>
+    /// <param name="limit">The most resources to return, or <c>null</c> for all.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The resources, invalid first.</returns>
+    Task<QueryResult<NetworkStorageResource>> GetResourcesAsync(
+        string storageKey,
+        IReadOnlyCollection<NetworkStorageResourceState> states,
+        int startIndex,
+        int? limit,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Reports that reading the network resource of an item failed. The resource is checked: only a resource that is
+    /// missing or not permitted is recorded, not one the storage was busy, failing or unreachable for.
+    /// </summary>
+    /// <param name="itemId">The item.</param>
+    /// <param name="source">What found the failure.</param>
+    /// <param name="target">The target that failed, when it may not be stored yet, as while probing a changed .strm; <c>null</c> for the stored one.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task.</returns>
+    Task ReportAccessFailureAsync(Guid itemId, NetworkStorageFailureSource source, string? target, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Checks every resource that can be checked: that it exists and has the size its <c>__true_cache__</c> entry
+    /// declares. The failures recorded before are removed first.
+    /// </summary>
+    /// <param name="progress">The progress, in percent.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task.</returns>
+    Task CheckAllAsync(IProgress<double> progress, CancellationToken cancellationToken);
+}

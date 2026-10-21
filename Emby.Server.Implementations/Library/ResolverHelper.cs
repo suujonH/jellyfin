@@ -4,6 +4,7 @@ using System.Linq;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.IO;
 
 namespace Emby.Server.Implementations.Library
@@ -155,7 +156,7 @@ namespace Emby.Server.Implementations.Library
 
             if (info is not null && !info.IsDirectory)
             {
-                item.Size = info.Length;
+                item.Size = BaseItem.TrueCache.GetResourceSize(item.Path, info.Length);
             }
 
             var fileModificationDate = info?.LastWriteTimeUtc;

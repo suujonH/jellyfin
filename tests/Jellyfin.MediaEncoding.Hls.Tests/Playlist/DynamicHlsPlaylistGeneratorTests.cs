@@ -48,6 +48,8 @@ namespace Jellyfin.MediaEncoding.Hls.Tests.Playlist
         [InlineData("testfile.flv", new[] { ".mp4", ".mkv", ".ts" }, false)]
         [InlineData("testfile.flv", new[] { ".mp4", ".mkv", ".ts", ".flv" }, true)]
         [InlineData("/some/arbitrarily/long/path/testfile.mkv", new[] { "mkv" }, true)]
+        [InlineData("https://bucket.s3.amazonaws.com/Film.mkv?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=abc", new[] { "mkv" }, true)]
+        [InlineData("https://bucket.s3.amazonaws.com/Film.mp4?X-Amz-Date=20130524T000000Z", new[] { "mkv" }, false)]
         public void IsExtractionAllowedForFile_Valid_Success(string filePath, string[] allowedExtensions, bool isAllowed)
         {
             Assert.Equal(isAllowed, DynamicHlsPlaylistGenerator.IsExtractionAllowedForFile(filePath, allowedExtensions));

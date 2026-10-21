@@ -1,6 +1,6 @@
 # `__true_cache__`：声明式媒体信息
 
-媒体放在 S3（s3fs 挂载）、网盘或 NAS 等慢速存储上时，扫描、刷新、计划任务和字幕、附件提取都会反复读取媒体文件。`__true_cache__` 让用户事先声明服务器本来要从文件中读出的全部信息。有声明的资源，服务器只在**直接播放（静态发送、下载）**和**转码、Remux**时读取文件，其余一律读取声明。
+媒体放在 S3（以 `s3://` 的 `.strm` 引用，见 [S3.md](S3.md)）、网盘或 NAS 等慢速存储上时，扫描、刷新、计划任务和字幕、附件提取都会反复读取媒体文件。`__true_cache__` 让用户事先声明服务器本来要从文件中读出的全部信息。有声明的资源，服务器只在**直接播放（静态发送、下载）**和**转码、Remux**时读取文件，其余一律读取声明。
 
 这项功能对所有媒体库和存储方式生效，只看资源旁边有没有 `__true_cache__`，不需要任何配置。
 
@@ -33,12 +33,12 @@ Movies/Film/
 
 ## 完整性与拒绝
 
-只有一个资源的**全部可能信息**都已声明，声明才有效。缺少任何一项、格式错误、版本未知，或 `source.size` 与实际文件不符时，该资源**不入库**；已经入库的条目会在下次扫描时移除。拒绝原因写入日志，也可以通过 `GET /TrueCache/Rejected` 查看。被拒绝的资源同样不会被读取。
+只有一个资源的**全部可能信息**都已声明，声明才有效。缺少任何一项、格式错误、版本未知，或 `source.size` 与实际文件不符（`.strm` 除外，见下）时，该资源**不入库**；已经入库的条目会在下次扫描时移除。拒绝原因写入日志，也可以通过 `GET /TrueCache/Rejected` 查看。被拒绝的资源同样不会被读取。
 
 | 类型 | 必需项 |
 | --- | --- |
 | 视频文件 | `probe.json`；有视频流时要截图、每个有图的章节一张章节图、每个配置宽度一组 trickplay（时长短于 trickplay 间隔时不需要）、`keyframes.json`；每张内嵌图片；每条可提取的内嵌字幕；每个附件（mjpeg 除外）；ts/m2ts 容器还要 `video.timestamp` |
-| `.strm` | `probe.json`、内嵌字幕、附件（截图、章节图、trickplay、关键帧服务器本来就不生成） |
+| `.strm` | 与它指向的视频文件或音频相同。有效的条目让 `.strm` 获得本地文件才有的截图、内嵌图片、章节图、trickplay 和关键帧 |
 | DVD 文件夹 | `probe.json`（第一个 vob）、`video.runtime_ticks`（全部 vob 的总时长）、章节图、字幕、附件 |
 | 蓝光文件夹 | `probe.json`（第一个 m2ts）、`bdinfo.json`、截图、内嵌图片、章节图、字幕（按 BDInfo 的流序号）、附件 |
 | 音频 | `probe.json`、`[audio.tags]`、`audio.lufs`、`audio.embedded_lyrics`（为 true 时要 `lyrics.lrc`）；有内嵌封面时要 `images/primary.*` |
@@ -57,7 +57,7 @@ version = 1
 kind = "video"            # video、audio、dvd、bluray、book、photo、album
 
 [source]
-size = 939109             # 文件必填；与实际大小不符即拒绝
+size = 939109             # 文件必填；与实际大小不符即拒绝。.strm 填它指向的数据的大小，不与文本文件比较
 modified = 2026-10-19T09:18:12Z   # 可选；声明时必须与文件修改时间相差 2 秒以内
 
 [video]
@@ -119,15 +119,17 @@ lufs = -9.25
 
 ## 生成工具
 
-`src/Jellyfin.TrueCache.Tool` 直接复用服务器的探测和提取代码（MediaEncoder、SubtitleEncoder、AttachmentExtractor、trickplay 拼图、ATL 标签读取、书籍和照片读取），生成的内容与服务器自己提取的一致。请在文件还在本地磁盘上时运行，然后连同 `__true_cache__` 一起上传。
+`src/Jellyfin.TrueCache.Tool` 直接复用服务器的探测和提取代码（MediaEncoder、SubtitleEncoder、AttachmentExtractor、trickplay 拼图、ATL 标签读取、书籍和照片读取），生成的内容与服务器自己提取的一致。请在文件还在本地磁盘上时运行，然后连同 `__true_cache__` 一起上传。`.strm` 的目标会先完整下载到临时目录，再按本地文件处理；`s3://` 目标用 `--server-data` 指向的服务器数据目录中 `jellyfin.db` 的网络存储访问权限签名读取（只读打开，归档的存储也可以读取，见 [S3.md](S3.md)）。
 
 ```sh
 dotnet run --project src/Jellyfin.TrueCache.Tool -c Release -- generate --ffmpeg /usr/lib/jellyfin-ffmpeg/ffmpeg --server-config /etc/jellyfin Movies/Film/Film.mkv
+dotnet run --project src/Jellyfin.TrueCache.Tool -c Release -- generate --ffmpeg /usr/lib/jellyfin-ffmpeg/ffmpeg --server-config /etc/jellyfin --server-data /var/lib/jellyfin/data Movies/Film/Film.strm
 dotnet run --project src/Jellyfin.TrueCache.Tool -c Release -- album  --ffmpeg ... Music/Album
 dotnet run --project src/Jellyfin.TrueCache.Tool -c Release -- validate --server-config /etc/jellyfin Movies/Film/Film.mkv
 ```
 
 - `--server-config` 读取服务器的 `system.xml` 和 `encoding.xml`，保证 trickplay、章节和编码设置与服务器一致；也可以用 `--trickplay-widths`、`--trickplay-interval`、`--trickplay-tile`、`--dummy-chapters` 单独指定。
+- `--server-data` 指向服务器的数据目录（含 `jellyfin.db`），为 `s3://` 目标提供访问权限，例如 `--server-data /var/lib/jellyfin/data`。生成 `s3://` 的 `.strm` 时必须提供。
 - 生成后会用服务器同一套规则校验。全部完整时退出码为 0，有不完整的为 1，命令行错误为 2。
 - 已有缓存的资源默认跳过，`--force` 重新生成。
 - 条目先写入 `__true_cache__` 中以 `.` 开头的临时目录（服务器忽略它），校验完整后才替换正式条目。生成失败、校验不通过或被中断时，原有条目（或没有条目的状态）保持不变，服务器不会看到写了一半的条目。
@@ -140,12 +142,14 @@ dotnet run --project src/Jellyfin.TrueCache.Tool -c Release -- validate --server
 - **添加条目**：下一次刷新读取声明，章节图和 trickplay 改用条目中的。
 - **删除条目**：删除一个有效条目后，下一次刷新会重新从文件读取：章节图改为从文件提取，未开启扫描时提取则先清空、由计划任务提取；trickplay 在开启扫描时提取时重新生成，否则等“生成 trickplay”计划任务。
 - **服务方式**：截图、内嵌图片、封面以流的形式交给服务器保存（服务器保存后会删除按路径交给它的文件，以流交付可以保护缓存文件）。章节图和 trickplay 拼图直接从缓存目录提供，服务器不会移动或清理它们；删除条目时，服务器只删除它自己目录里的数据。字幕、附件和关键帧直接从缓存读取，关键帧不写入数据库，替换条目后立即生效；附件会复制一份到服务器的附件目录，供烧录字幕时的 ffmpeg 使用，条目被替换后下一次转码会重新复制。
+- **大小**：有有效条目的资源，媒体库记录的大小取自条目（`probe.json` 的 `format.size`，没有探测结果时为 `source.size`）。`.strm` 的大小是它的 `source.size`，即它指向的数据的大小，而不是这个文本文件的大小；`.strm` 的 `source.modified` 仍是文本文件的修改时间。
+- **远程资源**：`.strm` 的媒体源仍是远程源（`IsRemote`），有有效条目时另带 `HasTrueCache` 标记。远程源因为媒体信息未知而跳过的处理，对带标记的源照常进行：按客户端的码率上限判断是否转码，trickplay 照常提供给客户端。管理员的“强制远程源转码”权限和音频直连重定向只看 `IsRemote`，不受影响。
 
 ## 仍会读取的情况
 
 - 直接播放、下载、转码、Remux：按设计会读取原文件。蓝光文件夹播放时还会解析 BDMV 结构文件。
 - 照片：照片本身就是它的主图，展示和缩放时会读取。
-- `.strm`：会读取这个文本文件以得到目标地址。
+- `.strm`：会读取这个文本文件以得到目标地址；`s3://` 地址在每次使用时现场签名，不需要访问 S3。
 - 外挂文件（外挂字幕、外挂音轨、歌词、NFO、图片）是独立的文件，按原有方式读取；外挂音轨可以有自己的 `__true_cache__` 条目。
 - 第三方插件（例如字幕下载插件的哈希计算、片头检测）不在覆盖范围内。
 

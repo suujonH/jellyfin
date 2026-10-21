@@ -1,0 +1,20 @@
+# Copy to wrangler.toml, then:
+#   npx wrangler secret put PLAYBACK_SECRET   # the secret entered in Network Storage > External address
+#   npx wrangler secret put S3_ACCESS_KEY
+#   npx wrangler secret put S3_SECRET_KEY
+#   npx wrangler deploy
+# Enter the address the Worker is routed at as the external address of the storage.
+name = "jellyfin-network-storage"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+# routes = [{ pattern = "media.example.com/*", zone_name = "example.com" }]
+
+[vars]
+S3_ENDPOINT = "https://ACCOUNT_ID.r2.cloudflarestorage.com"
+S3_REGION = "auto"
+S3_BUCKETS = "media"
+ALLOWED_ORIGINS = "*"
+# The path of the address entered in the dashboard, when the Worker is routed below one, e.g. "playback"
+# for https://media.example.com/playback.
+ROUTE_PREFIX = ""

@@ -266,7 +266,7 @@ namespace MediaBrowser.Providers.Manager
 
                             if (!file.IsDirectory)
                             {
-                                item.Size = file.Length;
+                                item.Size = TrueCache.GetResourceSize(item.Path, file.Length);
                             }
                         }
                     }

@@ -71,6 +71,14 @@ public sealed class TrueCacheEntry
     /// <summary>Gets the normalized probe result; <c>null</c> for books and photos.</summary>
     public MediaInfo? MediaInfo { get; }
 
+    /// <summary>
+    /// Gets the size of the media the entry describes. The declared size of a .strm is the size of its target, not of the
+    /// text file, and it is what counts; otherwise the probed size, or the declared size of the resource without one.
+    /// </summary>
+    public long? MediaSize => TrueCacheLayout.IsShortcut(ResourcePath)
+        ? Manifest.SourceSize ?? MediaInfo?.Size
+        : MediaInfo?.Size ?? Manifest.SourceSize;
+
     /// <summary>Gets the Blu-ray structure of a Blu-ray folder.</summary>
     public BlurayDiscInfo? BluRay { get; }
 

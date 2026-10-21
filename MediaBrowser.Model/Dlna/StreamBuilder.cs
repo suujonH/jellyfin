@@ -1654,8 +1654,8 @@ namespace MediaBrowser.Model.Dlna
 
         private bool IsBitrateLimitExceeded(MediaSourceInfo item, long maxBitrate)
         {
-            // Don't restrict bitrate if item is remote.
-            if (item.IsRemote)
+            // Don't restrict bitrate if item is remote, unless its __true_cache__ entry declares its bitrate as a local file's.
+            if (item.IsRemote && !item.HasTrueCache)
             {
                 return false;
             }

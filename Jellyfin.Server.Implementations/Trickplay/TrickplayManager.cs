@@ -670,7 +670,8 @@ public partial class TrickplayManager : ITrickplayManager
             return false;
         }
 
-        if (video.IsShortcut)
+        // A .strm is not read, unless its __true_cache__ entry declares the tiles.
+        if (video.IsShortcut && !_trueCache.Lookup(video.Path).IsDeclared)
         {
             return false;
         }
@@ -794,7 +795,8 @@ public partial class TrickplayManager : ITrickplayManager
         var trickplayManifest = new Dictionary<string, Dictionary<int, TrickplayInfo>>();
         foreach (var mediaSource in item.GetMediaSources(false))
         {
-            if (mediaSource.IsRemote || !Guid.TryParse(mediaSource.Id, out var mediaSourceId))
+            // A remote source has no tiles, unless its __true_cache__ entry declares them, as for a .strm.
+            if ((mediaSource.IsRemote && !mediaSource.HasTrueCache) || !Guid.TryParse(mediaSource.Id, out var mediaSourceId))
             {
                 continue;
             }

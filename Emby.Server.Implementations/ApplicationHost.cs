@@ -48,6 +48,7 @@ using Jellyfin.Networking.Udp;
 using Jellyfin.Server.Implementations.FullSystemBackup;
 using Jellyfin.Server.Implementations.Item;
 using Jellyfin.Server.Implementations.MediaSegments;
+using Jellyfin.Server.Implementations.NetworkStorage;
 using Jellyfin.Server.Implementations.SystemBackupService;
 using MediaBrowser.Common;
 using MediaBrowser.Common.Configuration;
@@ -82,6 +83,7 @@ using MediaBrowser.Controller.Session;
 using MediaBrowser.Controller.Sorting;
 using MediaBrowser.Controller.Subtitles;
 using MediaBrowser.Controller.SyncPlay;
+using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Controller.TV;
 using MediaBrowser.LocalMetadata.Savers;
@@ -566,6 +568,9 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<IItemTypeLookup, ItemTypeLookup>();
 
             serviceCollection.AddSingleton<ITrueCacheService, MediaBrowser.MediaEncoding.TrueCache.TrueCacheService>();
+            serviceCollection.AddSingleton<INetworkStorageProtocol, S3StorageProtocol>();
+            serviceCollection.AddSingleton<INetworkStorageProtocol, HttpStorageProtocol>();
+            serviceCollection.AddSingleton<INetworkStorageManager, NetworkStorageManager>();
             serviceCollection.AddSingleton<IMediaEncoder, MediaBrowser.MediaEncoding.Encoder.MediaEncoder>();
             serviceCollection.AddSingleton<EncodingHelper>();
             serviceCollection.AddSingleton<IPathManager, PathManager>();
@@ -705,6 +710,7 @@ namespace Emby.Server.Implementations
             BaseItem.MediaSegmentManager = Resolve<IMediaSegmentManager>();
             BaseItem.MediaSourceManager = Resolve<IMediaSourceManager>();
             BaseItem.TrueCache = Resolve<ITrueCacheService>();
+            BaseItem.NetworkStorage = Resolve<INetworkStorageManager>();
             BaseItem.ProviderManager = Resolve<IProviderManager>();
             BaseItem.UserDataManager = Resolve<IUserDataManager>();
             CollectionFolder.XmlSerializer = _xmlSerializer;

@@ -132,6 +132,14 @@ public class DynamicHlsPlaylistGenerator : IDynamicHlsPlaylistGenerator
 
     internal static bool IsExtractionAllowedForFile(ReadOnlySpan<char> filePath, IReadOnlyList<string> allowedExtensions)
     {
+        // A remote source, such as the presigned address of a .strm target, has its extension in the path, not in the query.
+        if (filePath.Contains("://", StringComparison.Ordinal)
+            && Uri.TryCreate(filePath.ToString(), UriKind.Absolute, out var uri)
+            && !uri.IsFile)
+        {
+            filePath = uri.AbsolutePath;
+        }
+
         var extension = Path.GetExtension(filePath);
         if (extension.IsEmpty)
         {

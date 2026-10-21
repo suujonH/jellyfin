@@ -54,16 +54,32 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
         [InlineData("attachments/font.ttf")]
         [InlineData(TrueCacheLayout.KeyframesFile)]
         public void Load_VideoMissingAFile_IsRejected(string missing)
+            => AssertMissingFileRejected("Film.mkv", missing);
+
+        [Theory]
+        [InlineData(TrueCacheLayout.ProbeFile)]
+        [InlineData(TrueCacheLayout.ScreenGrabFile)]
+        [InlineData("chapters/500000000.jpg")]
+        [InlineData("trickplay/320 - 10x10/0.jpg")]
+        [InlineData("subtitles/2.ass")]
+        [InlineData("attachments/font.ttf")]
+        [InlineData(TrueCacheLayout.KeyframesFile)]
+        public void Load_StrmMissingAFile_IsRejected(string missing)
+            => AssertMissingFileRejected("Film.strm", missing);
+
+        [Fact]
+        public void Load_CompleteStrm_ReturnsWhatALocalFileDeclares()
         {
-            var path = _fixture.CreateResource("Film.mkv");
-            var files = TrueCacheFixture.CompleteVideoFiles();
-            files.Remove(missing);
-            _fixture.WriteEntry(path, files);
+            // A .strm with an entry is served like a local file: its screen grab, chapter images, trickplay and keyframes come from the entry.
+            var path = _fixture.CreateCompleteVideo("Film.strm");
 
             var result = _loader.Load(path, TrueCacheFixture.Requirements);
 
-            Assert.Equal(TrueCacheState.Rejected, result.State);
-            Assert.Contains(missing, result.Reason, System.StringComparison.Ordinal);
+            Assert.True(result.IsValid, result.Reason);
+            Assert.True(File.Exists(result.Entry.ScreenGrabPath));
+            Assert.True(File.Exists(result.Entry.GetChapterImagePath(500000000)));
+            Assert.Equal(320, Assert.Single(result.Entry.Manifest.Video!.Trickplay).Width);
+            Assert.Equal(new long[] { 0, 20000000, 40000000 }, result.Entry.Keyframes!.KeyframeTicks);
         }
 
         [Fact]
@@ -119,6 +135,21 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
 
             Assert.Equal(TrueCacheState.Rejected, result.State);
             Assert.Contains("source.size", result.Reason, System.StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public void Load_StrmSize_IsTheSizeOfItsTarget()
+        {
+            // The declared size of a .strm is the size of the media it names, not of the text file.
+            var path = _fixture.CreateResource("Film.strm");
+            var files = TrueCacheFixture.CompleteVideoFiles();
+            files[TrueCacheLayout.MetaFile] = TrueCacheFixture.VideoMeta.Replace("size = 4", "size = 123456789", System.StringComparison.Ordinal);
+            _fixture.WriteEntry(path, files);
+
+            var result = _loader.Load(path, TrueCacheFixture.Requirements);
+
+            Assert.True(result.IsValid, result.Reason);
+            Assert.Equal(123456789, result.Entry.MediaSize);
         }
 
         [Fact]
@@ -419,6 +450,19 @@ namespace Jellyfin.MediaEncoding.Tests.TrueCache
             var isoT = "deu";
             localization.Setup(l => l.TryGetISO6392TFromB("ger", out isoT)).Returns(true);
             return localization.Object;
+        }
+
+        private void AssertMissingFileRejected(string name, string missing)
+        {
+            var path = _fixture.CreateResource(name);
+            var files = TrueCacheFixture.CompleteVideoFiles();
+            files.Remove(missing);
+            _fixture.WriteEntry(path, files);
+
+            var result = _loader.Load(path, TrueCacheFixture.Requirements);
+
+            Assert.Equal(TrueCacheState.Rejected, result.State);
+            Assert.Contains(missing, result.Reason, System.StringComparison.Ordinal);
         }
     }
 }

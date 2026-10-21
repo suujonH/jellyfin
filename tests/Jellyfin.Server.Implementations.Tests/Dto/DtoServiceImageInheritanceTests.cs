@@ -12,6 +12,7 @@ using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
+using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Trickplay;
 using MediaBrowser.Model.Entities;
@@ -325,6 +326,7 @@ public class DtoServiceImageInheritanceTests
             mediaSourceManager.Object,
             new Lazy<ILiveTvManager>(() => liveTvManager.Object),
             trickplayManager.Object,
-            chapterManager.Object);
+            chapterManager.Object,
+            Mock.Of<INetworkStorageManager>());
     }
 }

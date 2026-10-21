@@ -40,6 +40,20 @@ namespace MediaBrowser.Model.Dto
         [JsonIgnore]
         public string ItemPath { get; set; }
 
+        /// <summary>
+        /// Gets or sets a value indicating whether the resource of the source has a valid <c>__true_cache__</c> entry.
+        /// Its media information is then declared and known as a local file's is, even when the source
+        /// <see cref="IsRemote"/>, such as a .strm: checks skipped for remote sources because their media is unknown still apply.
+        /// </summary>
+        public bool HasTrueCache { get; set; }
+
+        /// <summary>
+        /// Gets or sets the target the .strm file of the source names, as written in it, such as <c>s3://bucket/key</c>.
+        /// <see cref="Path"/> is then the address the server reads it from.
+        /// </summary>
+        [JsonIgnore]
+        public string ShortcutTarget { get; set; }
+
         public string EncoderPath { get; set; }
 
         public MediaProtocol? EncoderProtocol { get; set; }

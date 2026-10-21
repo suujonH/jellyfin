@@ -15,7 +15,9 @@ using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Controller.MediaSegments;
+using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -603,6 +605,68 @@ public class BaseItemTests
 
         // Playback reads the target, while files that belong to the item, such as its __true_cache__ entry, sit next to the .strm.
         Assert.Equal(video.ShortcutPath, source.Path);
+        Assert.Equal(video.Path, source.ItemPath);
+        Assert.True(source.IsRemote);
+        Assert.False(source.HasTrueCache);
+    }
+
+    [Fact]
+    public void GetMediaSources_S3Shortcut_PlaysAPresignedAddress()
+    {
+        var video = new Video { Id = Guid.NewGuid(), Path = "/Movies/Movie/Movie.strm", IsShortcut = true, ShortcutPath = "s3://media/Movies/Movie.mkv" };
+
+        var mediaSourceManager = new Mock<IMediaSourceManager>();
+        mediaSourceManager.Setup(x => x.GetPathProtocol(It.IsAny<string>()))
+            .Returns((string path) => path.StartsWith("http", StringComparison.Ordinal) ? MediaProtocol.Http : MediaProtocol.File);
+        mediaSourceManager.Setup(x => x.GetMediaStreams(It.IsAny<Guid>())).Returns(new List<MediaStream>());
+        mediaSourceManager.Setup(x => x.GetMediaAttachments(It.IsAny<Guid>())).Returns(new List<MediaAttachment>());
+
+        var networkStorage = new Mock<INetworkStorageManager>();
+        networkStorage.Setup(x => x.ResolveShortcutTarget("s3://media/Movies/Movie.mkv"))
+            .Returns("http://minio.lan:9000/media/Movies/Movie.mkv?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=abc");
+
+        var segmentManager = new Mock<IMediaSegmentManager>();
+        segmentManager.Setup(x => x.IsTypeSupported(It.IsAny<BaseItem>())).Returns(false);
+
+        var libraryManager = new Mock<ILibraryManager>();
+        libraryManager.Setup(x => x.GetLinkedAlternateVersions(It.IsAny<Video>())).Returns(Array.Empty<Video>());
+        libraryManager.Setup(x => x.GetLocalAlternateVersionIds(It.IsAny<Video>())).Returns(Array.Empty<Guid>());
+
+        var recordingsManager = new Mock<IRecordingsManager>();
+        recordingsManager.Setup(x => x.GetActiveRecordingInfo(It.IsAny<string>())).Returns((ActiveRecordingInfo?)null);
+
+        // The entry sits next to the .strm and declares the target's media as a local file's.
+        var entry = new TrueCacheEntry(video.Path, "/Movies/Movie/__true_cache__/Movie.strm", "hash", new TrueCacheManifest { Kind = TrueCacheKind.Video }, null, null, null, new Dictionary<ImageType, string>(), new Dictionary<int, string>());
+        var trueCache = new Mock<ITrueCacheService>();
+        trueCache.Setup(x => x.Lookup(video.Path)).Returns(TrueCacheLookup.Valid(entry));
+
+        BaseItem.MediaSourceManager = mediaSourceManager.Object;
+        BaseItem.MediaSegmentManager = segmentManager.Object;
+        BaseItem.LibraryManager = libraryManager.Object;
+        Video.RecordingsManager = recordingsManager.Object;
+        var previousTrueCache = BaseItem.TrueCache;
+        BaseItem.TrueCache = trueCache.Object;
+        BaseItem.NetworkStorage = networkStorage.Object;
+
+        MediaSourceInfo source;
+        try
+        {
+            source = Assert.Single(video.GetMediaSources(false));
+        }
+        finally
+        {
+            BaseItem.TrueCache = previousTrueCache;
+            BaseItem.NetworkStorage = null;
+        }
+
+        // The stored target stays s3://; only the source carries the signed address.
+        Assert.StartsWith("http://minio.lan:9000/media/Movies/Movie.mkv?X-Amz-Algorithm=AWS4-HMAC-SHA256&", source.Path, StringComparison.Ordinal);
+        Assert.Contains("&X-Amz-Signature=", source.Path, StringComparison.Ordinal);
+        Assert.Equal(MediaProtocol.Http, source.Protocol);
+        Assert.True(source.IsRemote);
+        Assert.True(source.HasTrueCache);
+        Assert.Equal("s3://media/Movies/Movie.mkv", video.ShortcutPath);
+        Assert.Equal("s3://media/Movies/Movie.mkv", source.ShortcutTarget);
         Assert.Equal(video.Path, source.ItemPath);
     }
 
