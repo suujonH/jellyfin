@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using Jellyfin.MediaEncoding.Hls.Published;
 using MediaBrowser.Model.Configuration;
@@ -23,7 +24,7 @@ public static class HlsOptionsValidator
     public static string? Validate(HlsOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
-        if (options.Libraries is null || options.Qualities is null)
+        if (options.Libraries is null || options.Qualities is null || options.LibraryQualities is null || options.LibraryQualities.Any(l => l?.Qualities is null))
         {
             return "The libraries and the qualities must not be null.";
         }
@@ -37,6 +38,11 @@ public static class HlsOptionsValidator
         if (options.Qualities.Length == 0)
         {
             return "At least one quality is required; turn pre-encoded HLS off instead.";
+        }
+
+        if (ValidateLibraryQualities(options) is { } problem)
+        {
+            return problem;
         }
 
         if (options.LeaseMinutes is < 1 or > 60)
@@ -62,6 +68,37 @@ public static class HlsOptionsValidator
         if (!string.IsNullOrEmpty(options.PlaybackSigningKey) && !IsValidSigningKey(options.PlaybackSigningKey))
         {
             return "The playback signing key must be Base64 of at least " + MinSigningKeyBytes + " bytes.";
+        }
+
+        return null;
+    }
+
+    private static string? ValidateLibraryQualities(HlsOptions options)
+    {
+        var seen = new HashSet<Guid>();
+        foreach (var library in options.LibraryQualities)
+        {
+            if (library.LibraryId.Equals(Guid.Empty))
+            {
+                return "Every library with qualities of its own needs its id.";
+            }
+
+            if (!seen.Add(library.LibraryId))
+            {
+                return "Library " + library.LibraryId + " has qualities of its own more than once.";
+            }
+
+            if (library.Qualities.Any(q => !HlsEncodingLadder.Heights.Contains(q)) || library.Qualities.Distinct().Count() != library.Qualities.Length)
+            {
+                return "Every quality of library " + library.LibraryId + " must be one of " + string.Join(", ", HlsEncodingLadder.Heights) + ", each at most once.";
+            }
+
+            // A library that is not chosen encodes nothing anyway; its entry is kept for when it is.
+            var chosen = options.Libraries.Length == 0 || options.Libraries.Contains(library.LibraryId);
+            if (chosen && !library.Qualities.Intersect(options.Qualities).Any())
+            {
+                return "Library " + library.LibraryId + " has none of the qualities chosen for every library.";
+            }
         }
 
         return null;

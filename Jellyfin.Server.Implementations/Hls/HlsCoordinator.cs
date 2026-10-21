@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -200,7 +201,10 @@ public sealed class HlsCoordinator : BackgroundService
         }
 
         var options = settings.Options;
-        var next = new AppliedSettings(settings.Version, options.Enabled, [.. options.Libraries.Order()], [.. options.Qualities.Order()]);
+        var libraryQualities = string.Join(
+            ';',
+            options.LibraryQualities.OrderBy(l => l.LibraryId).Select(l => l.LibraryId.ToString("N", CultureInfo.InvariantCulture) + ":" + string.Join(',', l.Qualities.Order())));
+        var next = new AppliedSettings(settings.Version, options.Enabled, [.. options.Libraries.Order()], [.. options.Qualities.Order()], libraryQualities);
         if (!next.Enabled)
         {
             // Turning it off empties the work list; published renditions stay. A rebuild asked for meanwhile still resets the failed renditions.
@@ -214,8 +218,20 @@ public sealed class HlsCoordinator : BackgroundService
             return;
         }
 
-        // Also when just turned on: while it is off, the qualities are recorded without being applied.
-        if (last is null || rebuild || !last.Enabled || !last.Qualities.SequenceEqual(next.Qualities))
+        // First the files: the qualities of a content come from the libraries its files are recorded in.
+        if (last is null || rebuild || !last.Enabled || !last.Libraries.SequenceEqual(next.Libraries))
+        {
+            await FullScanAsync(settings, now, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Also when just turned on: while it is off, the qualities are recorded without being applied. Choosing other libraries
+        // changes the qualities of their contents too.
+        if (last is null
+            || rebuild
+            || !last.Enabled
+            || !last.Qualities.SequenceEqual(next.Qualities)
+            || !string.Equals(last.LibraryQualities, next.LibraryQualities, StringComparison.Ordinal)
+            || !last.Libraries.SequenceEqual(next.Libraries))
         {
             foreach (var sha in await _store.GetMediaShasAsync(cancellationToken).ConfigureAwait(false))
             {
@@ -227,11 +243,6 @@ public sealed class HlsCoordinator : BackgroundService
         {
             await _store.ResetForRebuildAsync(now, cancellationToken).ConfigureAwait(false);
             _nextSweep = now;
-        }
-
-        if (last is null || rebuild || !last.Enabled || !last.Libraries.SequenceEqual(next.Libraries))
-        {
-            await FullScanAsync(settings, now, cancellationToken).ConfigureAwait(false);
         }
 
         Applied(next, rebuild);
@@ -251,7 +262,7 @@ public sealed class HlsCoordinator : BackgroundService
     {
         try
         {
-            if (await _store.SyncRenditionsAsync(sha256, settings.Options.Qualities, now, cancellationToken).ConfigureAwait(false))
+            if (await _store.SyncRenditionsAsync(sha256, settings.GetQualities, now, cancellationToken).ConfigureAwait(false))
             {
                 await _index.RefreshMediaAsync([sha256], cancellationToken).ConfigureAwait(false);
             }
@@ -309,14 +320,14 @@ public sealed class HlsCoordinator : BackgroundService
                 batch.Add(file);
                 if (batch.Count == UpsertBatch)
                 {
-                    await UpsertAsync(batch, now, cancellationToken).ConfigureAwait(false);
+                    await UpsertAsync(batch, null, now, cancellationToken).ConfigureAwait(false);
                     batch.Clear();
                 }
             }
 
             if (batch.Count > 0)
             {
-                await UpsertAsync(batch, now, cancellationToken).ConfigureAwait(false);
+                await UpsertAsync(batch, null, now, cancellationToken).ConfigureAwait(false);
             }
 
             foreach (var stale in (await _store.GetSourcesAsync(cancellationToken).ConfigureAwait(false)).Where(s => !seen.Contains(s.File.ItemId)))
@@ -346,11 +357,16 @@ public sealed class HlsCoordinator : BackgroundService
             {
                 if (exists && _libraryManager.GetItemById(itemId) is Video video && GetSourceFile(video, settings) is { } file)
                 {
-                    await UpsertAsync([file], now, cancellationToken).ConfigureAwait(false);
+                    await UpsertAsync([file], settings, now, cancellationToken).ConfigureAwait(false);
                 }
                 else
                 {
-                    await _store.RemoveSourceAsync(itemId, now, cancellationToken).ConfigureAwait(false);
+                    // The content may have lost the qualities of the library of the file.
+                    var sha256 = await _store.RemoveSourceAsync(itemId, now, cancellationToken).ConfigureAwait(false);
+                    if (sha256 is not null)
+                    {
+                        await SyncRenditionsAsync(sha256, settings, now, cancellationToken).ConfigureAwait(false);
+                    }
                 }
 
                 // A newer event replaces the one that failed.
@@ -367,13 +383,24 @@ public sealed class HlsCoordinator : BackgroundService
     }
 
     // A changed or new file gets a source job from the store; a known content only needs scheduling.
-    private async Task UpsertAsync(IReadOnlyList<HlsSourceFile> files, DateTime now, CancellationToken cancellationToken)
+    // A file of known content may have moved to another library, or become other content; either changes the qualities of the
+    // content it was. That content is synced at once with the settings given, or scheduled when a full sync follows.
+    private async Task UpsertAsync(IReadOnlyList<HlsSourceFile> files, HlsSettingsSnapshot? syncWith, DateTime now, CancellationToken cancellationToken)
     {
         foreach (var result in await _store.UpsertSourcesAsync(files, now, cancellationToken).ConfigureAwait(false))
         {
-            if (result is { Change: HlsSourceChange.Unchanged, PreviousSha256: { } sha })
+            if (result is not { Change: HlsSourceChange.Unchanged or HlsSourceChange.ContentChanged, PreviousSha256: { } sha })
+            {
+                continue;
+            }
+
+            if (syncWith is null)
             {
                 _toSchedule[sha] = 0;
+            }
+            else
+            {
+                await SyncRenditionsAsync(sha, syncWith, now, cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -493,6 +520,6 @@ public sealed class HlsCoordinator : BackgroundService
         _nextOrphanRun = now + _sweepInterval;
     }
 
-    // The arrays are sorted, so a list in another order is no change.
-    private sealed record AppliedSettings(int Version, bool Enabled, Guid[] Libraries, int[] Qualities);
+    // The arrays are sorted, so a list in another order is no change; so are the qualities of the libraries, as text.
+    private sealed record AppliedSettings(int Version, bool Enabled, Guid[] Libraries, int[] Qualities, string LibraryQualities);
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.IO;
 using System.Net.Mime;
@@ -72,6 +73,34 @@ public class HlsWorkerController : BaseJellyfinApiController
         });
 
     /// <summary>
+    /// Gets the libraries whose files are pre-encoded, with the video qualities a worker adding media may encode right away.
+    /// </summary>
+    /// <response code="200">Libraries returned; none while pre-encoded HLS is off.</response>
+    /// <returns>The libraries.</returns>
+    [HttpGet("Libraries")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<IReadOnlyList<HlsWorkerLibrary>> GetLibraries() => Ok(_taskCenter.GetLibraries());
+
+    /// <summary>
+    /// Starts a job for media the worker adds to a library, before the file is in it, leased to the worker at once.
+    /// </summary>
+    /// <param name="request">The media, the root of the HLS store and the qualities to encode now.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <response code="200">The job and its plan, or that nothing asked for is left to encode.</response>
+    /// <response code="400">The library is not pre-encoded, the qualities are not some of its own, the hash or the probe is not valid, or the worker may not upload to the root.</response>
+    /// <response code="409">The content has a job in progress, or another job holds its renditions.</response>
+    /// <returns>The job.</returns>
+    [HttpPost("Jobs/Eager")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public Task<ActionResult<HlsEagerResponse>> StartEagerJob([FromBody, Required] HlsEagerRequest request, CancellationToken cancellationToken)
+        => GuardAsync<HlsEagerResponse>(async () =>
+            await _taskCenter.StartEagerJobAsync(request, cancellationToken).ConfigureAwait(false) is { } response
+                ? response
+                : Conflict("The content has a job in progress, or another job holds its renditions."));
+
+    /// <summary>
     /// Gets the file of a job: a local file, with ranges, or a redirect to the target of a .strm file, signed for the worker.
     /// </summary>
     /// <param name="jobId">The job.</param>
@@ -79,7 +108,7 @@ public class HlsWorkerController : BaseJellyfinApiController
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <response code="200">File returned.</response>
     /// <response code="302">Redirected to the storage.</response>
-    /// <response code="404">The file is missing.</response>
+    /// <response code="404">The file is missing, or the job was started for media being added and reads the file of its worker.</response>
     /// <response code="409">The lease is no longer valid.</response>
     /// <returns>The file.</returns>
     [HttpGet("Jobs/{jobId}/Input")]
@@ -100,6 +129,11 @@ public class HlsWorkerController : BaseJellyfinApiController
             if (input.Address is { } address)
             {
                 return Redirect(address.AbsoluteUri);
+            }
+
+            if (input.FilePath is null)
+            {
+                return NotFound("The job was started for media being added; it reads the file of its worker.");
             }
 
             return System.IO.File.Exists(input.FilePath)

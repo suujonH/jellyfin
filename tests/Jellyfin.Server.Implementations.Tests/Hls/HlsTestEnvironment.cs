@@ -156,7 +156,7 @@ internal sealed class HlsTestEnvironment : IDisposable
     {
         var lease = await Store.ClaimAsync(new HlsClaimRequest("worker", Lease, _ => true, Now), CancellationToken);
         Assert.NotNull(lease);
-        var result = await Store.IdentifyAsync(new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, Probe, root ?? Root, Qualities, Profile, _ => true, Now), CancellationToken);
+        var result = await Store.IdentifyAsync(new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, Probe, root ?? Root, _ => Qualities, Profile, _ => true, Now), CancellationToken);
         Assert.Equal(HlsIdentifyOutcome.Planned, result.Outcome);
         return (lease, result.Plan!);
     }
@@ -166,7 +166,7 @@ internal sealed class HlsTestEnvironment : IDisposable
     {
         var item = await AddSourceAsync();
         var (lease, plan) = await ClaimAndPlanAsync(sha, root);
-        Assert.Equal(item, lease.Input.ItemId);
+        Assert.Equal(item, lease.Input!.ItemId);
         WriteFiles(plan, root);
         Assert.True(await Store.SubmitOutputsAsync(lease.Id, lease.LeaseToken, Outputs(plan), Now, CancellationToken));
         return (item, lease, plan);

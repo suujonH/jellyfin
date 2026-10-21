@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.MediaEncoding.Hls.Published;
@@ -196,6 +197,59 @@ public sealed class HlsTaskCenterTests : IDisposable
     }
 
     [Fact]
+    public void Libraries_AreThoseChosen_WithTheirQualities()
+    {
+        var (environment, taskCenter) = Create();
+
+        Assert.Equal([new HlsWorkerLibrary(LibraryId, "Movies", [1080, 720])], taskCenter.GetLibraries(), new LibraryComparer());
+        environment.Save(new HlsOptions { Enabled = true, Qualities = [720, 1080], LibraryQualities = [new() { LibraryId = LibraryId, Qualities = [720] }] });
+        Assert.Equal([720], Assert.Single(taskCenter.GetLibraries()).Qualities);
+        environment.Save(new HlsOptions { Enabled = true, Libraries = [OtherLibraryId], Qualities = [1080] });
+        Assert.Empty(taskCenter.GetLibraries());
+    }
+
+    [Fact]
+    public async Task Eager_StartsAJobLeasedToTheWorker_ThatReadsNoFileOfTheServer()
+    {
+        var (environment, taskCenter) = Create();
+        var request = new HlsEagerRequest("worker", LibraryId, Sha('a'), ProbeJson, environment.Root, [720]);
+
+        var response = await taskCenter.StartEagerJobAsync(request, CancellationToken);
+
+        Assert.False(response!.Done);
+        Assert.Equal((300, 1), (response.Lease!.LeaseSeconds, response.Lease.Attempt));
+        Assert.Equal(["v720", "a1", "preview"], response.Plan!.Renditions.Select(r => r.Key));
+        Assert.Equal(new HlsJobInput(null, null), await taskCenter.GetInputAsync(response.Lease.JobId, response.Lease.LeaseToken, CancellationToken));
+        var again = await taskCenter.IdentifyAsync(response.Lease.JobId, new HlsIdentification(response.Lease.LeaseToken, Sha('a'), ProbeJson, environment.Root), CancellationToken);
+        Assert.Equal(JsonSerializer.Serialize(response.Plan), JsonSerializer.Serialize(again!.Plan));
+        Assert.Null(await taskCenter.StartEagerJobAsync(request with { Qualities = [1080] }, CancellationToken));
+    }
+
+    [Fact]
+    public async Task Eager_OfAnotherLibrary_OrOtherQualities_IsRefused()
+    {
+        var (environment, taskCenter) = Create();
+        var request = new HlsEagerRequest("worker", LibraryId, Sha('a'), ProbeJson, environment.Root, [720]);
+
+        foreach (var refused in new[]
+        {
+            request with { LibraryId = OtherLibraryId },
+            request with { Qualities = [480] },
+            request with { Qualities = [] },
+            request with { Qualities = null! },
+            request with { Sha256 = "abc" },
+            request with { ProbeJson = "{}" },
+            request with { Base = "relative" },
+            request with { Worker = " " }
+        })
+        {
+            await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.StartEagerJobAsync(refused, CancellationToken));
+        }
+
+        Assert.Empty(await environment.JobsAsync());
+    }
+
+    [Fact]
     public async Task Complete_RecordsTheOutputs_ForTheVerification()
     {
         var (environment, taskCenter) = Create();
@@ -269,7 +323,7 @@ public sealed class HlsTaskCenterTests : IDisposable
         _library = library ?? Directory.CreateDirectory(Path.Combine(environment.TempDirectory, "media", "movies")).FullName;
         _data = Directory.CreateDirectory(Path.Combine(environment.TempDirectory, "data")).FullName;
         var libraryManager = new Mock<ILibraryManager>();
-        libraryManager.Setup(l => l.GetVirtualFolders()).Returns([new VirtualFolderInfo { Locations = [_library] }]);
+        libraryManager.Setup(l => l.GetVirtualFolders()).Returns([new VirtualFolderInfo { ItemId = LibraryId.ToString("N"), Name = "Movies", Locations = [_library] }]);
         var appPaths = new Mock<IServerApplicationPaths>();
         appPaths.SetupGet(p => p.ProgramDataPath).Returns(_data);
         appPaths.SetupGet(p => p.DataPath).Returns(Path.Combine(_data, "data"));
@@ -302,5 +356,14 @@ public sealed class HlsTaskCenterTests : IDisposable
             appPaths.Object,
             NullLogger<HlsTaskCenter>.Instance);
         return (environment, taskCenter);
+    }
+
+    // Records hold their qualities as lists, which compare by reference.
+    private sealed class LibraryComparer : IEqualityComparer<HlsWorkerLibrary>
+    {
+        public bool Equals(HlsWorkerLibrary? x, HlsWorkerLibrary? y)
+            => x is not null && y is not null && x.Id.Equals(y.Id) && x.Name == y.Name && x.Qualities.SequenceEqual(y.Qualities);
+
+        public int GetHashCode(HlsWorkerLibrary obj) => obj.Id.GetHashCode();
     }
 }

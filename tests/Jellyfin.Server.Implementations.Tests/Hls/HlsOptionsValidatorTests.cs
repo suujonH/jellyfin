@@ -60,6 +60,55 @@ public class HlsOptionsValidatorTests
     }
 
     [Fact]
+    public void Validate_LibraryQualities_AreFromTheLadderOnceEach_AndShareAQualityWithTheGlobalOnes()
+    {
+        var library = Guid.NewGuid();
+        HlsOptions Options(params HlsLibraryQualities[] libraries) => new() { Qualities = [1080, 720], LibraryQualities = libraries };
+
+        Assert.Null(HlsOptionsValidator.Validate(Options(new HlsLibraryQualities { LibraryId = library, Qualities = [720, 480] })));
+        Assert.NotNull(HlsOptionsValidator.Validate(Options(new HlsLibraryQualities { LibraryId = library, Qualities = [480] })));
+        Assert.NotNull(HlsOptionsValidator.Validate(Options(new HlsLibraryQualities { LibraryId = library, Qualities = [720, 720] })));
+        Assert.NotNull(HlsOptionsValidator.Validate(Options(new HlsLibraryQualities { LibraryId = library, Qualities = [700] })));
+        Assert.NotNull(HlsOptionsValidator.Validate(Options(new HlsLibraryQualities { LibraryId = Guid.Empty, Qualities = [720] })));
+        Assert.NotNull(HlsOptionsValidator.Validate(Options(new HlsLibraryQualities { LibraryId = library, Qualities = [720] }, new HlsLibraryQualities { LibraryId = library, Qualities = [1080] })));
+        Assert.NotNull(HlsOptionsValidator.Validate(Options(new HlsLibraryQualities { LibraryId = library, Qualities = null! })));
+        Assert.NotNull(HlsOptionsValidator.Validate(Options(null!)));
+        Assert.NotNull(HlsOptionsValidator.Validate(new HlsOptions { LibraryQualities = null! }));
+        Assert.Contains(library.ToString(), HlsOptionsValidator.Validate(Options(new HlsLibraryQualities { LibraryId = library, Qualities = [480] })), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Validate_LibraryQualities_OfALibraryNotChosen_NeedNotShareAQuality()
+    {
+        var library = Guid.NewGuid();
+        var options = new HlsOptions { Libraries = [Guid.NewGuid()], Qualities = [1080], LibraryQualities = [new() { LibraryId = library, Qualities = [480] }] };
+
+        Assert.Null(HlsOptionsValidator.Validate(options));
+        options.Libraries = [library];
+        Assert.NotNull(HlsOptionsValidator.Validate(options));
+    }
+
+    [Fact]
+    public void GetQualities_AreTheGlobalOnes_NarrowedByThoseOfTheLibrary()
+    {
+        var narrowed = Guid.NewGuid();
+        var other = Guid.NewGuid();
+        var options = new HlsOptions
+        {
+            Enabled = true,
+            Libraries = [narrowed, other],
+            Qualities = [1080, 720, 480],
+            LibraryQualities = [new() { LibraryId = narrowed, Qualities = [480, 720, 360] }]
+        };
+        var snapshot = new HlsSettingsSnapshot(options, null, 1);
+
+        Assert.Equal([720, 480], snapshot.GetQualities(narrowed));
+        Assert.Equal([1080, 720, 480], snapshot.GetQualities(other));
+        Assert.Empty(snapshot.GetQualities(Guid.NewGuid()));
+        Assert.Empty(new HlsSettingsSnapshot(new HlsOptions { Qualities = [1080] }, null, 1).GetQualities(other));
+    }
+
+    [Fact]
     public void Validate_SigningKey_IsBase64OfAtLeast32Bytes()
     {
         Assert.Null(HlsOptionsValidator.Validate(new HlsOptions { PlaybackSigningKey = Convert.ToBase64String(new byte[32]) }));

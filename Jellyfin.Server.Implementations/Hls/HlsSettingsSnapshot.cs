@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using MediaBrowser.Model.Configuration;
 
@@ -25,4 +26,21 @@ public sealed record HlsSettingsSnapshot(HlsOptions Options, string? Error, int 
     /// <returns>Whether pre-encoded HLS is on and the library is chosen.</returns>
     public bool IsLibraryEligible(Guid libraryId)
         => Options.Enabled && (Options.Libraries.Length == 0 || Options.Libraries.Contains(libraryId));
+
+    /// <summary>
+    /// Gets the video qualities the files of a library are encoded in: the global ones, narrowed by those of the library when it
+    /// has its own.
+    /// </summary>
+    /// <param name="libraryId">The library.</param>
+    /// <returns>The qualities; none when the library is not pre-encoded.</returns>
+    public IReadOnlyCollection<int> GetQualities(Guid libraryId)
+    {
+        if (!IsLibraryEligible(libraryId))
+        {
+            return [];
+        }
+
+        var own = Options.LibraryQualities.FirstOrDefault(l => l.LibraryId.Equals(libraryId));
+        return own is null ? Options.Qualities : Options.Qualities.Where(own.Qualities.Contains).ToArray();
+    }
 }

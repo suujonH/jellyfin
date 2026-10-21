@@ -281,11 +281,11 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - 仍为空时不同步档位，已有的保持不变，由孤儿规则处理（停用媒体库不会立即撤下成果）。
 - 并集缩小时按现有规则撤下多余档位（删除记录与目录）。
 - 这条解析替换三处对全局 `Qualities` 的直接使用：`HlsCoordinator` 调用 `SyncRenditionsAsync`、`HlsTaskCenter` 构造 `HlsIdentifyRequest`、`HlsJobStore.Jobs` 的 `GetDesired`。解析在 `HlsJobStore` 的事务内进行（需要读该内容的来源），参数从档位数组改为 `Func<Guid, IReadOnlyCollection<int>>`。
-- 全局 `Qualities` 或 `LibraryQualities` 变化时，与原来 `Qualities` 变化一样触发全量同步。
+- 全局 `Qualities`、`LibraryQualities` 或 `Libraries` 变化时，与原来 `Qualities` 变化一样触发全量同步（内容的档位来自它所在的媒体库，选择别的媒体库也会改变它）。
 
 **校验**（`IValidatingConfiguration`，读取时再校验一次：手改的无效设置按关闭处理，并记错误日志）：
 - `LibraryQualities` 中媒体库 id 不为空、不重复；每项的档位在阶梯内且不重复；
-- 每项与全局的交集不得为空，为空时拒绝保存，原因中指出该媒体库。
+- 每项与全局的交集不得为空，为空时拒绝保存，原因中指出该媒体库；未选中的媒体库不检查这一条（它不编码，项保留到选中时）。
 
 **`HlsSettingsSnapshot`** 去掉 `Store`、`UploadLifetime`、`UploadGrace`。依赖它们的位置一并改：`HlsSettings` 打开存储、`HlsCoordinator` 的 `AppliedSettings.Store` 与存储变更告警（删除）、`HlsTaskCenter` 四处、`HlsVerificationService` 两处、`HlsDeletionService`、`HlsRootMonitor`、`HlsController` 的默认位置。存储一律按记录上的根打开。
 
@@ -363,13 +363,15 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - **成果在提交时核对**：`SubmitOutputsAsync` 按数据库中的计划运行完成校验，目录只取自计划，根只取自任务。
 
 **预编码任务**（`POST /HlsWorker/Jobs/Eager`）：Worker 添加媒体时可以随手编一部分档位，没编的部分在扫描入库后由正常流程补齐。请求 `{Worker, LibraryId, Sha256, ProbeJson, Base, Qualities}`，规则依次为：
-1. 媒体库未启用、哈希或探测结果无效、根不通过校验：`400`。
+1. 媒体库不存在（不在 `VirtualFolders` 中）或未启用、哈希或探测结果无效、根不通过校验：`400`。
 2. `Qualities` 为空，或不是该库生效档位的子集：`400`。
 3. 该内容已存在时沿用已保存的探测结果（R44）。该内容应有的档位已全部发布：`200 {Done:true}`。
-4. 该内容的 `media:` 任务处于等待、运行或校验中，或它的档位由其他任务持有：`409`。
+4. 该内容的 `media:` 任务处于等待、运行或校验中（或已取消但 Worker 仍持有租约），或它的任何档位由任务持有：`409`。
 5. 内容不存在时创建 `HlsMedia`，写入 `LibraryId`，`DateOrphaned` 设为当前时间；扫描后来源出现时按孤儿规则清空。已存在的内容不改这两项。
 6. 同步档位；计划只含请求的画质档位，音轨、文本字幕和预览图总是包含（完成校验要求上报计划中的每个档位）。没有需要任务的档位时 `200 {Done:true}`。
 7. 任务为 `media:` 类型（WorkKey 规则同媒体任务，已完成或已取消的换新 id），`ItemId` 与 `Input` 为空，记下根和计划，创建即租给该 Worker（状态为运行，租约令牌即目录名）。返回 `200 {Lease, Plan}`。
+
+已知限制：预编码进另一个媒体库的内容，在该库的文件扫描入库之前只在这一次请求中计入该库的档位；编码期间若有同步，该库独有的档位会被撤下，成果在发布时丢弃。文件入库后由正常流程重新编码，只浪费一次编码。
 
 之后心跳、完成、校验、发布与普通任务完全一致。这个任务没有输入：`Jobs/{id}/Input` 回 `404`；失败或租约过期后回到等待，领取时没有来源即取消，与普通媒体任务相同。
 
@@ -713,4 +715,5 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - 2026-10-22：第 4c 阶段完成：`IHlsTaskCenter` 与 `HlsTaskCenter`（领取、输入、心跳、识别、上传地址、本地写入、完成、失败、上传测试、状态与任务列表），`HlsWorkerController`、`HlsController`，`HlsWorkerProtocolAttribute`。与第六、八节的差别已写回：Worker 只接受 API Key（用户会话 `403`），错误码 `400`/`409`/`503` 带原因，`InputUrl` 与本地上传地址为相对路径，本地存储的上传测试走服务器路由，测试对象经删除队列删除，存储测试可指定位置；与 5.2 的差别：根目录不可信时不签发也不接收上传，租约结束后目录等上传地址过期再删除。Release 构建 0 警告，WSL 下 Debug 构建 0 警告；Server.Implementations 中 HLS 的 182 个测试全部通过（另有 2 个本地化测试因系统语言为中文而失败），Api 173 个、MediaEncoding.Hls 300 个（44 个跳过）、Integration 132 个通过。
 - 2026-10-22：设计变更写回计划：Worker 自持凭据并上报存储根、服务器去掉存储设置与上传通道、档位三层过滤、添加媒体时的预编码任务、原片规则并入归档与用户权限、Worker 仓库改为 `Jellyfin.HLS.Worker`。新增第 4d、4e 阶段。
 - 2026-10-22：第 4d 阶段完成：三张表的 `Base` 列与迁移 `AddHlsBase`；存储只读（删去 PUT 预签名、本地写入、标记写入与存储测试），由 Worker 写标记；`HlsOptions` 删去 `Store`、`OriginalUsers`，新增 `AllowOriginal`；`UserPolicy.EnableOriginalPlayback`；`Identify` 带根，根的校验与 `Bases/Check` 共用一个实现（本地根与媒体库互不包含、不在数据目录下）；监视、校验、再校验、删除都按根进行，一个根不可信只停它自己的工作，`StoreProblems` 只列仍在使用的根；`Base` 为空或无效的删除记录直接丢弃，不删除任何东西；租约结束后的宽限为一个租约长度；上传通道的路由、方法、DTO 与测试全部删除。Release 构建 0 警告；Server.Implementations 1320 个测试通过（2 个本地化测试因系统语言为中文而失败），Api 173 个、MediaEncoding.Hls 300 个（44 个跳过）、Integration 132 个通过。
-- 下一步：第 4e 阶段（每库档位、`Libraries` 与 `Jobs/Eager`）。
+- 2026-10-22：第 4e 阶段完成：`HlsOptions.LibraryQualities`（`HlsLibraryQualities`）与校验；`HlsSettingsSnapshot.GetQualities`；内容的应有档位取其来源所在媒体库的并集，没有时取 `HlsMedia.LibraryId`，仍为空时不同步，替换了同步、识别两处（`HlsIdentifyRequest.GetQualities`、`SyncRenditionsAsync` 改为按媒体库取档位）；`GET /HlsWorker/Libraries`；`POST /HlsWorker/Jobs/Eager`（`HlsJobStore.StartEagerJobAsync`），预编码任务没有输入，`Input` 回 `404`，重复 `Identify` 返回原计划。与计划的差别已写回：`Libraries` 变化也触发全量同步，交集校验只针对选中的媒体库，预编码要求媒体库存在。Release 构建 0 警告；Server.Implementations 中 HLS 的 184 个测试、Api 173 个、Integration 132 个通过。
+- 下一步：第 5 阶段（播放）。

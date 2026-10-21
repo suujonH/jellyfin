@@ -18,20 +18,27 @@ namespace Jellyfin.Server.Implementations.Hls;
 public sealed partial class HlsJobStore
 {
     /// <summary>
-    /// Brings the renditions of a content in line with its stored probe and the qualities: renditions no longer wanted are removed
-    /// and their directories queued for deletion, new ones are added as missing.
+    /// Brings the renditions of a content in line with its stored probe and the qualities it should have: renditions no longer
+    /// wanted are removed and their directories queued for deletion, new ones are added as missing. A content in no chosen
+    /// library is left as it is, for the orphan rules.
     /// </summary>
     /// <param name="sha256">The hash of the content.</param>
-    /// <param name="qualities">The qualities chosen in the settings.</param>
+    /// <param name="getQualities">The video qualities of a library.</param>
     /// <param name="now">The current time.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>Whether any rendition was added or removed.</returns>
-    public Task<bool> SyncRenditionsAsync(string sha256, IReadOnlyCollection<int> qualities, DateTime now, CancellationToken cancellationToken)
+    public Task<bool> SyncRenditionsAsync(string sha256, Func<Guid, IReadOnlyCollection<int>> getQualities, DateTime now, CancellationToken cancellationToken)
         => WriteAsync<bool>(
             async context =>
             {
                 var media = await context.HlsMedia.FindAsync([sha256], cancellationToken).ConfigureAwait(false);
-                return media is not null
+                if (media is null)
+                {
+                    return false;
+                }
+
+                var qualities = await GetContentQualitiesAsync(context, media, getQualities, cancellationToken).ConfigureAwait(false);
+                return qualities.Count > 0
                     && await SyncRenditionsAsync(context, sha256, HlsRenditionPlanner.GetDesired(Deserialize<HlsProbe>(media.Probe), qualities), now, cancellationToken).ConfigureAwait(false);
             },
             cancellationToken);
@@ -194,6 +201,17 @@ public sealed partial class HlsJobStore
                 return true;
             },
             cancellationToken);
+
+    // The video qualities a content should have: those of every library its files are in, or, while it has no file in a chosen
+    // library, those of the library it was first seen in. The sources are read from the database, so earlier changes go first.
+    private static async Task<IReadOnlyCollection<int>> GetContentQualitiesAsync(JellyfinDbContext context, HlsMedia media, Func<Guid, IReadOnlyCollection<int>> getQualities, CancellationToken cancellationToken)
+    {
+        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        var sha256 = media.Sha256;
+        var libraries = await context.HlsSources.Where(s => s.Sha256 == sha256).Select(s => s.LibraryId).Distinct().ToListAsync(cancellationToken).ConfigureAwait(false);
+        var qualities = libraries.SelectMany(getQualities).Distinct().ToList();
+        return qualities.Count > 0 ? qualities : getQualities(media.LibraryId);
+    }
 
     // A rendition needs a job when no job holds it and it is missing or published under another encoding profile.
     private static Expression<Func<HlsRendition, bool>> NeedsJob(string profile)

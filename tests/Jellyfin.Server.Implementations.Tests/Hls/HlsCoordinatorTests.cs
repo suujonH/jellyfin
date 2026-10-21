@@ -170,6 +170,81 @@ public sealed class HlsCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public async Task ChoosingAnotherLibraryOfAFile_SyncsItsContentWithTheQualitiesOfThatLibrary()
+    {
+        HlsLibraryQualities[] libraryQualities =
+        [
+            new HlsLibraryQualities { LibraryId = LibraryId, Qualities = [720] },
+            new HlsLibraryQualities { LibraryId = OtherLibraryId, Qualities = [1080] }
+        ];
+        var options = Options(libraries: [LibraryId]);
+        options.LibraryQualities = libraryQualities;
+        _environment.Save(options);
+        await TickAsync(_start);
+        var (item, _) = await _environment.PublishAsync(Sha('a'));
+        AddKnown(item);
+        _libraries[item] = [OtherLibraryId, LibraryId];
+        await _environment.Index.LoadAsync(CancellationToken);
+
+        // The file is recorded in the other library first, and then has its qualities.
+        options = Options(libraries: [OtherLibraryId]);
+        options.LibraryQualities = libraryQualities;
+        _environment.Save(options);
+        await TickAsync(_start + TimeSpan.FromSeconds(5));
+
+        Assert.Equal(["a1", "preview", "s2", "v1080"], (await _environment.Store.GetRenditionsAsync(Sha('a'), CancellationToken)).Select(r => r.Key));
+    }
+
+    [Fact]
+    public async Task RemovingTheFileOfALibrary_WithdrawsTheQualitiesOnlyThatLibraryWanted()
+    {
+        var options = Options();
+        options.LibraryQualities =
+        [
+            new HlsLibraryQualities { LibraryId = LibraryId, Qualities = [720] },
+            new HlsLibraryQualities { LibraryId = OtherLibraryId, Qualities = [1080] }
+        ];
+        _environment.Save(options);
+        await TickAsync(_start);
+
+        // The same content in both libraries: the file of the other library is identified once both are published.
+        var (item, _) = await _environment.PublishAsync(Sha('a'));
+        var copy = await _environment.AddSourceAsync(OtherLibraryId);
+        var lease = (await _environment.Store.ClaimAsync(new HlsClaimRequest("worker", Lease, _ => true, _environment.Now), CancellationToken))!;
+        await _environment.Store.IdentifyAsync(
+            new HlsIdentifyRequest(lease.Id, lease.LeaseToken, Sha('a'), Probe, _environment.Root, _environment.Settings.Current.GetQualities, Profile, _ => true, _environment.Now),
+            CancellationToken);
+        AddKnown(item);
+        var video = AddKnown(copy);
+        _libraries[copy] = [OtherLibraryId];
+        await _environment.Index.LoadAsync(CancellationToken);
+        Assert.Contains("v1080", (await _environment.Store.GetRenditionsAsync(Sha('a'), CancellationToken)).Select(r => r.Key));
+
+        _items.Remove(video);
+        _libraryManager.Raise(m => m.ItemRemoved += null, _libraryManager.Object, new ItemChangeEventArgs { Item = video });
+        await TickAsync(_start + TimeSpan.FromSeconds(5));
+
+        Assert.Equal(["a1", "preview", "s2", "v720"], (await _environment.Store.GetRenditionsAsync(Sha('a'), CancellationToken)).Select(r => r.Key));
+    }
+
+    [Fact]
+    public async Task ChangingTheQualitiesOfALibrary_SyncsTheRenditionsOfItsContents()
+    {
+        await TickAsync(_start);
+        var (item, _) = await _environment.PublishAsync(Sha('a'));
+        AddKnown(item);
+        await _environment.Index.LoadAsync(CancellationToken);
+
+        var options = Options();
+        options.LibraryQualities = [new HlsLibraryQualities { LibraryId = LibraryId, Qualities = [720] }];
+        _environment.Save(options);
+        await TickAsync(_start + TimeSpan.FromSeconds(5));
+
+        Assert.Equal(["a1", "preview", "s2", "v720"], (await _environment.Store.GetRenditionsAsync(Sha('a'), CancellationToken)).Select(r => r.Key));
+        Assert.Equal(["v720"], _environment.Index.GetMediaForItem(item)!.Video.Select(r => r.Key));
+    }
+
+    [Fact]
     public async Task TurningItOff_CancelsTheWorkList_AndTurningItOnAgainScans()
     {
         var first = AddLocal();
