@@ -82,6 +82,51 @@ public interface INetworkStorageManager
     string? ResolveShortcutTarget(string target);
 
     /// <summary>
+    /// Gets the address a client reads an object at directly: the external address its storage is published at.
+    /// </summary>
+    /// <param name="target">The object, such as <c>s3://bucket/key</c>.</param>
+    /// <returns>The address, or <c>null</c> when the storage is not public or is an archive, or no access covers it.</returns>
+    Uri? GetClientAddress(string target);
+
+    /// <summary>
+    /// Gets the address the server sends a request about an object to, for maintenance such as checks: the endpoint of
+    /// its access, signed for the method.
+    /// </summary>
+    /// <param name="target">The object, such as <c>s3://bucket/key</c>.</param>
+    /// <param name="method">The HTTP method the address is used with.</param>
+    /// <returns>The address, or <c>null</c> when the target needs an access and none covers it.</returns>
+    Uri? GetServerAddress(string target, string method);
+
+    /// <summary>
+    /// Gets an address an object can be written at with PUT, at the endpoint of its access.
+    /// </summary>
+    /// <param name="target">The object, such as <c>s3://bucket/key</c>.</param>
+    /// <param name="lifetime">How long the address stays valid.</param>
+    /// <returns>The address, or <c>null</c> when the storage cannot be written or no access covers it.</returns>
+    Uri? GetUploadAddress(string target, TimeSpan lifetime);
+
+    /// <summary>
+    /// Lists the objects whose keys start with a prefix, in key order.
+    /// </summary>
+    /// <param name="prefix">The bucket and the prefix of the keys, such as <c>s3://bucket/hls/</c>.</param>
+    /// <param name="limit">The most objects to list, or <c>null</c> for all.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The objects.</returns>
+    /// <exception cref="ArgumentException">The prefix is not in storage the server can write.</exception>
+    /// <exception cref="System.IO.IOException">No access covers the prefix, or the storage refused the listing or could not be reached.</exception>
+    Task<IReadOnlyList<StorageObject>> ListAsync(string prefix, int? limit, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Deletes objects; one that does not exist is deleted already.
+    /// </summary>
+    /// <param name="targets">The objects, such as <c>s3://bucket/key</c>.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task.</returns>
+    /// <exception cref="ArgumentException">An object is not in storage the server can write.</exception>
+    /// <exception cref="System.IO.IOException">No access covers an object, or the storage refused to delete one or could not be reached.</exception>
+    Task DeleteAsync(IReadOnlyCollection<string> targets, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Replaces the server's own address of a network storage source before the source is sent to a client:
     /// with the address the storage is published at, or, when it is not public, with none, so that the client
     /// has the server stream it. The server's address carries its credentials. A source in an archive is marked

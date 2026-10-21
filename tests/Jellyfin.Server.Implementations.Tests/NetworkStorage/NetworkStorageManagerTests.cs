@@ -414,6 +414,90 @@ public sealed class NetworkStorageManagerTests : IDisposable
         Assert.Equal("s3://media/Film-new.mkv", Assert.Single(context.NetworkStorageFailures).Target);
     }
 
+    [Fact]
+    public async Task GetClientAddress_PublishedStorage_IsItsExternalAddress()
+    {
+        var access = await AddAccessAsync("media");
+        await PublishAsync(access);
+
+        Assert.StartsWith("https://media.example.com/media/hls/a.m4s?exp=", _manager.GetClientAddress("s3://media/hls/a.m4s")?.AbsoluteUri, StringComparison.Ordinal);
+        Assert.Null(_manager.GetClientAddress("s3://other/hls/a.m4s"));
+    }
+
+    [Fact]
+    public async Task GetClientAddress_PrivateOrArchive_IsNone()
+    {
+        await AddAccessAsync("media");
+        var archive = await AddAccessAsync("archive", isArchive: true);
+        await PublishAsync(archive);
+
+        Assert.Null(_manager.GetClientAddress("s3://media/hls/a.m4s"));
+        Assert.Null(_manager.GetClientAddress("s3://archive/hls/a.m4s"));
+    }
+
+    [Fact]
+    public async Task GetServerAddress_PublishedStorage_IsTheEndpointSignedForTheMethod()
+    {
+        var access = await AddAccessAsync("media");
+        await PublishAsync(access);
+
+        var head = _manager.GetServerAddress("s3://media/hls/a.m4s", "HEAD");
+        var get = _manager.GetServerAddress("s3://media/hls/a.m4s", "GET");
+
+        Assert.StartsWith("http://minio.lan:9000/media/hls/a.m4s?X-Amz-Algorithm=", head?.AbsoluteUri, StringComparison.Ordinal);
+        Assert.NotEqual(head, get);
+        Assert.Null(_manager.GetServerAddress("s3://other/hls/a.m4s", "GET"));
+    }
+
+    [Fact]
+    public async Task GetUploadAddress_CoveredObject_IsPresignedForTheLifetime()
+    {
+        await AddAccessAsync("media");
+
+        Assert.Contains("X-Amz-Expires=3600&", _manager.GetUploadAddress("s3://media/hls/a.m4s", TimeSpan.FromHours(1))?.Query, StringComparison.Ordinal);
+        Assert.Null(_manager.GetUploadAddress("s3://other/hls/a.m4s", TimeSpan.FromHours(1)));
+        Assert.Null(_manager.GetUploadAddress("https://cdn.example.com/a.m4s", TimeSpan.FromHours(1)));
+    }
+
+    [Fact]
+    public async Task ListAsync_CoveredPrefix_IsListedWithItsAccess()
+    {
+        await AddAccessAsync("media");
+
+        var objects = await _manager.ListAsync("s3://media/hls/", 5, TestContext.Current.CancellationToken);
+
+        Assert.Equal("hls/x", Assert.Single(objects).Key);
+        Assert.Equal(("media", "hls/", (int?)5), Assert.Single(_s3.Listed));
+        await Assert.ThrowsAsync<System.IO.IOException>(() => _manager.ListAsync("s3://other/hls/", null, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<ArgumentException>(() => _manager.ListAsync("https://cdn.example.com/hls/", null, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task DeleteAsync_ObjectsOfTwoBuckets_DeletesThoseOfEachAtOnce()
+    {
+        await AddAccessAsync("media");
+        await AddAccessAsync("other");
+
+        await _manager.DeleteAsync(["s3://media/a", "s3://other/b", "s3://media/c"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(["media:a,c", "other:b"], _s3.Deleted);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_ObjectNotCovered_DeletesNothing()
+    {
+        await AddAccessAsync("media");
+
+        await Assert.ThrowsAsync<System.IO.IOException>(() => _manager.DeleteAsync(["s3://media/a", "s3://other/b"], TestContext.Current.CancellationToken));
+
+        Assert.Empty(_s3.Deleted);
+    }
+
+    private Task<NetworkStorageExternalAddressDto> PublishAsync(NetworkStorageAccessDto access)
+        => _manager.SaveExternalAddressAsync(
+            new NetworkStorageExternalAddressDto { AccessId = access.Id, AuthMode = ExternalAuthMode.CloudflareWorker, BaseUrl = "https://media.example.com", Secret = "shared" },
+            CancellationToken.None);
+
     private Task<NetworkStorageAccessDto> AddAccessAsync(string bucket, bool isArchive = false)
         => _manager.SaveAccessAsync(
             new NetworkStorageAccessDto { Bucket = bucket, Endpoint = "http://minio.lan:9000", UsePathStyle = true, AccessKey = "key", SecretKey = "secret", IsArchive = isArchive },
@@ -479,7 +563,7 @@ public sealed class NetworkStorageManagerTests : IDisposable
             new NoLockBehavior(NullLogger<NoLockBehavior>.Instance));
 
     // The S3 protocol, with the reads of resources answered by the test.
-    private sealed class CheckingS3Protocol : INetworkStorageProtocol
+    private sealed class CheckingS3Protocol : IObjectStorageProtocol
     {
         private readonly S3StorageProtocol _inner = new(null!);
         private int _checked;
@@ -491,6 +575,10 @@ public sealed class NetworkStorageManagerTests : IDisposable
         public Action<long?>? OnCheck { get; set; }
 
         public int Checked => _checked;
+
+        public List<(string Container, string Prefix, int? Limit)> Listed { get; } = [];
+
+        public List<string> Deleted { get; } = [];
 
         public string Protocol => _inner.Protocol;
 
@@ -514,6 +602,21 @@ public sealed class NetworkStorageManagerTests : IDisposable
             Interlocked.Increment(ref _checked);
             OnCheck?.Invoke(expectedSize);
             return Task.FromResult(ResultFor?.Invoke(location) ?? Result);
+        }
+
+        public Uri GetUploadAddress(NetworkStorageAccessDto access, StorageLocation location, DateTime now, TimeSpan lifetime)
+            => _inner.GetUploadAddress(access, location, now, lifetime);
+
+        public Task<IReadOnlyList<StorageObject>> ListAsync(NetworkStorageAccessDto access, StorageLocation prefix, int? limit, CancellationToken cancellationToken)
+        {
+            Listed.Add((access.Bucket, prefix.ObjectPath, limit));
+            return Task.FromResult<IReadOnlyList<StorageObject>>([new StorageObject(prefix.ObjectPath + "x", 1, DateTime.UnixEpoch)]);
+        }
+
+        public Task DeleteAsync(NetworkStorageAccessDto access, string container, IReadOnlyCollection<string> keys, CancellationToken cancellationToken)
+        {
+            Deleted.Add(access.Bucket + ":" + string.Join(',', keys));
+            return Task.CompletedTask;
         }
     }
 }

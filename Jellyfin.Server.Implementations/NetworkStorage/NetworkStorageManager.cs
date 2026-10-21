@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -257,6 +258,64 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
         var now = DateTime.UtcNow;
         return (protocol.GetExternalAddress(access?.Access, access?.External, location, now)
             ?? protocol.GetInternalAddress(access?.Access, location, now, "GET"))?.AbsoluteUri;
+    }
+
+    /// <inheritdoc />
+    public Uri? GetClientAddress(string target)
+    {
+        if (!TryLocate(target, out var location, out var protocol))
+        {
+            return null;
+        }
+
+        // Clients get no address of an archive, as PrepareForClient gives them none.
+        var access = FindAccess(protocol, location.Container);
+        if ((protocol.RequiresAccess && access is null) || access?.Access.IsArchive == true)
+        {
+            return null;
+        }
+
+        return protocol.GetExternalAddress(access?.Access, access?.External, location, DateTime.UtcNow);
+    }
+
+    /// <inheritdoc />
+    public Uri? GetServerAddress(string target, string method)
+    {
+        if (!TryLocate(target, out var location, out var protocol))
+        {
+            return null;
+        }
+
+        var access = FindAccess(protocol, location.Container);
+        return protocol.RequiresAccess && access is null ? null : protocol.GetInternalAddress(access?.Access, location, DateTime.UtcNow, method);
+    }
+
+    /// <inheritdoc />
+    public Uri? GetUploadAddress(string target, TimeSpan lifetime)
+        => TryLocate(target, out var location, out var protocol)
+            && protocol is IObjectStorageProtocol objects
+            && FindAccess(protocol, location.Container) is { } access
+                ? objects.GetUploadAddress(access.Access, location, DateTime.UtcNow, lifetime)
+                : null;
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<StorageObject>> ListAsync(string prefix, int? limit, CancellationToken cancellationToken)
+    {
+        var (location, protocol, access) = LocateWritable(prefix);
+        return await protocol.ListAsync(access, location, limit, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task DeleteAsync(IReadOnlyCollection<string> targets, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(targets);
+        var objects = targets.Select(LocateWritable).ToArray();
+        foreach (var storage in objects.GroupBy(o => o.Location.StorageKey, StringComparer.Ordinal))
+        {
+            var (location, protocol, access) = storage.First();
+            var keys = storage.Select(o => o.Location.ObjectPath).ToArray();
+            await protocol.DeleteAsync(access, location.Container, keys, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <inheritdoc />
@@ -599,6 +658,18 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
 
     private StoredAccess? FindAccess(INetworkStorageProtocol protocol, string container)
         => protocol.RequiresAccess ? Accesses.FirstOrDefault(a => protocol.Covers(a.Access, container)) : null;
+
+    // The storage the server can write a target is in, and the access that covers it.
+    private (StorageLocation Location, IObjectStorageProtocol Protocol, NetworkStorageAccessDto Access) LocateWritable(string target)
+    {
+        if (!TryLocate(target, out var location, out var protocol) || protocol is not IObjectStorageProtocol objects)
+        {
+            throw new ArgumentException(target + " is not in storage the server can write.", nameof(target));
+        }
+
+        var access = FindAccess(protocol, location.Container) ?? throw new IOException("No access covers " + location.StorageKey + ".");
+        return (location, objects, access.Access);
+    }
 
     private void ReloadAccesses()
     {

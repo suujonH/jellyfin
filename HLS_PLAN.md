@@ -185,15 +185,27 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 ## 四、HLS 存储（预编码成果）
 
 **两种存储**（设置项 `Store`）：
-- 本地目录 `LocalPath`；
-- 网络存储前缀 `s3://桶/前缀`。
+- 本地目录 `LocalPath`，必须是绝对路径；
+- 网络存储前缀 `s3://桶/前缀`，前缀可以为空（整个桶）。
   - 这个桶必须有一条访问权限，且不能是归档：归档的存储客户端无法播放。
   - 只支持 s3，因为 http 不能写入。
 
+**存储抽象**（第 3 阶段）：`IHlsStore`（`MediaBrowser.Controller/Hls/`），由 `IHlsStoreFactory.Create(设置值)` 打开；实现 `LocalHlsStore`、`NetworkHlsStore` 在 `Jellyfin.Server.Implementations/Hls/`。路径相对于存储根目录，用 `/` 分隔，不允许空段、以点或空格结尾的段（Windows 会去掉它们，`...` 就成了上级目录）、`\`、`:` 和控制字符（列出网络存储时 XML 无法携带）；本地目录还核对完整路径确实在根目录之下。
+- `CheckRootAsync(已发布目录样本)`：根目录不可信时返回原因（见下文的根目录标记）。网络存储还要求有访问权限且不是归档。
+- `ListAsync(目录)`：目录下的全部文件（含子目录），路径相对于该目录，带大小和修改时间；目录不存在时为空。
+- `DeleteDirectoryAsync(目录)`：删除目录及其文件；本地目录还删除因此变空的上级目录，直到根目录。
+- `WriteAsync(路径, 内容)`：只用于本地目录，先写同目录的临时文件再替换；网络存储抛出 `NotSupportedException`。
+- `GetUploadAddress`、`GetServerPath`、`GetClientAddress`：见下表。
+- `TestAsync()`：在根目录写入、读回、删除一个 `.jellyfin-hls-test-*` 测试对象，并报告是否有标记。本地目录不存在时不创建（可能是挂载点）。
+- 读写失败统一为 `IOException`。
+
 **布局**沿用插件，迁移来的成果因此不需要移动：`{媒体}/{video|audio|subtitles|preview}/{序号}/{租约令牌}/`。
 
-**根目录标记**：`.jellyfin-hls`，也接受旧名 `.distributed-hls`。
-- 标记缺失、而已发布的成果也不在时，校验和删除暂停，不消耗重试次数。
+**根目录标记**：`.jellyfin-hls`，也接受旧名 `.distributed-hls`。规则沿用插件：
+- 根目录不存在或读不出来：不可信。
+- 有标记：可信。没有发布过任何成果：可信，但不写标记（本地目录可能是尚未挂载的挂载点，必须保持为空）。
+- 没有标记、已发布目录的样本也一个都不在：不可信，也不写标记。否则写入标记，可信。
+- 不可信时校验和删除暂停，不消耗重试次数（第 4 阶段）。
 - 网络存储同样适用，防止访问权限被改到别的桶后，系统误以为成果全部丢失、整库重新编码。
 
 | 操作 | 本地目录 | 网络存储 |
@@ -201,17 +213,20 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 | Worker 上传 | `PUT` 到服务器（先写临时文件，再改名） | 服务器签发预签名 `PUT`，走访问权限的 Endpoint |
 | 校验 | 逐个 stat，可选核对修改时间 | 按档位目录 `ListObjectsV2`，核对存在与大小 |
 | 删除 | 删目录 | 列出前缀后批量 `DeleteObjects`，服务不支持时逐个 `DELETE` |
-| 服务器读取（转发） | `PhysicalFile` | 按网络存储的规则读取：公开读外部地址，否则读 Endpoint |
-| 客户端地址 | 无 | 外部地址，逐对象签名，按小时对齐 |
+| 服务器读取（转发） | `PhysicalFile` | 按网络存储的规则读取：公开读外部地址，否则读 Endpoint（`ResolveShortcutTarget`） |
+| 客户端地址 | 无 | 外部地址，逐对象签名，按小时对齐；不公开或归档时没有 |
 
 **网络存储的扩展**：
 - `INetworkStorageManager` 新增以下方法，都以 `s3://桶/键` 为参数：
-  - `GetClientAddress(target)`：外部地址；不公开或归档时返回 null；
-  - `GetServerAddress(target, method)`；
-  - `GetUploadAddress(target, lifetime)`；
-  - `ListAsync(prefix)`；
-  - `DeleteAsync(keys)`。
-- 实现在 `S3StorageProtocol` 中，复用 `S3UrlSigner.GetUrl(..., method, parameters)`，再加上 ListObjectsV2 的 XML 解析（分页）。
+  - `GetClientAddress(target)`：外部地址；不公开、归档或没有访问权限时返回 null；
+  - `GetServerAddress(target, method)`：访问权限的 Endpoint，按方法签名，用于检查等维护操作（公开时也不用外部地址）；
+  - `GetUploadAddress(target, lifetime)`：Endpoint 上的预签名 PUT；
+  - `ListAsync(prefix, limit)`：按键的顺序；
+  - `DeleteAsync(targets)`：按桶分组；不存在的对象视为已删除。
+  - 列出和删除时没有访问权限、存储拒绝或无法连接，都抛出 `IOException`；目标不是可写的存储时抛出 `ArgumentException`。
+- 新接口 `IObjectStorageProtocol : INetworkStorageProtocol`（上传地址、列出、删除），只有 `S3StorageProtocol` 实现，复用 `S3UrlSigner.GetUrl(..., method, parameters)`：
+  - ListObjectsV2 的 XML 解析（`S3Xml`，按元素的本地名称匹配，不要求命名空间），按 `NextContinuationToken` 分页；截断却没有令牌时报错，不会反复读同一页。
+  - DeleteObjects 每次至多 1000 个键，quiet 模式，带 `Content-MD5`；结果中 `NoSuchKey` 以外的错误抛出异常。服务不接受（400、401、403、405、501，例如不支持预签名 POST 的服务）时，本次调用的剩余对象改为逐个 `DELETE`，404 视为已删除。
 
 ## 五、任务中心（并入核心）
 
@@ -577,4 +592,5 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - 2026-10-21：第 0 阶段提交的 Codex review 补跑完成，没有问题。
 - 2026-10-21：第 1 阶段完成：`Plans/`（`SegmentPlan`、`SegmentPlanner`、`HlsCuts`、`KeyframeSource`）、`Playlist/HlsPlaylistWriter`、MP4 提取器（只注册，旧链路的 MP4 默认值与迁移随第 2 阶段）、ffprobe 提取器减去 start_time 并只读第一条非封面视频流、设置 `KeyframeExtractionTimeoutSeconds`、旧链路只在复制第一条视频流时用关键帧。核对结论写在第二节。配置 ffmpeg 时 MediaEncoding.Hls 109 个、Keyframes 38 个测试全部通过。
 - 2026-10-22：第 2 阶段完成：`Sessions/`（`HlsSessionManager`、`HlsSession`、`HlsEncoderRun`、`list.csv` 读取器与 `HlsSegmentLocator`）、控制器改用新链路（新的切片 URL、由计划写出的 `main.m3u8`、segment muxer 命令行、拼接发送 GOP 文件的 `ConcatenatedFileResult`）、节流与清理改用 run 给出的位置和文件、复用任务时重新解析源地址、迁移 `DeleteUnalignedKeyframeData` 与 `AddMp4KeyframeExtraction`。旧的 `DynamicHlsPlaylistGenerator` 删除，`IsExtractionAllowedForFile` 移入 `KeyframeSource`。配置 ffmpeg 时 MediaEncoding.Hls 142 个测试全部通过（含真实 ffmpeg 的 run 测试），Api 169 个、Controller 218 个、MediaEncoding 194 个、Server 41 个、Integration 129 个通过。
-- 下一步：第 3 阶段（HLS 存储与网络存储扩展）。
+- 2026-10-22：第 3 阶段完成：`IHlsStore` 与 `IHlsStoreFactory`，本地目录与网络存储两种实现（根目录标记、写入、列出、删除、地址、存储测试）；`INetworkStorageManager` 的客户端、服务器、上传地址与列出、删除；`IObjectStorageProtocol` 与 `S3StorageProtocol` 的预签名 PUT、ListObjectsV2 分页、DeleteObjects 及其回退。S3 的应答按根元素核对（`ListBucketResult`、`DeleteResult`），代理的登录页等其他文档不会被当作空列表。Server.Implementations 中 HLS 存储与网络存储的 137 个测试全部通过（另有 2 个本地化测试因系统语言为中文而失败，与本阶段无关）。
+- 下一步：第 4 阶段（任务中心）。

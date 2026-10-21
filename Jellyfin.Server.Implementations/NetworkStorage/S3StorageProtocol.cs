@@ -1,10 +1,18 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Xml;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Common.Net.S3;
 using MediaBrowser.Controller.NetworkStorage;
@@ -14,15 +22,26 @@ namespace Jellyfin.Server.Implementations.NetworkStorage;
 
 /// <summary>
 /// S3 and S3-compatible storage, named by <c>.strm</c> files as <c>s3://bucket/key</c>. An access covers one bucket,
-/// from its root, and is expected to be permitted to read all of it.
+/// from its root, and is expected to be permitted to read all of it; to be the HLS store, also to write and delete in it.
 /// </summary>
-public partial class S3StorageProtocol : INetworkStorageProtocol
+public partial class S3StorageProtocol : IObjectStorageProtocol
 {
+    // The most keys S3 lists in a page or deletes in a request.
+    private const int MaxKeysPerRequest = 1000;
+
     private static readonly IReadOnlyDictionary<string, string> _listOneObject = new Dictionary<string, string>
     {
         ["list-type"] = "2",
         ["max-keys"] = "1"
     };
+
+    private static readonly IReadOnlyDictionary<string, string> _deleteObjects = new Dictionary<string, string>
+    {
+        ["delete"] = string.Empty
+    };
+
+    // The lifetime of the addresses of the requests the server sends itself, right away.
+    private static readonly TimeSpan _requestLifetime = TimeSpan.FromMinutes(15);
 
     private readonly IHttpClientFactory _httpClientFactory;
 
@@ -191,6 +210,170 @@ public partial class S3StorageProtocol : INetworkStorageProtocol
         var now = DateTime.UtcNow;
         var head = S3UrlSigner.GetUrl(ToS3Access(access), location.Container, location.ObjectPath, now, TimeSpan.FromMinutes(15), "HEAD", null);
         return NetworkStorageHttp.CheckAsync(_httpClientFactory.CreateClient(NamedClient.Default), head, null, expectedSize, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Uri GetUploadAddress(NetworkStorageAccessDto access, StorageLocation location, DateTime now, TimeSpan lifetime)
+    {
+        ArgumentNullException.ThrowIfNull(access);
+        ArgumentNullException.ThrowIfNull(location);
+        return S3UrlSigner.GetUrl(ToS3Access(access), location.Container, location.ObjectPath, now, lifetime, "PUT", null);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<StorageObject>> ListAsync(NetworkStorageAccessDto access, StorageLocation prefix, int? limit, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(access);
+        ArgumentNullException.ThrowIfNull(prefix);
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit ?? 1, 1, nameof(limit));
+
+        var what = "Listing " + prefix.Target;
+        var client = _httpClientFactory.CreateClient(NamedClient.Default);
+        var max = limit ?? int.MaxValue;
+        var objects = new List<StorageObject>();
+        string? continuationToken = null;
+        do
+        {
+            var parameters = new Dictionary<string, string>
+            {
+                ["list-type"] = "2",
+                ["prefix"] = prefix.ObjectPath,
+                ["max-keys"] = Math.Min(MaxKeysPerRequest, max - objects.Count).ToString(CultureInfo.InvariantCulture)
+            };
+            if (continuationToken is not null)
+            {
+                parameters["continuation-token"] = continuationToken;
+            }
+
+            var url = S3UrlSigner.GetUrl(ToS3Access(access), prefix.Container, string.Empty, DateTime.UtcNow, _requestLifetime, "GET", parameters);
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            var (status, body) = await NetworkStorageHttp.SendAsync(client, request, what, cancellationToken).ConfigureAwait(false);
+            if (!NetworkStorageHttp.IsSuccess(status))
+            {
+                throw CreateError(what, status, body);
+            }
+
+            try
+            {
+                var page = S3Xml.ReadListPage(body);
+                objects.AddRange(page.Objects);
+                continuationToken = page.NextContinuationToken;
+            }
+            catch (Exception ex) when (ex is XmlException or FormatException or OverflowException)
+            {
+                throw new IOException(what + " failed: the storage answered no listing: " + ex.Message, ex);
+            }
+        }
+        while (continuationToken is not null && objects.Count < max);
+
+        if (objects.Count > max)
+        {
+            objects.RemoveRange(max, objects.Count - max);
+        }
+
+        return objects;
+    }
+
+    /// <inheritdoc />
+    public async Task DeleteAsync(NetworkStorageAccessDto access, string container, IReadOnlyCollection<string> keys, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(access);
+        ArgumentException.ThrowIfNullOrEmpty(container);
+        ArgumentNullException.ThrowIfNull(keys);
+
+        var s3 = ToS3Access(access);
+        var client = _httpClientFactory.CreateClient(NamedClient.Default);
+        var deletesBatches = true;
+        foreach (var batch in keys.Chunk(MaxKeysPerRequest))
+        {
+            if (deletesBatches)
+            {
+                deletesBatches = await DeleteBatchAsync(client, s3, container, batch, cancellationToken).ConfigureAwait(false);
+                if (deletesBatches)
+                {
+                    continue;
+                }
+            }
+
+            foreach (var key in batch)
+            {
+                await DeleteObjectAsync(client, s3, container, key, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the error of a request the storage refused.
+    /// </summary>
+    /// <param name="what">What the request does.</param>
+    /// <param name="status">The status of the answer.</param>
+    /// <param name="body">The body of the answer.</param>
+    /// <returns>The error, with the code and message S3 answered.</returns>
+    internal static IOException CreateError(string what, HttpStatusCode status, byte[] body)
+        => new(what + " failed: " + ((int)status).ToString(CultureInfo.InvariantCulture) + " " + (GetErrorMessage(Encoding.UTF8.GetString(body)) ?? status.ToString()));
+
+    // Deletes up to a thousand objects with one DeleteObjects request; false when the storage does not take it.
+    private static async Task<bool> DeleteBatchAsync(HttpClient client, S3Access access, string container, string[] keys, CancellationToken cancellationToken)
+    {
+        var what = "Deleting " + keys.Length.ToString(CultureInfo.InvariantCulture) + " objects of " + S3Address.Prefix + container;
+        var content = S3Xml.WriteDelete(keys);
+        var url = S3UrlSigner.GetUrl(access, container, string.Empty, DateTime.UtcNow, _requestLifetime, "POST", _deleteObjects);
+        using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new ByteArrayContent(content) };
+        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/xml");
+
+        // CA5351: Do Not Use Broken Cryptographic Algorithms
+#pragma warning disable CA5351
+        // S3 requires the digest of the body; it is not used for security.
+        request.Content.Headers.ContentMD5 = MD5.HashData(content);
+#pragma warning restore CA5351
+
+        var (status, body) = await NetworkStorageHttp.SendAsync(client, request, what, cancellationToken).ConfigureAwait(false);
+
+        // A service that does not take DeleteObjects, or not with a presigned address, refuses it in one of these ways;
+        // deleting each object then tells whether deleting is permitted at all.
+        if (status is HttpStatusCode.BadRequest or HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
+            or HttpStatusCode.MethodNotAllowed or HttpStatusCode.NotImplemented)
+        {
+            return false;
+        }
+
+        if (!NetworkStorageHttp.IsSuccess(status))
+        {
+            throw CreateError(what, status, body);
+        }
+
+        IReadOnlyList<(string Key, string Code, string Message)> errors;
+        try
+        {
+            errors = S3Xml.ReadDeleteErrors(body);
+        }
+        catch (Exception ex) when (ex is XmlException or FormatException)
+        {
+            throw new IOException(what + " failed: the storage answered no result: " + ex.Message, ex);
+        }
+
+        // An object that does not exist is deleted already.
+        foreach (var (key, code, message) in errors)
+        {
+            if (!string.Equals(code, "NoSuchKey", StringComparison.Ordinal))
+            {
+                throw new IOException("Deleting " + S3Address.Prefix + container + "/" + key + " failed: " + code + ": " + message);
+            }
+        }
+
+        return true;
+    }
+
+    private static async Task DeleteObjectAsync(HttpClient client, S3Access access, string container, string key, CancellationToken cancellationToken)
+    {
+        var what = "Deleting " + S3Address.Prefix + container + "/" + key;
+        var url = S3UrlSigner.GetUrl(access, container, key, DateTime.UtcNow, _requestLifetime, "DELETE", null);
+        using var request = new HttpRequestMessage(HttpMethod.Delete, url);
+        var (status, body) = await NetworkStorageHttp.SendAsync(client, request, what, cancellationToken).ConfigureAwait(false);
+        if (!NetworkStorageHttp.IsSuccess(status) && status != HttpStatusCode.NotFound)
+        {
+            throw CreateError(what, status, body);
+        }
     }
 
     private static string? GetErrorMessage(string body)
