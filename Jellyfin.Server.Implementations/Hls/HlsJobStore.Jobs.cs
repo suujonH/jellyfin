@@ -547,11 +547,11 @@ public sealed partial class HlsJobStore
     /// has its playlists keeps working.
     /// </summary>
     /// <param name="jobId">The job.</param>
-    /// <param name="replacedGrace">How long a replaced directory is kept.</param>
+    /// <param name="getReplacedGrace">How long a replaced directory is kept, by the root it is in.</param>
     /// <param name="now">The current time.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>What was published, or null when the job is not verifying.</returns>
-    public Task<HlsPublishResult?> PublishAsync(Guid jobId, TimeSpan replacedGrace, DateTime now, CancellationToken cancellationToken)
+    public Task<HlsPublishResult?> PublishAsync(Guid jobId, Func<string?, TimeSpan> getReplacedGrace, DateTime now, CancellationToken cancellationToken)
         => WriteAsync<HlsPublishResult?>(
             async context =>
             {
@@ -576,7 +576,7 @@ public sealed partial class HlsJobStore
 
                     if (rendition.RelativeDirectory is { } replaced && !string.Equals(replaced, output.RelativeDirectory, StringComparison.Ordinal))
                     {
-                        await QueueDeletionAsync(context, rendition.Base, replaced, now + replacedGrace, "Replaced by a new output.", cancellationToken).ConfigureAwait(false);
+                        await QueueDeletionAsync(context, rendition.Base, replaced, now + getReplacedGrace(rendition.Base), "Replaced by a new output.", cancellationToken).ConfigureAwait(false);
                         await RemoveOutputAsync(context, rendition.PublishedJobId, rendition.Key, cancellationToken).ConfigureAwait(false);
                     }
 

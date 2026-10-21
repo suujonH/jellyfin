@@ -237,9 +237,35 @@ public sealed class HlsVerificationServiceTests : IDisposable
     }
 
     // A local store in a temporary directory, or the store given.
-    private (HlsTestEnvironment Environment, HlsVerificationService Service) Create(IHlsStore? store = null)
+    [Theory]
+    [InlineData(30, 30)]
+    [InlineData(1, 24)]
+    public async Task Publish_ReplacedDirectories_AreKeptWhileTheirDirectAddressesOrAGrantMayBeUsed(int addressHours, int graceHours)
     {
-        IHlsStoreFactory? factory = null;
+        var local = new HlsStoreFactory(Mock.Of<INetworkStorageManager>());
+        var factory = new Mock<IHlsStoreFactory>();
+        factory.Setup(f => f.Create(It.IsAny<string>()))
+            .Returns<string>(root => new PublicHlsStore(local.Create(root), "https://cdn.example/", TimeSpan.FromHours(addressHours)));
+        var (environment, service) = Create(factory: factory.Object);
+        var (_, published) = await environment.PublishAsync(Sha('a'));
+
+        // The content is encoded again under another profile, and its new outputs are verified.
+        await environment.Store.EnsureMediaJobAsync(Sha('a'), null, "next-profile", _ => true, environment.Now, CancellationToken);
+        var lease = await environment.Store.ClaimAsync(new HlsClaimRequest("worker", Lease, _ => true, environment.Now), CancellationToken);
+        var plan = (await environment.Store.IdentifyAsync(
+            new HlsIdentifyRequest(lease!.Id, lease.LeaseToken, Sha('a'), Probe, environment.Root, _ => Qualities, "next-profile", _ => true, environment.Now),
+            CancellationToken)).Plan!;
+        environment.WriteFiles(plan);
+        Assert.True(await environment.Store.SubmitOutputsAsync(lease.Id, lease.LeaseToken, Outputs(plan), environment.Now, CancellationToken));
+        await service.VerifyBatchAsync(environment.Now, CancellationToken);
+
+        var deletions = await environment.DeletionsAsync();
+        Assert.Equal(published.Renditions.Select(r => r.RelativeDirectory).Order(StringComparer.Ordinal), deletions.Select(d => d.RelativeDirectory));
+        Assert.All(deletions, d => Assert.Equal(environment.Now + TimeSpan.FromHours(graceHours), d.NotBefore));
+    }
+
+    private (HlsTestEnvironment Environment, HlsVerificationService Service) Create(IHlsStore? store = null, IHlsStoreFactory? factory = null)
+    {
         if (store is not null)
         {
             var mock = new Mock<IHlsStoreFactory>();

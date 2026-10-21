@@ -74,6 +74,39 @@ public sealed partial class HlsJobStore
             cancellationToken);
 
     /// <summary>
+    /// Gets the segments of a published rendition from the outputs of the job that published it. The published index leaves them
+    /// out, as a long film has some 1800 of them in each rendition.
+    /// </summary>
+    /// <param name="sha256">The hash of the content.</param>
+    /// <param name="key">The key of the rendition.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The segments, or <c>null</c> when the rendition is not published or its outputs are gone.</returns>
+    public Task<HlsPublishedSegments?> GetPublishedSegmentsAsync(string sha256, string key, CancellationToken cancellationToken)
+        => ReadAsync<HlsPublishedSegments?>(
+            async context =>
+            {
+                var rendition = await context.HlsRenditions.AsNoTracking()
+                    .Where(r => r.Sha256 == sha256 && r.Key == key && r.State == (int)HlsRenditionState.Published && r.PublishedJobId != null)
+                    .Select(r => new { JobId = r.PublishedJobId!.Value, r.RelativeDirectory })
+                    .FirstOrDefaultAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                if (rendition is null)
+                {
+                    return null;
+                }
+
+                var output = await context.HlsJobOutputs.AsNoTracking()
+                    .Where(o => o.JobId.Equals(rendition.JobId) && o.Key == key)
+                    .Select(o => new { o.RelativeDirectory, o.Segments })
+                    .FirstOrDefaultAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                return output is null || !string.Equals(output.RelativeDirectory, rendition.RelativeDirectory, StringComparison.Ordinal)
+                    ? null
+                    : new HlsPublishedSegments(output.RelativeDirectory, Deserialize<double[]>(output.Segments));
+            },
+            cancellationToken);
+
+    /// <summary>
     /// Gets the contents with a rendition that needs a job.
     /// </summary>
     /// <param name="profile">The current encoding profile.</param>

@@ -59,6 +59,13 @@ public interface INetworkStorageProtocol
     Uri? GetExternalAddress(NetworkStorageAccessDto? access, NetworkStorageExternalAddressDto? external, StorageLocation location, DateTime now);
 
     /// <summary>
+    /// Gets how long an address <see cref="GetExternalAddress"/> gives stays valid at most.
+    /// </summary>
+    /// <param name="external">How the storage is published, if it is.</param>
+    /// <returns>The lifetime; zero when clients get no address, or one that does not expire.</returns>
+    TimeSpan GetExternalAddressLifetime(NetworkStorageExternalAddressDto? external);
+
+    /// <summary>
     /// Tests that the root of a storage can be read with an access. Whether particular resources exist is not checked.
     /// </summary>
     /// <param name="access">The access.</param>

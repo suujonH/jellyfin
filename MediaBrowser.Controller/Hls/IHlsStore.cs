@@ -58,7 +58,7 @@ public interface IHlsStore
     /// address, which is the external address when the storage is published at one, as for media.
     /// </summary>
     /// <param name="path">The file.</param>
-    /// <returns>The path or address, or <c>null</c> when no access covers the store.</returns>
+    /// <returns>The path or address, or <c>null</c> when no access covers the store or its access is an archive, which clients cannot play from.</returns>
     string? GetServerPath(string path);
 
     /// <summary>
@@ -67,6 +67,13 @@ public interface IHlsStore
     /// <param name="path">The file.</param>
     /// <returns>The address, or <c>null</c> when the store is local or its storage is not public, and the server sends the file.</returns>
     Uri? GetClientAddress(string path);
+
+    /// <summary>
+    /// Gets how long an address <see cref="GetClientAddress"/> gives stays valid at most, so that a directory a client may still
+    /// have addresses of is kept as long.
+    /// </summary>
+    /// <returns>The lifetime; zero when clients get no address, or one that does not expire.</returns>
+    TimeSpan GetClientAddressLifetime();
 
     /// <summary>
     /// Gets whether the root carries the marker, under its current or its legacy name.

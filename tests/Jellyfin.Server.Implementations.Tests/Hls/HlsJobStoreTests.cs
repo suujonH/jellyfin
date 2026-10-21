@@ -654,6 +654,27 @@ public sealed class HlsJobStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task GetPublishedSegments_GivesTheDurationsOfThePublishedOutput()
+    {
+        var (_, _, plan) = await EncodeAndPublishAsync(Sha('a'));
+
+        var segments = await _store.GetPublishedSegmentsAsync(Sha('a'), "v720", TestContext.Current.CancellationToken);
+        Assert.Equal(plan.Renditions.Single(r => r.Key == "v720").RelativeDirectory, segments!.RelativeDirectory);
+        Assert.Equal(Enumerable.Repeat(plan.SegmentSeconds, plan.ExpectedSegments), segments.Durations);
+        Assert.Empty((await _store.GetPublishedSegmentsAsync(Sha('a'), "s2", TestContext.Current.CancellationToken))!.Durations);
+        Assert.Null(await _store.GetPublishedSegmentsAsync(Sha('a'), "v480", TestContext.Current.CancellationToken));
+        Assert.Null(await _store.GetPublishedSegmentsAsync(Sha('b'), "v720", TestContext.Current.CancellationToken));
+
+        // Published again: the segments of the new output.
+        await EnsureMediaJobAsync(Sha('a'), NextProfile);
+        var (next, nextPlan) = await ClaimAndPlanAsync(Sha('a'), NextProfile);
+        await PublishAsync(next, nextPlan);
+        Assert.Equal(
+            nextPlan.Renditions.Single(r => r.Key == "v720").RelativeDirectory,
+            (await _store.GetPublishedSegmentsAsync(Sha('a'), "v720", TestContext.Current.CancellationToken))!.RelativeDirectory);
+    }
+
+    [Fact]
     public async Task Publish_DiscardsTheOutputOfARenditionNoLongerWanted()
     {
         await AddSourceAsync();
@@ -879,7 +900,7 @@ public sealed class HlsJobStoreTests : IDisposable
         AssertQueued(deletions, Directories(plan), _now);
         Assert.All(deletions, d => Assert.Equal("The job was cancelled.", d.Reason));
         Assert.Empty(await _store.GetVerifyingJobsAsync(10, [], TestContext.Current.CancellationToken));
-        Assert.Null(await _store.PublishAsync(lease.Id, ReplacedGrace, _now, TestContext.Current.CancellationToken));
+        Assert.Null(await _store.PublishAsync(lease.Id, _ => ReplacedGrace, _now, TestContext.Current.CancellationToken));
         Assert.All(await _store.GetRenditionsAsync(Sha('b'), TestContext.Current.CancellationToken), r => Assert.Equal((HlsRenditionState.Missing, (Guid?)null), (r.State, r.JobId)));
 
         // Nothing is left to release or reap: submitting the outputs ended the lease.
@@ -1109,7 +1130,8 @@ public sealed class HlsJobStoreTests : IDisposable
     private async Task<HlsPublishResult> PublishAsync(HlsJobLease lease, HlsEncodePlan plan)
     {
         Assert.True(await SubmitAsync(lease, Outputs(plan)));
-        var result = await _store.PublishAsync(lease.Id, ReplacedGrace, _now, TestContext.Current.CancellationToken);
+        // The grace is asked for by the root of the replaced directory.
+        var result = await _store.PublishAsync(lease.Id, root => root == _environment.Root ? ReplacedGrace : TimeSpan.Zero, _now, TestContext.Current.CancellationToken);
         Assert.NotNull(result);
         return result;
     }

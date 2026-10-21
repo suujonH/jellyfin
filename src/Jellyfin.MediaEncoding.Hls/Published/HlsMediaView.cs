@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.Linq;
+using MediaBrowser.Model.Hls;
 
 namespace Jellyfin.MediaEncoding.Hls.Published;
 
@@ -27,4 +29,18 @@ public sealed record HlsMediaView(
     /// Gets a value indicating whether the content can be played: a video quality, and an audio track unless it has none.
     /// </summary>
     public bool Playable => Video.Count > 0 && (ExpectedAudio == 0 || Audio.Count > 0);
+
+    /// <summary>
+    /// Finds a published rendition: a video quality, or an audio or subtitle track by its stream index.
+    /// </summary>
+    /// <param name="kind">What the rendition holds.</param>
+    /// <param name="index">The quality, or the stream index.</param>
+    /// <returns>The rendition, or <c>null</c> when none is published; always for a preview.</returns>
+    public HlsPublishedRendition? Find(HlsRenditionKind kind, int index) => kind switch
+    {
+        HlsRenditionKind.Video => Video.FirstOrDefault(r => r.Summary.Quality == index),
+        HlsRenditionKind.Audio => Audio.FirstOrDefault(r => r.Summary.SourceIndex == index),
+        HlsRenditionKind.Subtitle => Subtitles.FirstOrDefault(r => r.Summary.SourceIndex == index),
+        _ => null
+    };
 }

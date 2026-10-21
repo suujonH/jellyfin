@@ -151,6 +151,19 @@ public partial class S3StorageProtocol : IObjectStorageProtocol
     }
 
     /// <inheritdoc />
+    public TimeSpan GetExternalAddressLifetime(NetworkStorageExternalAddressDto? external)
+    {
+        // An address of a public bucket is not signed, so it never expires.
+        if (external is not { IsPublic: true } || external.AuthMode is not (ExternalAuthMode.PresignedUrl or ExternalAuthMode.CloudflareWorker))
+        {
+            return TimeSpan.Zero;
+        }
+
+        // Signed at the start of the hour, so valid until the lifetime after it at most.
+        return AlignToHour(DateTime.UtcNow, external.UrlLifetimeSeconds).Lifetime;
+    }
+
+    /// <inheritdoc />
     public async Task<NetworkStorageTestResult> TestAsync(NetworkStorageAccessDto access, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(access);

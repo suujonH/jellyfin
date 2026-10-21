@@ -45,7 +45,8 @@ public class HlsController : BaseJellyfinApiController
     public ActionResult<HlsOptions> GetSettings() => _configurationManager.GetHlsOptions();
 
     /// <summary>
-    /// Saves the settings. They take effect on the next round of the task center, within five seconds.
+    /// Saves the settings. They take effect on the next round of the task center, within five seconds. An empty playback
+    /// signing key keeps the current one, so that saving the settings never ends the playback grants already issued.
     /// </summary>
     /// <param name="options">The settings.</param>
     /// <response code="204">Settings saved.</response>
@@ -56,6 +57,11 @@ public class HlsController : BaseJellyfinApiController
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public ActionResult SaveSettings([FromBody, Required] HlsOptions options)
     {
+        if (string.IsNullOrEmpty(options.PlaybackSigningKey))
+        {
+            options.PlaybackSigningKey = _configurationManager.GetHlsOptions().PlaybackSigningKey;
+        }
+
         try
         {
             _configurationManager.SaveConfiguration(HlsConfigurationExtensions.ConfigurationKey, options);

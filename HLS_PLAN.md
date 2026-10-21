@@ -328,7 +328,7 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
    - 有待校验的任务时才检查它们的根：网络存储的每次检查都要发请求。
    - 某个档位核对失败时再检查一次根目录，仍然可信才判定校验失败，否则任务留在校验中。
    - 「校验已发布成果」用每个档位自己的根，对每一个核对失败的档位都先检查它的根，不可信时跳过这个根上的其余档位，已撤下的档位照常刷新索引并排程。
-7. **发布**：在一个事务里把档位切换到新目录和新根。被替换的目录（连同旧根）在宽限期后删除，宽限期取播放授权有效期与旧根的外部地址有效期中较长的一个。第 4 阶段只用播放授权有效期，外部地址有效期随第 5 阶段的直连加入。
+7. **发布**：在一个事务里把档位切换到新目录和新根。被替换的目录（连同旧根）在宽限期后删除，宽限期取播放授权有效期与旧根的外部地址有效期中较长的一个（签名地址按小时对齐，所以是设置的有效期加一小时；公开桶的地址不过期，只按授权有效期）。
 8. **删除队列**：用删除记录上的根打开存储。失败按 1、2、4 分钟……退避重试，最长 6 小时，不阻塞派发。
    - 删除之后该根仍然可信，才把这一批移出队列：从失去挂载的根目录「删除」的目录可能根本不在那里。
    - 路径或根不合法的记录记日志后移出队列，不删除任何东西。
@@ -487,12 +487,12 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 
 ### 7.2 授权与播放列表
 
-**授权**：匿名授权放在路径里（移植 `PlaybackGrant`），客户端不需要认证头。签名密钥为空时，第一次签发授权前生成并保存（第 4 阶段只校验格式：空，或至少 32 字节的 Base64）。
+**授权**：匿名授权放在路径里（移植 `PlaybackGrant`），客户端不需要认证头。签名密钥为空时，第一次签发授权前生成并保存（第 4 阶段只校验格式：空，或至少 32 字节的 Base64）。`PUT Hls/Settings` 收到空密钥时保留现有密钥，保存设置不会让已签发的授权失效。授权无效或过期返回 `403`，条目不能播放、档位未发布返回 `404`。
 
 **路由**（`HlsDeliveryController`）：
 - `GET /HlsPlayback/{grant}/master.m3u8`、`{q}p.m3u8`，可加 `-a{序号}` 后缀：主播放列表，按请求时已发布的内容生成。
 - `GET /HlsPlayback/{grant}/r/{kind}/{index}/index.m3u8`：媒体播放列表，**由服务器生成**，依据切片计划和保存的各段时长。
-- `GET /HlsPlayback/{grant}/r/{kind}/{index}/{file}`：转发模式下的文件，按该档位的根读取。
+- `GET /HlsPlayback/{grant}/r/{kind}/{index}/{attempt}/{file}`：转发模式下的文件，按该档位的根读取。媒体播放列表的相对地址带上所发布的 attempt 目录，档位重新发布后，正在播放的客户端在宽限期内仍读到原来那一套文件。已知限制：档位改发布到另一个根时，旧 attempt 按新根查找，正在转发播放的客户端会得到 `404`，重新打开播放即可（换根很少见，不为它在每次文件请求时查删除队列）。
 - `GET /HlsPlayback/Versions/{versionId}/master.m3u8`：已登录用户 302 到带授权的地址。核心自己的流路由遇到 HLS 源 id 时也 302 过去。
 
 所有播放列表都带 `Cache-Control: no-store`，每次请求重新生成。
@@ -716,4 +716,5 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - 2026-10-22：设计变更写回计划：Worker 自持凭据并上报存储根、服务器去掉存储设置与上传通道、档位三层过滤、添加媒体时的预编码任务、原片规则并入归档与用户权限、Worker 仓库改为 `Jellyfin.HLS.Worker`。新增第 4d、4e 阶段。
 - 2026-10-22：第 4d 阶段完成：三张表的 `Base` 列与迁移 `AddHlsBase`；存储只读（删去 PUT 预签名、本地写入、标记写入与存储测试），由 Worker 写标记；`HlsOptions` 删去 `Store`、`OriginalUsers`，新增 `AllowOriginal`；`UserPolicy.EnableOriginalPlayback`；`Identify` 带根，根的校验与 `Bases/Check` 共用一个实现（本地根与媒体库互不包含、不在数据目录下）；监视、校验、再校验、删除都按根进行，一个根不可信只停它自己的工作，`StoreProblems` 只列仍在使用的根；`Base` 为空或无效的删除记录直接丢弃，不删除任何东西；租约结束后的宽限为一个租约长度；上传通道的路由、方法、DTO 与测试全部删除。Release 构建 0 警告；Server.Implementations 1320 个测试通过（2 个本地化测试因系统语言为中文而失败），Api 173 个、MediaEncoding.Hls 300 个（44 个跳过）、Integration 132 个通过。
 - 2026-10-22：第 4e 阶段完成：`HlsOptions.LibraryQualities`（`HlsLibraryQualities`）与校验；`HlsSettingsSnapshot.GetQualities`；内容的应有档位取其来源所在媒体库的并集，没有时取 `HlsMedia.LibraryId`，仍为空时不同步，替换了同步、识别两处（`HlsIdentifyRequest.GetQualities`、`SyncRenditionsAsync` 改为按媒体库取档位）；`GET /HlsWorker/Libraries`；`POST /HlsWorker/Jobs/Eager`（`HlsJobStore.StartEagerJobAsync`），预编码任务没有输入，`Input` 回 `404`，重复 `Identify` 返回原计划。与计划的差别已写回：`Libraries` 变化也触发全量同步，交集校验只针对选中的媒体库，预编码要求媒体库存在。Release 构建 0 警告；Server.Implementations 中 HLS 的 184 个测试、Api 173 个、Integration 132 个通过。
-- 下一步：第 5 阶段（播放）。
+- 2026-10-22：第 5a 阶段完成：`HlsPlaybackGrant`、`HlsMasterPlaylistWriter`（移植，无标题的音轨、字幕改用英文名）与移植的测试；`IHlsPlaybackService`/`HlsPlaybackService`（签发授权时生成并保存密钥，播放只读发布索引，视频、音频的媒体播放列表经 `GetPublishedSegmentsAsync` 读取各段时长，按档位的根写外部地址或相对地址；字幕为整段一个文件）；`HlsDeliveryController`（`HlsPlayback/{grant}/…`，本地文件带 Range 发送，网络存储读取后转发）；`IHlsStore.GetClientAddressLifetime` 与网络存储的地址有效期，发布时被替换目录的宽限按旧根计算。Release 构建 0 警告；Server.Implementations 1362 个测试通过（2 个本地化测试因系统语言为中文而失败），Api 173 个、Controller 218 个、MediaEncoding.Hls 412 个（44 个跳过）、Integration 136 个通过。
+- 下一步：第 5b 阶段（源列表与原片规则）。

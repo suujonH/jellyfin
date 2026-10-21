@@ -163,6 +163,16 @@ public class NetworkHlsStoreTests
         Assert.Equal("s3://media", CreateStore(string.Empty).Location);
     }
 
+    [Fact]
+    public void GetServerPath_Archive_IsNotPlayed()
+    {
+        const string Target = "s3://media/hls/" + Published + "/init.mp4";
+        _networkStorage.Setup(n => n.ResolveShortcutTarget(Target)).Returns("https://media.example.com/server");
+        _networkStorage.Setup(n => n.IsArchived(Target)).Returns(true);
+
+        Assert.Null(CreateStore().GetServerPath(Published + "/init.mp4"));
+    }
+
     private static Uri Address(string target, string method)
         => new("http://minio.lan:9000/" + target["s3://".Length..] + "?method=" + method);
 

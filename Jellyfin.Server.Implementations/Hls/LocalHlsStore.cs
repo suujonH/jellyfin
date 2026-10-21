@@ -125,6 +125,9 @@ internal sealed class LocalHlsStore : IHlsStore
     }
 
     /// <inheritdoc />
+    public TimeSpan GetClientAddressLifetime() => TimeSpan.Zero;
+
+    /// <inheritdoc />
     public Task<bool> HasMarkerAsync(CancellationToken cancellationToken)
     {
         try

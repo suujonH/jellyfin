@@ -89,6 +89,13 @@ public interface INetworkStorageManager
     Uri? GetClientAddress(string target);
 
     /// <summary>
+    /// Gets how long an address <see cref="GetClientAddress"/> gives for an object stays valid at most.
+    /// </summary>
+    /// <param name="target">The object, such as <c>s3://bucket/key</c>.</param>
+    /// <returns>The lifetime; zero when clients get no address, or one that does not expire.</returns>
+    TimeSpan GetClientAddressLifetime(string target);
+
+    /// <summary>
     /// Gets the address the server sends a request about an object to, for maintenance such as checks: the endpoint of
     /// its access, signed for the method.
     /// </summary>

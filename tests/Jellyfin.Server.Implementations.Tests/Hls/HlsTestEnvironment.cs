@@ -80,6 +80,8 @@ internal sealed class HlsTestEnvironment : IDisposable
         Directory.CreateDirectory(TempDirectory);
         _options = new HlsOptions { Enabled = true, Qualities = Qualities };
         _configurationManager.Setup(m => m.GetConfiguration(HlsConfigurationStore.StoreKey)).Returns(() => _options);
+        _configurationManager.Setup(m => m.SaveConfiguration(HlsConfigurationStore.StoreKey, It.IsAny<object>()))
+            .Callback<string, object>((_, options) => Save((HlsOptions)options));
         Settings = new HlsSettings(_configurationManager.Object, NullLogger<HlsSettings>.Instance);
         StoreFactory = storeFactory ?? new HlsStoreFactory(Mock.Of<INetworkStorageManager>());
         Monitor = new HlsRootMonitor(Store, StoreFactory, Settings, NullLogger<HlsRootMonitor>.Instance);
@@ -87,6 +89,11 @@ internal sealed class HlsTestEnvironment : IDisposable
     }
 
     public HlsJobStore Store { get; }
+
+    public IConfigurationManager ConfigurationManager => _configurationManager.Object;
+
+    // The settings as they are saved.
+    public HlsOptions Options => _options;
 
     public HlsSettings Settings { get; }
 
@@ -176,7 +183,7 @@ internal sealed class HlsTestEnvironment : IDisposable
     public async Task<(Guid Item, HlsEncodePlan Plan)> PublishAsync(string sha)
     {
         var (item, lease, plan) = await SubmitAsync(sha);
-        Assert.NotNull(await Store.PublishAsync(lease.Id, ReplacedGrace, Now, CancellationToken));
+        Assert.NotNull(await Store.PublishAsync(lease.Id, _ => ReplacedGrace, Now, CancellationToken));
         return (item, plan);
     }
 
