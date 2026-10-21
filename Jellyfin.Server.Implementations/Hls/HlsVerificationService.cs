@@ -331,8 +331,7 @@ public sealed class HlsVerificationService : BackgroundService
 
         if (error is null)
         {
-            // A replaced directory stays as long as a playback grant issued for it may be used.
-            if (await _store.PublishAsync(job.Id, TimeSpan.FromHours(settings.Options.PlaybackTokenHours), now, cancellationToken).ConfigureAwait(false) is { } result)
+            if (await _store.PublishAsync(job.Id, root => GetReplacedGrace(root, settings), now, cancellationToken).ConfigureAwait(false) is { } result)
             {
                 await FollowAsync(result.Sha256, cancellationToken).ConfigureAwait(false);
             }
@@ -350,6 +349,27 @@ public sealed class HlsVerificationService : BackgroundService
         {
             _logger.LogWarning("The outputs of HLS job {JobId} ({Sha256}) failed verification: {Error}", job.Id, job.Sha256, error);
             _coordinator.EnqueueSchedule(job.Sha256);
+        }
+    }
+
+    // A replaced directory stays as long as a playback grant issued for it may be used, and as long as the direct addresses of
+    // its files that media playlists gave out are valid.
+    private TimeSpan GetReplacedGrace(string? root, HlsSettingsSnapshot settings)
+    {
+        var grant = TimeSpan.FromHours(settings.Options.PlaybackTokenHours);
+        if (string.IsNullOrEmpty(root))
+        {
+            return grant;
+        }
+
+        try
+        {
+            var addresses = _monitor.Open(root).GetClientAddressLifetime();
+            return addresses > grant ? addresses : grant;
+        }
+        catch (ArgumentException)
+        {
+            return grant;
         }
     }
 

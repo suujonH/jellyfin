@@ -65,6 +65,9 @@ public class HttpStorageProtocol : INetworkStorageProtocol
     }
 
     /// <inheritdoc />
+    public TimeSpan GetExternalAddressLifetime(NetworkStorageExternalAddressDto? external) => TimeSpan.Zero;
+
+    /// <inheritdoc />
     public Task<NetworkStorageTestResult> TestAsync(NetworkStorageAccessDto access, CancellationToken cancellationToken)
         => Task.FromResult(new NetworkStorageTestResult(false, null, "Http addresses need no access."));
 

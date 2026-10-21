@@ -209,6 +209,27 @@ public sealed class NetworkStorageManagerTests : IDisposable
     }
 
     [Fact]
+    public async Task GetClientAddressLifetime_OnlySignedAddressesExpire()
+    {
+        var signed = await AddAccessAsync("signed");
+        await _manager.SaveExternalAddressAsync(
+            new NetworkStorageExternalAddressDto { AccessId = signed.Id, AuthMode = ExternalAuthMode.CloudflareWorker, BaseUrl = "https://media.example.com", Secret = "shared", UrlLifetimeSeconds = 7200 },
+            CancellationToken.None);
+        var unsigned = await AddAccessAsync("public");
+        await _manager.SaveExternalAddressAsync(
+            new NetworkStorageExternalAddressDto { AccessId = unsigned.Id, AuthMode = ExternalAuthMode.PublicBucket, BaseUrl = "https://pub.example.com" },
+            CancellationToken.None);
+        await AddAccessAsync("private");
+
+        // Signed at the start of the hour, so valid for up to an hour longer.
+        Assert.Equal(TimeSpan.FromHours(3), _manager.GetClientAddressLifetime("s3://signed/hls/.marker"));
+        Assert.Equal(TimeSpan.Zero, _manager.GetClientAddressLifetime("s3://public/hls/.marker"));
+        Assert.Equal(TimeSpan.Zero, _manager.GetClientAddressLifetime("s3://private/hls/.marker"));
+        Assert.Equal(TimeSpan.Zero, _manager.GetClientAddressLifetime("s3://other/hls/.marker"));
+        Assert.Equal(TimeSpan.Zero, _manager.GetClientAddressLifetime("https://cdn.example.com/Film.mkv"));
+    }
+
+    [Fact]
     public async Task IsArchived_FollowsTheAccessOfTheBucket()
     {
         var archive = await AddAccessAsync("archive", isArchive: true);
@@ -583,6 +604,8 @@ public sealed class NetworkStorageManagerTests : IDisposable
 
         public Uri? GetExternalAddress(NetworkStorageAccessDto? access, NetworkStorageExternalAddressDto? external, StorageLocation location, DateTime now)
             => _inner.GetExternalAddress(access, external, location, now);
+
+        public TimeSpan GetExternalAddressLifetime(NetworkStorageExternalAddressDto? external) => _inner.GetExternalAddressLifetime(external);
 
         public Task<NetworkStorageTestResult> TestAsync(NetworkStorageAccessDto access, CancellationToken cancellationToken)
             => Task.FromResult(new NetworkStorageTestResult(true, 200, null));

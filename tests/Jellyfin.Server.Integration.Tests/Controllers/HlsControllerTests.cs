@@ -44,6 +44,30 @@ namespace Jellyfin.Server.Integration.Tests.Controllers
         }
 
         [Fact]
+        public async Task SaveSettings_WithoutASigningKey_KeepsTheCurrentOne()
+        {
+            var client = await CreateAdministratorClientAsync();
+            var key = System.Convert.ToBase64String(new byte[32]);
+
+            (await client.PutAsJsonAsync("Hls/Settings", new HlsOptions { PlaybackSigningKey = key }, TestContext.Current.CancellationToken)).EnsureSuccessStatusCode();
+            (await client.PutAsJsonAsync("Hls/Settings", new HlsOptions(), TestContext.Current.CancellationToken)).EnsureSuccessStatusCode();
+
+            var settings = await client.GetFromJsonAsync<HlsOptions>("Hls/Settings", TestContext.Current.CancellationToken);
+            Assert.Equal(key, settings!.PlaybackSigningKey);
+        }
+
+        [Theory]
+        [InlineData("HlsPlayback/not-a-grant/master.m3u8")]
+        [InlineData("HlsPlayback/not-a-grant/r/video/1080/index.m3u8")]
+        [InlineData("HlsPlayback/not-a-grant/r/video/1080/0123456789abcdef0123456789abcdef/init.mp4")]
+        public async Task Delivery_WithoutAValidGrant_IsForbidden(string path)
+        {
+            var response = await _factory.CreateClient().GetAsync(path, TestContext.Current.CancellationToken);
+
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        }
+
+        [Fact]
         public async Task TheWorkerApi_IsForApiKeys_SpeakingTheProtocol()
         {
             var client = await CreateAdministratorClientAsync();

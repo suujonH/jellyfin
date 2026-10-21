@@ -99,10 +99,18 @@ internal sealed class NetworkHlsStore : IHlsStore
     }
 
     /// <inheritdoc />
-    public string? GetServerPath(string path) => _networkStorage.ResolveShortcutTarget(GetTarget(path));
+    public string? GetServerPath(string path)
+    {
+        // An archive is read for maintenance only; it is not played, as the files of a library in one are not.
+        var target = GetTarget(path);
+        return _networkStorage.IsArchived(target) ? null : _networkStorage.ResolveShortcutTarget(target);
+    }
 
     /// <inheritdoc />
     public Uri? GetClientAddress(string path) => _networkStorage.GetClientAddress(GetTarget(path));
+
+    /// <inheritdoc />
+    public TimeSpan GetClientAddressLifetime() => _networkStorage.GetClientAddressLifetime(GetTarget(HlsStorePaths.MarkerName));
 
     /// <inheritdoc />
     public async Task<bool> HasMarkerAsync(CancellationToken cancellationToken)

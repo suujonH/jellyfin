@@ -279,6 +279,20 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
     }
 
     /// <inheritdoc />
+    public TimeSpan GetClientAddressLifetime(string target)
+    {
+        if (!TryLocate(target, out var location, out var protocol))
+        {
+            return TimeSpan.Zero;
+        }
+
+        var access = FindAccess(protocol, location.Container);
+        return (protocol.RequiresAccess && access is null) || access?.Access.IsArchive == true
+            ? TimeSpan.Zero
+            : protocol.GetExternalAddressLifetime(access?.External);
+    }
+
+    /// <inheritdoc />
     public Uri? GetServerAddress(string target, string method)
     {
         if (!TryLocate(target, out var location, out var protocol))
