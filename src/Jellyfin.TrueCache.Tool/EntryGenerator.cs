@@ -174,17 +174,26 @@ internal sealed class EntryGenerator
         // A .strm with an entry is served like a local file, so its entry needs everything a local file's entry needs.
         // Everything is read from a local copy of the target, with the same code as for a local file.
         var isShortcut = (kind is TrueCacheKind.Video or TrueCacheKind.Audio) && TrueCacheLayout.IsShortcut(resourcePath);
+
+        // The modification time is read before the target: a .strm changed during the download names another target.
+        var info = File.Exists(resourcePath) ? new FileInfo(resourcePath) : null;
+        var modified = info?.LastWriteTimeUtc;
         var mediaPath = isShortcut ? await DownloadShortcutTargetAsync(resourcePath, cancellationToken).ConfigureAwait(false) : resourcePath;
         try
         {
-            if (File.Exists(resourcePath))
+            if (info is not null)
             {
+                info.Refresh();
+                if (info.LastWriteTimeUtc != modified)
+                {
+                    throw new InvalidOperationException(resourcePath + " changed while its entry was written.");
+                }
+
                 // The size of a .strm is the size of the media it names; the modification time is that of the .strm.
-                var info = new FileInfo(resourcePath);
                 root["source"] = new TomlTable
                 {
                     ["size"] = new FileInfo(mediaPath).Length,
-                    ["modified"] = new TomlDateTime(new DateTimeOffset(info.LastWriteTimeUtc), 3, TomlDateTimeKind.OffsetDateTimeByZ)
+                    ["modified"] = new TomlDateTime(new DateTimeOffset(modified!.Value), 3, TomlDateTimeKind.OffsetDateTimeByZ)
                 };
             }
 
