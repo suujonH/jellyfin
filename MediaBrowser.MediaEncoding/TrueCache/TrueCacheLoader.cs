@@ -265,6 +265,7 @@ public sealed class TrueCacheLoader
         return TrueCacheLookup.Valid(new TrueCacheEntry(resourcePath, directory, ToHashString(hash), manifest, mediaInfo, bluRay, keyframes, images, subtitles));
     }
 
+    // The declared size of a .strm is the size of the media it names, which is not read here; its modification time is that of the text file.
     private static void CheckSource(string resourcePath, TrueCacheManifest manifest, List<string> missing)
     {
         var info = new FileInfo(resourcePath);
@@ -272,7 +273,7 @@ public sealed class TrueCacheLoader
         {
             missing.Add("source.size");
         }
-        else if (manifest.SourceSize.Value != info.Length)
+        else if (!TrueCacheLayout.IsShortcut(resourcePath) && manifest.SourceSize.Value != info.Length)
         {
             throw new FormatException(string.Create(CultureInfo.InvariantCulture, $"source.size {manifest.SourceSize.Value} does not match the resource ({info.Length})"));
         }
@@ -353,11 +354,11 @@ public sealed class TrueCacheLoader
     {
         var kind = manifest.Kind;
         var video = manifest.Video;
-        var isShortcut = kind == TrueCacheKind.Video && resourcePath.EndsWith(StrmExtension, StringComparison.OrdinalIgnoreCase);
         BlurayDiscInfo? bluRay = null;
         KeyframeData? keyframes = null;
 
-        if (kind == TrueCacheKind.Video && !isShortcut && TrueCacheRules.TimestampContainers.Contains(mediaInfo.Container, StringComparer.OrdinalIgnoreCase))
+        // A .strm with an entry is served like a local file, so its entry holds everything a local file's entry holds.
+        if (kind == TrueCacheKind.Video && TrueCacheRules.TimestampContainers.Contains(mediaInfo.Container, StringComparer.OrdinalIgnoreCase))
         {
             if (video?.Timestamp is null)
             {
@@ -389,14 +390,13 @@ public sealed class TrueCacheLoader
         var streams = mediaInfo.MediaStreams;
         var hasVideo = streams.Any(s => s.Type == MediaStreamType.Video);
         var runtime = bluRay?.RunTimeTicks is > 0 ? bluRay.RunTimeTicks.Value : mediaInfo.RunTimeTicks ?? 0;
-        var extractsFromFile = !isShortcut;
 
-        if (hasVideo && extractsFromFile && kind != TrueCacheKind.Dvd && !files.Contains(TrueCacheLayout.ScreenGrabFile))
+        if (hasVideo && kind != TrueCacheKind.Dvd && !files.Contains(TrueCacheLayout.ScreenGrabFile))
         {
             missing.Add(TrueCacheLayout.ScreenGrabFile);
         }
 
-        if (extractsFromFile && kind != TrueCacheKind.Dvd)
+        if (kind != TrueCacheKind.Dvd)
         {
             var imageStreams = streams.Where(s => s.Type == MediaStreamType.EmbeddedImage).ToList();
             foreach (var type in TrueCacheRules.EmbeddedImageTypes)
@@ -409,7 +409,7 @@ public sealed class TrueCacheLoader
             }
         }
 
-        if (hasVideo && extractsFromFile)
+        if (hasVideo)
         {
             var chapters = TrueCacheRules.GetVideoChapters(mediaInfo.Chapters, bluRay?.Chapters, runtime, requirements.DummyChapterDuration);
             foreach (var chapter in TrueCacheRules.GetChaptersWithImages(chapters, runtime))
@@ -422,7 +422,7 @@ public sealed class TrueCacheLoader
             }
         }
 
-        if (kind == TrueCacheKind.Video && extractsFromFile && hasVideo && runtime >= TimeSpan.FromMilliseconds(requirements.TrickplayInterval).Ticks)
+        if (kind == TrueCacheKind.Video && hasVideo && runtime >= TimeSpan.FromMilliseconds(requirements.TrickplayInterval).Ticks)
         {
             var videoWidth = streams.FirstOrDefault(s => s.Type == MediaStreamType.Video)?.Width;
             foreach (var width in requirements.TrickplayWidths.Select(w => TrueCacheRules.GetTrickplayWidth(w, videoWidth)).Distinct())
@@ -462,7 +462,7 @@ public sealed class TrueCacheLoader
             }
         }
 
-        if (kind == TrueCacheKind.Video && extractsFromFile && hasVideo)
+        if (kind == TrueCacheKind.Video && hasVideo)
         {
             if (files.Contains(TrueCacheLayout.KeyframesFile))
             {

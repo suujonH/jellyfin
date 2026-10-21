@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,6 +12,7 @@ using Emby.Server.Implementations.ScheduledTasks.Tasks;
 using Jellyfin.Extensions;
 using Jellyfin.Extensions.Json;
 using Jellyfin.MediaEncoding.Keyframes;
+using MediaBrowser.Common.Net.S3;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.TrueCache;
@@ -37,6 +39,7 @@ namespace Jellyfin.TrueCache.Tool;
 internal sealed class EntryGenerator
 {
     private static readonly string[] _comicArchiveExtensions = [".cbz", ".cbr", ".cb7", ".cbt"];
+    private static readonly HttpClient _httpClient = new() { Timeout = System.Threading.Timeout.InfiniteTimeSpan };
 
     private readonly ToolServices _services;
     private readonly ILogger _logger;
@@ -168,34 +171,58 @@ internal sealed class EntryGenerator
             ["kind"] = KindName(kind)
         };
 
-        if (File.Exists(resourcePath))
-        {
-            var info = new FileInfo(resourcePath);
-            root["source"] = new TomlTable
-            {
-                ["size"] = info.Length,
-                ["modified"] = new TomlDateTime(new DateTimeOffset(info.LastWriteTimeUtc), 3, TomlDateTimeKind.OffsetDateTimeByZ)
-            };
-        }
+        // A .strm with an entry is served like a local file, so its entry needs everything a local file's entry needs.
+        // Everything is read from a local copy of the target, with the same code as for a local file.
+        var isShortcut = (kind is TrueCacheKind.Video or TrueCacheKind.Audio) && TrueCacheLayout.IsShortcut(resourcePath);
 
-        switch (kind)
+        // The modification time is read before the target: a .strm changed during the download names another target.
+        var info = File.Exists(resourcePath) ? new FileInfo(resourcePath) : null;
+        var modified = info?.LastWriteTimeUtc;
+        var mediaPath = isShortcut ? await DownloadShortcutTargetAsync(resourcePath, cancellationToken).ConfigureAwait(false) : resourcePath;
+        try
         {
-            case TrueCacheKind.Video:
-            case TrueCacheKind.Dvd:
-            case TrueCacheKind.BluRay:
-                await WriteVideoAsync(resourcePath, directory, kind, root, cancellationToken).ConfigureAwait(false);
-                break;
-            case TrueCacheKind.Audio:
-                await WriteAudioAsync(resourcePath, directory, root, cancellationToken).ConfigureAwait(false);
-                break;
-            case TrueCacheKind.Book:
-                await WriteBookAsync(resourcePath, directory, root, cancellationToken).ConfigureAwait(false);
-                break;
-            case TrueCacheKind.Photo:
-                root["photo"] = PhotoTags.Read(resourcePath, _services.ImageEncoder, _logger);
-                break;
-            default:
-                throw new ArgumentException("Albums are written with the album command.", nameof(kind));
+            if (info is not null)
+            {
+                info.Refresh();
+                if (info.LastWriteTimeUtc != modified)
+                {
+                    throw new InvalidOperationException(resourcePath + " changed while its entry was written.");
+                }
+
+                // The size of a .strm is the size of the media it names; the modification time is that of the .strm.
+                root["source"] = new TomlTable
+                {
+                    ["size"] = new FileInfo(mediaPath).Length,
+                    ["modified"] = new TomlDateTime(new DateTimeOffset(modified!.Value), 3, TomlDateTimeKind.OffsetDateTimeByZ)
+                };
+            }
+
+            switch (kind)
+            {
+                case TrueCacheKind.Video:
+                case TrueCacheKind.Dvd:
+                case TrueCacheKind.BluRay:
+                    await WriteVideoAsync(resourcePath, mediaPath, directory, kind, root, cancellationToken).ConfigureAwait(false);
+                    break;
+                case TrueCacheKind.Audio:
+                    await WriteAudioAsync(resourcePath, mediaPath, directory, root, cancellationToken).ConfigureAwait(false);
+                    break;
+                case TrueCacheKind.Book:
+                    await WriteBookAsync(resourcePath, directory, root, cancellationToken).ConfigureAwait(false);
+                    break;
+                case TrueCacheKind.Photo:
+                    root["photo"] = PhotoTags.Read(resourcePath, _services.ImageEncoder, _logger);
+                    break;
+                default:
+                    throw new ArgumentException("Albums are written with the album command.", nameof(kind));
+            }
+        }
+        finally
+        {
+            if (isShortcut)
+            {
+                File.Delete(mediaPath);
+            }
         }
 
         await File.WriteAllTextAsync(Path.Combine(directory, TrueCacheLayout.MetaFile), Toml.FromModel(root), cancellationToken).ConfigureAwait(false);
@@ -219,18 +246,57 @@ internal sealed class EntryGenerator
         File.Move(source, target, true);
     }
 
-    private static string ReadShortcutTarget(string path)
-        => File.ReadAllLines(path)
+    /// <summary>
+    /// Downloads the target of a .strm into the work folder. The copy keeps the extension of the target, which decides,
+    /// as for a local file, how the keyframes are read.
+    /// </summary>
+    private async Task<string> DownloadShortcutTargetAsync(string resourcePath, CancellationToken cancellationToken)
+    {
+        var target = ReadShortcutTarget(resourcePath);
+        if (!Uri.TryCreate(target, UriKind.Absolute, out var uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new InvalidOperationException("Only http, https and s3 targets can be read in full; " + resourcePath + " names " + target + ".");
+        }
+
+        var copy = Path.Combine(_services.WorkDirectory, Guid.NewGuid().ToString("N") + Path.GetExtension(uri.AbsolutePath));
+        _logger.LogInformation("Downloading the target of {Path}", resourcePath);
+        using var response = await _httpClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        try
+        {
+            var file = File.Create(copy);
+            await using (file.ConfigureAwait(false))
+            {
+                await response.Content.CopyToAsync(file, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            // A batch goes on with the next resource; a partial copy of a large media file must not stay behind.
+            File.Delete(copy);
+            throw;
+        }
+
+        return copy;
+    }
+
+    private string ReadShortcutTarget(string path)
+    {
+        var target = File.ReadAllLines(path)
             .Select(l => l.Replace("\t", string.Empty, StringComparison.Ordinal).Trim())
             .FirstOrDefault(l => l.Length != 0 && !l.StartsWith('#'))
             ?? throw new InvalidOperationException(path + " names no target.");
 
-    private async Task WriteVideoAsync(string resourcePath, string directory, TrueCacheKind kind, TomlTable root, CancellationToken cancellationToken)
+        // An s3:// target is read through an address presigned with the server's network storage accesses.
+        return _services.NetworkStorage.ResolveShortcutTarget(target)
+            ?? throw new InvalidOperationException("No network storage access covers " + target + "; pass --server-data with the server's data folder.");
+    }
+
+    // The entry describes resourcePath; mediaPath is the file read: the resource itself, or the local copy of the target of a .strm.
+    private async Task WriteVideoAsync(string resourcePath, string mediaPath, string directory, TrueCacheKind kind, TomlTable root, CancellationToken cancellationToken)
     {
         var encoder = _services.Encoder;
-        var isShortcut = kind == TrueCacheKind.Video && resourcePath.EndsWith(".strm", StringComparison.OrdinalIgnoreCase);
-        var protocol = isShortcut ? MediaProtocol.Http : MediaProtocol.File;
-        var probePath = isShortcut ? ReadShortcutTarget(resourcePath) : resourcePath;
+        var probePath = mediaPath;
         BlurayDiscInfo? bluRay = null;
         IReadOnlyList<string> vobs = [];
 
@@ -246,7 +312,7 @@ internal sealed class EntryGenerator
             probePath = vobs.Count > 0 ? vobs[0] : throw new InvalidOperationException("The DVD folder has no playable .vob files.");
         }
 
-        var json = await ProbeAsync(probePath, protocol, DlnaProfileType.Video, cancellationToken).ConfigureAwait(false);
+        var json = await ProbeAsync(probePath, MediaProtocol.File, DlnaProfileType.Video, cancellationToken).ConfigureAwait(false);
         await File.WriteAllTextAsync(Path.Combine(directory, TrueCacheLayout.ProbeFile), json, cancellationToken).ConfigureAwait(false);
         var info = _services.Loader.NormalizeProbe(json, resourcePath, kind);
 
@@ -275,9 +341,9 @@ internal sealed class EntryGenerator
             }
         }
 
-        if (kind == TrueCacheKind.Video && !isShortcut && TrueCacheRules.TimestampContainers.Contains(info.Container, StringComparer.OrdinalIgnoreCase))
+        if (kind == TrueCacheKind.Video && TrueCacheRules.TimestampContainers.Contains(info.Container, StringComparer.OrdinalIgnoreCase))
         {
-            video["timestamp"] = ProbeResultNormalizer.GetMpegTimestamp(resourcePath).ToString().ToLowerInvariant();
+            video["timestamp"] = ProbeResultNormalizer.GetMpegTimestamp(mediaPath).ToString().ToLowerInvariant();
         }
 
         var videoType = kind switch
@@ -289,27 +355,27 @@ internal sealed class EntryGenerator
         var videoStream = info.MediaStreams.FirstOrDefault(s => s.Type == MediaStreamType.Video);
         var imageSource = new MediaSourceInfo { VideoType = videoType, Protocol = MediaProtocol.File };
 
-        if (!isShortcut && kind != TrueCacheKind.Dvd)
+        if (kind != TrueCacheKind.Dvd)
         {
             if (videoStream is not null)
             {
                 // The screen grabber takes the frame at 10% of the runtime.
                 var offset = runtime > 0 ? TimeSpan.FromTicks(runtime / 10) : TimeSpan.FromSeconds(10);
-                var grab = await encoder.ExtractVideoImage(resourcePath, info.Container, imageSource, videoStream, info.Video3DFormat, offset, cancellationToken).ConfigureAwait(false);
+                var grab = await encoder.ExtractVideoImage(mediaPath, info.Container, imageSource, videoStream, info.Video3DFormat, offset, cancellationToken).ConfigureAwait(false);
                 MoveInto(grab, Path.Combine(directory, TrueCacheLayout.ScreenGrabFile));
             }
 
-            await WriteEmbeddedImagesAsync(resourcePath, directory, info, imageSource, cancellationToken).ConfigureAwait(false);
+            await WriteEmbeddedImagesAsync(mediaPath, directory, info, imageSource, cancellationToken).ConfigureAwait(false);
         }
 
-        if (!isShortcut && videoStream is not null)
+        if (videoStream is not null)
         {
             var chapters = TrueCacheRules.GetVideoChapters(info.Chapters, bluRay?.Chapters, runtime, _services.Config.Configuration.DummyChapterDuration);
             foreach (var chapter in TrueCacheRules.GetChaptersWithImages(chapters, runtime))
             {
                 // The first chapter is grabbed a little later, as the chapter manager does, to avoid a black frame.
                 var time = chapter.StartPositionTicks == 0 ? TimeSpan.FromTicks(Math.Min(TimeSpan.FromSeconds(15).Ticks, runtime)) : TimeSpan.FromTicks(chapter.StartPositionTicks);
-                var image = await encoder.ExtractVideoImage(resourcePath, info.Container, imageSource, videoStream, info.Video3DFormat, time, cancellationToken).ConfigureAwait(false);
+                var image = await encoder.ExtractVideoImage(mediaPath, info.Container, imageSource, videoStream, info.Video3DFormat, time, cancellationToken).ConfigureAwait(false);
                 MoveInto(image, Path.Combine(directory, TrueCacheLayout.ChaptersFolder, chapter.StartPositionTicks.ToString(CultureInfo.InvariantCulture) + ".jpg"));
             }
         }
@@ -317,8 +383,8 @@ internal sealed class EntryGenerator
         var source = new MediaSourceInfo
         {
             Id = Guid.NewGuid().ToString("N"),
-            Path = kind == TrueCacheKind.Video ? probePath : resourcePath,
-            Protocol = protocol,
+            Path = mediaPath,
+            Protocol = MediaProtocol.File,
             VideoType = videoType,
             Container = info.Container,
             RunTimeTicks = runtime,
@@ -327,18 +393,18 @@ internal sealed class EntryGenerator
             MediaAttachments = info.MediaAttachments
         };
 
-        if (kind == TrueCacheKind.Video && !isShortcut && videoStream is not null
+        if (kind == TrueCacheKind.Video && videoStream is not null
             && runtime >= TimeSpan.FromMilliseconds(_services.Config.Configuration.TrickplayOptions.Interval).Ticks)
         {
-            video["trickplay"] = await WriteTrickplayAsync(resourcePath, directory, info, source, videoStream, cancellationToken).ConfigureAwait(false);
+            video["trickplay"] = await WriteTrickplayAsync(mediaPath, directory, info, source, videoStream, cancellationToken).ConfigureAwait(false);
         }
 
         await WriteSubtitlesAsync(directory, source, bluRay?.MediaStreams ?? info.MediaStreams, cancellationToken).ConfigureAwait(false);
         await WriteAttachmentsAsync(directory, source, cancellationToken).ConfigureAwait(false);
 
-        if (kind == TrueCacheKind.Video && !isShortcut && videoStream is not null)
+        if (kind == TrueCacheKind.Video && videoStream is not null)
         {
-            var keyframes = ExtractKeyframes(resourcePath);
+            var keyframes = ExtractKeyframes(mediaPath);
             await File.WriteAllTextAsync(Path.Combine(directory, TrueCacheLayout.KeyframesFile), JsonSerializer.Serialize(keyframes, JsonDefaults.Options), cancellationToken).ConfigureAwait(false);
         }
 
@@ -498,18 +564,17 @@ internal sealed class EntryGenerator
         return MediaEncoding.Keyframes.FfProbe.FfProbeKeyframeExtractor.GetKeyframeData(_services.Encoder.ProbePath, path);
     }
 
-    private async Task WriteAudioAsync(string resourcePath, string directory, TomlTable root, CancellationToken cancellationToken)
+    // The entry describes resourcePath; mediaPath is the file read: the resource itself, or the local copy of the target of a .strm.
+    private async Task WriteAudioAsync(string resourcePath, string mediaPath, string directory, TomlTable root, CancellationToken cancellationToken)
     {
-        var isShortcut = resourcePath.EndsWith(".strm", StringComparison.OrdinalIgnoreCase);
-        var probePath = isShortcut ? ReadShortcutTarget(resourcePath) : resourcePath;
-        var json = await ProbeAsync(probePath, isShortcut ? MediaProtocol.Http : MediaProtocol.File, DlnaProfileType.Audio, cancellationToken).ConfigureAwait(false);
+        var json = await ProbeAsync(mediaPath, MediaProtocol.File, DlnaProfileType.Audio, cancellationToken).ConfigureAwait(false);
         await File.WriteAllTextAsync(Path.Combine(directory, TrueCacheLayout.ProbeFile), json, cancellationToken).ConfigureAwait(false);
         var info = _services.Loader.NormalizeProbe(json, resourcePath, TrueCacheKind.Audio);
 
-        var tags = AudioTagValues.FromFile(resourcePath);
+        var tags = AudioTagValues.FromFile(mediaPath);
         var lufs = await AudioNormalizationTask.CalculateLUFSAsync(
             _services.Encoder.EncoderPath,
-            string.Format(CultureInfo.InvariantCulture, "-i \"{0}\"", probePath.EscapeProcessArgument()),
+            string.Format(CultureInfo.InvariantCulture, "-i \"{0}\"", mediaPath.EscapeProcessArgument()),
             false,
             _logger,
             cancellationToken).ConfigureAwait(false) ?? throw new InvalidOperationException("ffmpeg reported no loudness.");
@@ -523,7 +588,7 @@ internal sealed class EntryGenerator
         var imageStreams = info.MediaStreams.Where(s => s.Type == MediaStreamType.EmbeddedImage).ToList();
         if (TrueCacheRules.FindAudioImage(imageStreams) is { } cover)
         {
-            var image = await _services.Encoder.ExtractAudioImage(resourcePath, cover.Index, cancellationToken).ConfigureAwait(false);
+            var image = await _services.Encoder.ExtractAudioImage(mediaPath, cover.Index, cancellationToken).ConfigureAwait(false);
             MoveInto(image, Path.Combine(directory, TrueCacheLayout.ImagesFolder, "primary.jpg"));
         }
 

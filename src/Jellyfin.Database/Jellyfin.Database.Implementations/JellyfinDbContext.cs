@@ -173,6 +173,21 @@ public class JellyfinDbContext(DbContextOptions<JellyfinDbContext> options, ILog
     /// </summary>
     public DbSet<KeyframeData> KeyframeData => Set<KeyframeData>();
 
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing the network storage accesses.
+    /// </summary>
+    public DbSet<NetworkStorageAccess> NetworkStorageAccesses => Set<NetworkStorageAccess>();
+
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing how network storage is published to clients.
+    /// </summary>
+    public DbSet<NetworkStorageExternalAddress> NetworkStorageExternalAddresses => Set<NetworkStorageExternalAddress>();
+
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing the network resources that could not be read.
+    /// </summary>
+    public DbSet<NetworkStorageFailure> NetworkStorageFailures => Set<NetworkStorageFailure>();
+
     /*public DbSet<Artwork> Artwork => Set<Artwork>();
 
     public DbSet<Book> Books => Set<Book>();

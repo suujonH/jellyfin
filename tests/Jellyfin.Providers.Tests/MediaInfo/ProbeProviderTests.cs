@@ -8,6 +8,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Controller.Lyrics;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Subtitles;
@@ -51,7 +52,8 @@ public class ProbeProviderTests
             Mock.Of<ILyricManager>(),
             Mock.Of<IMediaAttachmentRepository>(),
             Mock.Of<IMediaStreamRepository>(),
-            NoTrueCacheService.Instance);
+            NoTrueCacheService.Instance,
+            Mock.Of<INetworkStorageManager>());
     }
 
     [Fact]

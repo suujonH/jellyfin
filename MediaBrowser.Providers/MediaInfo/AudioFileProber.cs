@@ -8,11 +8,13 @@ using ATL;
 using Jellyfin.Data.Enums;
 using Jellyfin.Extensions;
 using MediaBrowser.Controller.Chapters;
+using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Lyrics;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.TrueCache;
@@ -21,6 +23,7 @@ using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Extensions;
 using MediaBrowser.Model.MediaInfo;
+using MediaBrowser.Model.NetworkStorage;
 using Microsoft.Extensions.Logging;
 using static Jellyfin.Extensions.StringExtensions;
 
@@ -42,6 +45,7 @@ namespace MediaBrowser.Providers.MediaInfo
         private readonly IMediaStreamRepository _mediaStreamRepository;
         private readonly IChapterManager _chapterManager;
         private readonly ITrueCacheService _trueCache;
+        private readonly INetworkStorageManager _networkStorage;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="AudioFileProber"/> class.
@@ -55,6 +59,7 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <param name="mediaStreamRepository">Instance of the <see cref="IMediaStreamRepository"/>.</param>
         /// <param name="chapterManager">Instance of the <see cref="IChapterManager"/> interface.</param>
         /// <param name="trueCache">Instance of the <see cref="ITrueCacheService"/> interface.</param>
+        /// <param name="networkStorage">Instance of the <see cref="INetworkStorageManager"/> interface.</param>
         public AudioFileProber(
             ILogger<AudioFileProber> logger,
             IMediaSourceManager mediaSourceManager,
@@ -64,7 +69,8 @@ namespace MediaBrowser.Providers.MediaInfo
             ILyricManager lyricManager,
             IMediaStreamRepository mediaStreamRepository,
             IChapterManager chapterManager,
-            ITrueCacheService trueCache)
+            ITrueCacheService trueCache,
+            INetworkStorageManager networkStorage)
         {
             _mediaEncoder = mediaEncoder;
             _libraryManager = libraryManager;
@@ -73,6 +79,7 @@ namespace MediaBrowser.Providers.MediaInfo
             _lyricResolver = lyricResolver;
             _lyricManager = lyricManager;
             _mediaStreamRepository = mediaStreamRepository;
+            _networkStorage = networkStorage;
             _chapterManager = chapterManager;
             _trueCache = trueCache;
             ATL.Settings.DisplayValueSeparator = InternalValueSeparator;
@@ -115,22 +122,33 @@ namespace MediaBrowser.Providers.MediaInfo
             {
                 if (item.IsShortcut)
                 {
-                    path = item.ShortcutPath;
+                    path = _networkStorage.ResolveShortcutTarget(item.ShortcutPath)
+                        ?? throw new InvalidOperationException("No network storage access covers " + item.ShortcutPath);
                     protocol = _mediaSourceManager.GetPathProtocol(path);
                 }
 
-                var result = await _mediaEncoder.GetMediaInfo(
-                    new MediaInfoRequest
-                    {
-                        MediaType = DlnaProfileType.Audio,
-                        ExtractChapters = item is AudioBook,
-                        MediaSource = new MediaSourceInfo
+                Model.MediaInfo.MediaInfo result;
+                try
+                {
+                    result = await _mediaEncoder.GetMediaInfo(
+                        new MediaInfoRequest
                         {
-                            Path = path,
-                            Protocol = protocol
-                        }
-                    },
-                    cancellationToken).ConfigureAwait(false);
+                            MediaType = DlnaProfileType.Audio,
+                            ExtractChapters = item is AudioBook,
+                            MediaSource = new MediaSourceInfo
+                            {
+                                Path = path,
+                                Protocol = protocol
+                            }
+                        },
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (item.IsShortcut && ex is not OperationCanceledException)
+                {
+                    // Recorded only when the target is missing or not permitted.
+                    await _networkStorage.ReportAccessFailureAsync(item.Id, NetworkStorageFailureSource.Probe, item.ShortcutPath, cancellationToken).ConfigureAwait(false);
+                    throw;
+                }
 
                 cancellationToken.ThrowIfCancellationRequested();
 

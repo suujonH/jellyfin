@@ -58,6 +58,7 @@ internal sealed class ToolServices : IDisposable
             Path.Combine(WorkDirectory, "web"));
         Config = new ServerConfigurationManager(AppPaths, loggerFactory, new MyXmlSerializer());
         Config.AddParts([new EncodingConfigurationFactory()]);
+        NetworkStorage = ToolNetworkStorage.Load(options.ServerDataDirectory);
         ApplyOverrides(Config.Configuration, options);
 
         var configuration = new ConfigurationBuilder()
@@ -122,6 +123,8 @@ internal sealed class ToolServices : IDisposable
     public IApplicationPaths AppPaths { get; }
 
     public ServerConfigurationManager Config { get; }
+
+    public ToolNetworkStorage NetworkStorage { get; }
 
     public ManagedFileSystem FileSystem { get; }
 

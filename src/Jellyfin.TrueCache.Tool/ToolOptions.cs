@@ -24,6 +24,8 @@ internal sealed class ToolOptions
           --ffmpeg <path>              ffmpeg executable; ffprobe must be next to it (default: ffmpeg)
           --server-config <folder>     the server's configuration folder; its system.xml and encoding.xml
                                        decide the trickplay, chapter and encoding settings
+          --server-data <folder>       the server's data folder; the network storage accesses of its jellyfin.db
+                                       are used to read s3:// targets of .strm files
           --trickplay-widths <w,...>   trickplay widths (default: the server's, 320)
           --trickplay-interval <ms>    trickplay interval in milliseconds (default: the server's, 10000)
           --trickplay-tile <WxH>       thumbnails per tile (default: the server's, 10x10)
@@ -39,6 +41,8 @@ internal sealed class ToolOptions
     public string FfmpegPath { get; private init; } = "ffmpeg";
 
     public string? ServerConfigDirectory { get; private init; }
+
+    public string? ServerDataDirectory { get; private init; }
 
     public int[]? TrickplayWidths { get; private init; }
 
@@ -68,6 +72,7 @@ internal sealed class ToolOptions
         var paths = new List<string>();
         string ffmpeg = "ffmpeg";
         string? config = null;
+        string? data = null;
         int[]? widths = null;
         int? interval = null;
         (int, int)? tile = null;
@@ -86,6 +91,9 @@ internal sealed class ToolOptions
                     break;
                 case "--server-config":
                     config = Next();
+                    break;
+                case "--server-data":
+                    data = Next();
                     break;
                 case "--trickplay-widths":
                     widths = Next().Split(',').Select(w => ParsePositive(w, "--trickplay-widths")).ToArray();
@@ -140,6 +148,7 @@ internal sealed class ToolOptions
             Paths = paths,
             FfmpegPath = ffmpeg,
             ServerConfigDirectory = config,
+            ServerDataDirectory = data,
             TrickplayWidths = widths,
             TrickplayInterval = interval,
             TrickplayTile = tile,

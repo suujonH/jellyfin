@@ -6,9 +6,12 @@ using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Extensions;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.Streaming;
+using MediaBrowser.Model.NetworkStorage;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Net.Http.Headers;
 
 namespace Jellyfin.Api.Helpers;
@@ -55,6 +58,15 @@ public static class FileStreamResponseHelpers
         // Send the request to the upstream server
         // Use ResponseHeadersRead to avoid downloading the whole content immediately
         var response = await httpClient.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode
+            && !string.IsNullOrEmpty(state.MediaSource?.ShortcutTarget)
+            && Guid.TryParse(state.MediaSource.Id, out var itemId)
+            && httpContext.RequestServices.GetService<INetworkStorageManager>() is { } networkStorage)
+        {
+            // Checked and recorded in the background, only when the resource is missing or not permitted.
+            _ = networkStorage.ReportAccessFailureAsync(itemId, NetworkStorageFailureSource.Playback, null, CancellationToken.None);
+        }
 
         // Check if the upstream server supports range requests and acted upon our Range header
         bool upstreamSupportsRange = response.StatusCode == System.Net.HttpStatusCode.PartialContent;

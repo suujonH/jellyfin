@@ -15,7 +15,7 @@ namespace Jellyfin.Server.Implementations.Migrations
         protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
-            modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
+            modelBuilder.HasAnnotation("ProductVersion", "10.0.12");
 
             modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.AccessSchedule", b =>
                 {
@@ -1024,6 +1024,133 @@ namespace Jellyfin.Server.Implementations.Migrations
                     b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
                 });
 
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.NetworkStorageAccess", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AccessKey")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Bucket")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("DateCreated")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("DateModified")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Endpoint")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsArchive")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Name")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Protocol")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Region")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SecretKey")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SessionToken")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Settings")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("UrlLifetimeSeconds")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("UsePathStyle")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Protocol", "Bucket")
+                        .IsUnique();
+
+                    b.ToTable("NetworkStorageAccesses");
+
+                    b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.NetworkStorageExternalAddress", b =>
+                {
+                    b.Property<Guid>("AccessId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("AuthMode")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("BaseUrl")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsPublic")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Secret")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("UrlLifetimeSeconds")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("AccessId");
+
+                    b.ToTable("NetworkStorageExternalAddresses");
+
+                    b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.NetworkStorageFailure", b =>
+                {
+                    b.Property<Guid>("ItemId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Count")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("DateFirstFailed")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("DateLastFailed")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Issue")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Source")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("StatusCode")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("StorageKey")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Target")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("ItemId");
+
+                    b.HasIndex("StorageKey");
+
+                    b.ToTable("NetworkStorageFailures");
+
+                    b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
+                });
+
             modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.People", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1674,6 +1801,28 @@ namespace Jellyfin.Server.Implementations.Migrations
                     b.Navigation("Item");
                 });
 
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.NetworkStorageExternalAddress", b =>
+                {
+                    b.HasOne("Jellyfin.Database.Implementations.Entities.NetworkStorageAccess", "Access")
+                        .WithOne("ExternalAddress")
+                        .HasForeignKey("Jellyfin.Database.Implementations.Entities.NetworkStorageExternalAddress", "AccessId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Access");
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.NetworkStorageFailure", b =>
+                {
+                    b.HasOne("Jellyfin.Database.Implementations.Entities.BaseItemEntity", "Item")
+                        .WithMany()
+                        .HasForeignKey("ItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Item");
+                });
+
             modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.PeopleBaseItemMap", b =>
                 {
                     b.HasOne("Jellyfin.Database.Implementations.Entities.BaseItemEntity", "Item")
@@ -1782,6 +1931,11 @@ namespace Jellyfin.Server.Implementations.Migrations
             modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.ItemValue", b =>
                 {
                     b.Navigation("BaseItemsMap");
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.NetworkStorageAccess", b =>
+                {
+                    b.Navigation("ExternalAddress");
                 });
 
             modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.People", b =>

@@ -25,6 +25,7 @@ using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaSegments;
+using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.TrueCache;
@@ -529,6 +530,11 @@ namespace MediaBrowser.Controller.Entities
         /// Gets or sets the <c>__true_cache__</c> lookup; resources with a rejected entry are treated like missing files.
         /// </summary>
         public static ITrueCacheService TrueCache { get; set; } = NoTrueCacheService.Instance;
+
+        /// <summary>
+        /// Gets or sets the network storage the targets of .strm files are read from.
+        /// </summary>
+        public static INetworkStorageManager NetworkStorage { get; set; }
 
         /// <summary>
         /// Gets or sets the name of the forced sort.
@@ -1229,7 +1235,10 @@ namespace MediaBrowser.Controller.Entities
                 Type = type,
                 HasSegments = MediaSegmentManager.IsTypeSupported(item)
                     && (protocol is null or MediaProtocol.File)
-                    && MediaSegmentManager.HasSegments(item.Id)
+                    && MediaSegmentManager.HasSegments(item.Id),
+                HasTrueCache = (protocol is null or MediaProtocol.File)
+                    && !string.IsNullOrEmpty(itemPath)
+                    && TrueCache.Lookup(itemPath).IsValid
             };
 
             if (string.IsNullOrEmpty(info.Path))
@@ -1242,6 +1251,32 @@ namespace MediaBrowser.Controller.Entities
                 info.ETag = item.DateModified.Ticks.ToString(CultureInfo.InvariantCulture).GetMD5().ToString("N", CultureInfo.InvariantCulture);
             }
 
+            if (item.IsShortcut && !string.IsNullOrEmpty(item.ShortcutPath))
+            {
+                // An s3:// target is signed here, each time the source is built, so the address handed to
+                // ffmpeg is always fresh; a storage published at an external address is read there. Before a source
+                // goes to a client, INetworkStorageManager.PrepareForClient replaces the address, which may carry
+                // the server's credentials.
+                var shortcutTarget = NetworkStorage is null ? item.ShortcutPath : NetworkStorage.ResolveShortcutTarget(item.ShortcutPath);
+                if (shortcutTarget is null)
+                {
+                    Logger.LogWarning("No network storage access covers {Target} named by {Path}", item.ShortcutPath, item.Path);
+                    shortcutTarget = item.ShortcutPath;
+                }
+
+                var shortcutProtocol = MediaSourceManager.GetPathProtocol(shortcutTarget);
+
+                // Only allow remote shortcut paths — local file paths in .strm files
+                // could be used to read arbitrary files from the server.
+                if (shortcutProtocol != MediaProtocol.File)
+                {
+                    info.ShortcutTarget = item.ShortcutPath;
+                    info.IsRemote = true;
+                    info.Path = shortcutTarget;
+                    info.Protocol = shortcutProtocol;
+                }
+            }
+
             var video = item as Video;
             if (video is not null)
             {
@@ -1249,20 +1284,6 @@ namespace MediaBrowser.Controller.Entities
                 info.VideoType = video.VideoType;
                 info.Video3DFormat = video.Video3DFormat;
                 info.Timestamp = video.Timestamp;
-
-                if (video.IsShortcut && !string.IsNullOrEmpty(video.ShortcutPath))
-                {
-                    var shortcutProtocol = MediaSourceManager.GetPathProtocol(video.ShortcutPath);
-
-                    // Only allow remote shortcut paths — local file paths in .strm files
-                    // could be used to read arbitrary files from the server.
-                    if (shortcutProtocol != MediaProtocol.File)
-                    {
-                        info.IsRemote = true;
-                        info.Path = video.ShortcutPath;
-                        info.Protocol = shortcutProtocol;
-                    }
-                }
 
                 if (string.IsNullOrEmpty(info.Container))
                 {

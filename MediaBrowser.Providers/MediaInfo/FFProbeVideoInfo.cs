@@ -15,6 +15,7 @@ using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Subtitles;
@@ -25,6 +26,7 @@ using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.MediaInfo;
+using MediaBrowser.Model.NetworkStorage;
 using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.Providers.MediaInfo
@@ -45,6 +47,7 @@ namespace MediaBrowser.Providers.MediaInfo
         private readonly IMediaAttachmentRepository _mediaAttachmentRepository;
         private readonly IMediaStreamRepository _mediaStreamRepository;
         private readonly ITrueCacheService _trueCache;
+        private readonly INetworkStorageManager _networkStorage;
 
         public FFProbeVideoInfo(
             ILogger<FFProbeVideoInfo> logger,
@@ -60,7 +63,8 @@ namespace MediaBrowser.Providers.MediaInfo
             SubtitleResolver subtitleResolver,
             IMediaAttachmentRepository mediaAttachmentRepository,
             IMediaStreamRepository mediaStreamRepository,
-            ITrueCacheService trueCache)
+            ITrueCacheService trueCache,
+            INetworkStorageManager networkStorage)
         {
             _logger = logger;
             _mediaSourceManager = mediaSourceManager;
@@ -76,6 +80,7 @@ namespace MediaBrowser.Providers.MediaInfo
             _mediaAttachmentRepository = mediaAttachmentRepository;
             _mediaStreamRepository = mediaStreamRepository;
             _trueCache = trueCache;
+            _networkStorage = networkStorage;
         }
 
         public async Task<ItemUpdateType> ProbeVideo<T>(
@@ -169,7 +174,7 @@ namespace MediaBrowser.Providers.MediaInfo
             return ItemUpdateType.MetadataImport;
         }
 
-        private Task<Model.MediaInfo.MediaInfo> GetMediaInfo(
+        private async Task<Model.MediaInfo.MediaInfo> GetMediaInfo(
             Video item,
             CancellationToken cancellationToken)
         {
@@ -178,12 +183,28 @@ namespace MediaBrowser.Providers.MediaInfo
             var path = item.Path;
             var protocol = item.PathProtocol ?? MediaProtocol.File;
 
-            if (item.IsShortcut)
+            if (!item.IsShortcut)
             {
-                path = item.ShortcutPath;
-                protocol = _mediaSourceManager.GetPathProtocol(path);
+                return await GetMediaInfo(item, path, protocol, cancellationToken).ConfigureAwait(false);
             }
 
+            path = _networkStorage.ResolveShortcutTarget(item.ShortcutPath)
+                ?? throw new InvalidOperationException("No network storage access covers " + item.ShortcutPath);
+            protocol = _mediaSourceManager.GetPathProtocol(path);
+            try
+            {
+                return await GetMediaInfo(item, path, protocol, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Recorded only when the target is missing or not permitted.
+                await _networkStorage.ReportAccessFailureAsync(item.Id, NetworkStorageFailureSource.Probe, item.ShortcutPath, cancellationToken).ConfigureAwait(false);
+                throw;
+            }
+        }
+
+        private Task<Model.MediaInfo.MediaInfo> GetMediaInfo(Video item, string path, MediaProtocol protocol, CancellationToken cancellationToken)
+        {
             return _mediaEncoder.GetMediaInfo(
                 new MediaInfoRequest
                 {

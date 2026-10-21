@@ -29,4 +29,18 @@ public static class TrueCacheServiceExtensions
         return lookup.State != TrueCacheState.Rejected
             && !string.Equals(lookup.Entry?.Hash, item.TrueCacheHash, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// Gets the size the library records for a file: the size its valid entry declares, which for a .strm is the size of
+    /// the media it names, or else the size of the file itself.
+    /// </summary>
+    /// <param name="trueCache">The <c>__true_cache__</c> lookup.</param>
+    /// <param name="path">The file.</param>
+    /// <param name="fileLength">The size of the file.</param>
+    /// <returns>The size.</returns>
+    public static long GetResourceSize(this ITrueCacheService trueCache, string path, long fileLength)
+    {
+        var lookup = trueCache.Lookup(path);
+        return lookup.IsValid && lookup.Entry.MediaSize is { } size ? size : fileLength;
+    }
 }

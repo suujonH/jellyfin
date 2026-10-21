@@ -597,6 +597,24 @@ namespace Jellyfin.Model.Tests
             return streamInfo;
         }
 
+        [Theory]
+        [InlineData(false, false, PlayMethod.Transcode)]
+        [InlineData(true, false, PlayMethod.DirectPlay)]
+        [InlineData(true, true, PlayMethod.Transcode)]
+        public async Task BuildVideoItem_BitrateOverTheLimit_IsCheckedUnlessRemoteAndUnknown(bool isRemote, bool hasTrueCache, PlayMethod playMethod)
+        {
+            // A remote source's bitrate is not trusted, unless its __true_cache__ entry declares it as a local file's, as for a .strm.
+            var options = await GetMediaOptions("Chrome", "mp4-h264-aac-vtt-2600k");
+            options.MediaSources[0].IsRemote = isRemote;
+            options.MediaSources[0].HasTrueCache = hasTrueCache;
+            options.MaxBitrate = 1000000;
+
+            var streamInfo = GetStreamBuilder().GetOptimalVideoStream(options);
+
+            Assert.NotNull(streamInfo);
+            Assert.Equal(playMethod, streamInfo.PlayMethod);
+        }
+
         private static async ValueTask<T> TestData<T>(string name)
         {
             var path = Path.Join("Test Data", typeof(T).Name + "-" + name + ".json");

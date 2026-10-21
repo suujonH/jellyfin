@@ -7,6 +7,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Emby.Naming.Common;
+using MediaBrowser.Common.Net.S3;
 using MediaBrowser.Controller.Chapters;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
@@ -16,6 +17,7 @@ using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Lyrics;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Subtitles;
@@ -73,6 +75,7 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <param name="mediaAttachmentRepository">Instance of the <see cref="IMediaAttachmentRepository"/> interface.</param>
         /// <param name="mediaStreamRepository">Instance of the <see cref="IMediaStreamRepository"/> interface.</param>
         /// <param name="trueCache">Instance of the <see cref="ITrueCacheService"/> interface.</param>
+        /// <param name="networkStorage">Instance of the <see cref="INetworkStorageManager"/> interface.</param>
         public ProbeProvider(
             IMediaSourceManager mediaSourceManager,
             IMediaEncoder mediaEncoder,
@@ -88,7 +91,8 @@ namespace MediaBrowser.Providers.MediaInfo
             ILyricManager lyricManager,
             IMediaAttachmentRepository mediaAttachmentRepository,
             IMediaStreamRepository mediaStreamRepository,
-            ITrueCacheService trueCache)
+            ITrueCacheService trueCache,
+            INetworkStorageManager networkStorage)
         {
             _logger = loggerFactory.CreateLogger<ProbeProvider>();
             _trueCache = trueCache;
@@ -110,7 +114,8 @@ namespace MediaBrowser.Providers.MediaInfo
                 _subtitleResolver,
                 mediaAttachmentRepository,
                 mediaStreamRepository,
-                trueCache);
+                trueCache,
+                networkStorage);
 
             _audioProber = new AudioFileProber(
                 loggerFactory.CreateLogger<AudioFileProber>(),
@@ -121,7 +126,8 @@ namespace MediaBrowser.Providers.MediaInfo
                 lyricManager,
                 mediaStreamRepository,
                 chapterManager,
-                trueCache);
+                trueCache,
+                networkStorage);
         }
 
         /// <inheritdoc />
@@ -387,8 +393,13 @@ namespace MediaBrowser.Providers.MediaInfo
                 return;
             }
 
-            // Only allow remote URLs in .strm files to prevent local file access
-            if (Uri.TryCreate(shortcutPath, UriKind.Absolute, out var uri)
+            // Only allow remote URLs in .strm files to prevent local file access.
+            // An s3:// target is kept as written and presigned whenever it is read.
+            if (S3Address.TryParse(shortcutPath, out _))
+            {
+                item.ShortcutPath = shortcutPath;
+            }
+            else if (Uri.TryCreate(shortcutPath, UriKind.Absolute, out var uri)
                 && (string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase)
                     || string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase)
                     || string.Equals(uri.Scheme, "rtsp", StringComparison.OrdinalIgnoreCase)

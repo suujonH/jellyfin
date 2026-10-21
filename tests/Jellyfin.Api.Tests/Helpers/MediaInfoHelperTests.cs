@@ -13,6 +13,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.MediaInfo;
 using Microsoft.AspNetCore.Http;
@@ -29,7 +30,8 @@ namespace Jellyfin.Api.Tests.Helpers
         private static MediaInfoHelper CreateHelper(
             IMediaSourceManager? mediaSourceManager = null,
             IServerApplicationHost? appHost = null,
-            string baseUrl = "")
+            string baseUrl = "",
+            INetworkStorageManager? networkStorage = null)
         {
             var serverConfigurationManager = new Mock<IServerConfigurationManager>();
             serverConfigurationManager
@@ -45,7 +47,45 @@ namespace Jellyfin.Api.Tests.Helpers
                 Mock.Of<ILogger<MediaInfoHelper>>(),
                 Mock.Of<INetworkManager>(),
                 Mock.Of<IDeviceManager>(),
-                appHost ?? Mock.Of<IServerApplicationHost>());
+                appHost ?? Mock.Of<IServerApplicationHost>(),
+                networkStorage ?? Mock.Of<INetworkStorageManager>());
+        }
+
+        [Fact]
+        public void SetDeviceSpecificData_ArchivedSource_StaysUnplayable()
+        {
+            var networkStorage = new Mock<INetworkStorageManager>();
+            networkStorage.Setup(n => n.IsArchived("s3://archive/Film.mkv")).Returns(true);
+            var source = CreateSource(Guid.NewGuid(), bitrate: 8_000_000);
+            source.ShortcutTarget = "s3://archive/Film.mkv";
+            source.TranscodingUrl = "/videos/x/master.m3u8";
+
+            CreateHelper(networkStorage: networkStorage.Object).SetDeviceSpecificData(
+                new Movie(),
+                source,
+                new MediaBrowser.Model.Dlna.DeviceProfile(),
+                new System.Security.Claims.ClaimsPrincipal(),
+                null,
+                0,
+                source.Id!,
+                null,
+                null,
+                null,
+                "session",
+                Guid.NewGuid(),
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                System.Net.IPAddress.Loopback);
+
+            // Device negotiation must not bring back a way to play it.
+            Assert.False(source.SupportsDirectPlay);
+            Assert.False(source.SupportsDirectStream);
+            Assert.False(source.SupportsTranscoding);
+            Assert.Null(source.TranscodingUrl);
         }
 
         private static MediaSourceInfo CreateSource(Guid itemId, int bitrate, bool supportsDirectPlay = true)

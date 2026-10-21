@@ -151,7 +151,8 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <inheritdoc />
         public bool Supports(BaseItem item)
         {
-            if (item.IsShortcut)
+            // A .strm is not read, unless its __true_cache__ entry declares what would be read from it.
+            if (item.IsShortcut && !_trueCache.Lookup(item.Path).IsDeclared)
             {
                 return false;
             }

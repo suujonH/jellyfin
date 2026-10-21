@@ -86,6 +86,8 @@
     "TasksLibraryCategory": "Library",
     "TasksApplicationCategory": "Application",
     "TasksChannelsCategory": "Internet Channels",
+    "TaskCheckNetworkStorage": "Check Network Storage",
+    "TaskCheckNetworkStorageDescription": "Checks that every network resource exists and has its declared size, replacing the failures recorded before.",
     "TaskCleanActivityLog": "Clean Activity Log",
     "TaskCleanActivityLogDescription": "Deletes activity log entries older than the configured age.",
     "TaskCleanCache": "Clean Cache Directory",

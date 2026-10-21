@@ -19,6 +19,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
+using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.Playlists;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Trickplay;
@@ -126,6 +127,7 @@ namespace Emby.Server.Implementations.Dto
 
         private readonly ITrickplayManager _trickplayManager;
         private readonly IChapterManager _chapterManager;
+        private readonly INetworkStorageManager _networkStorage;
 
         public DtoService(
             ILogger<DtoService> logger,
@@ -138,7 +140,8 @@ namespace Emby.Server.Implementations.Dto
             IMediaSourceManager mediaSourceManager,
             Lazy<ILiveTvManager> livetvManagerFactory,
             ITrickplayManager trickplayManager,
-            IChapterManager chapterManager)
+            IChapterManager chapterManager,
+            INetworkStorageManager networkStorage)
         {
             _logger = logger;
             _libraryManager = libraryManager;
@@ -151,6 +154,7 @@ namespace Emby.Server.Implementations.Dto
             _livetvManagerFactory = livetvManagerFactory;
             _trickplayManager = trickplayManager;
             _chapterManager = chapterManager;
+            _networkStorage = networkStorage;
         }
 
         private ILiveTvManager LivetvManager => _livetvManagerFactory.Value;
@@ -408,6 +412,10 @@ namespace Emby.Server.Implementations.Dto
                 && options.ContainsField(ItemFields.MediaSources))
             {
                 dto.MediaSources = _mediaSourceManager.GetStaticMediaSources(item, true, user).ToArray();
+                foreach (var mediaSource in dto.MediaSources)
+                {
+                    _networkStorage.PrepareForClient(mediaSource);
+                }
 
                 NormalizeMediaSourceContainers(dto);
             }
