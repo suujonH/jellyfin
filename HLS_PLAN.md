@@ -234,19 +234,25 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 
 | 表 | 主要字段 |
 | --- | --- |
-| `HlsSources` | ItemId（主键）、LibraryId、Path（文件路径或 `.strm` 目标）、Length、ModifiedTicks、Sha256 |
-| `HlsMedia` | Sha256（主键）、MediaKey（哈希前 32 位）、LibraryId、Probe（JSON）、OrphanedAt、CreatedAt |
-| `HlsRenditions` | (Sha256, Key)、State（Missing/Published/Failed）、JobId、PublishedJobId、RelativeDirectory、Summary、Segments（各段时长）、Profile、PublishedAt |
-| `HlsJobs` | Id、WorkKey（唯一：`source:{ItemId}` 或 `media:{Sha256}`）、ItemId、Sha256、Plan（JSON）、Status、Worker、LeaseToken、LeaseUntil、Attempt、Error、时间戳 |
-| `HlsJobOutputs` | (JobId, Key)、RelativeDirectory、Summary、Files、Segments |
+| `HlsSources` | ItemId（主键）、LibraryId、Path（文件路径或 `.strm` 目标）、Length、DateModified、Sha256 |
+| `HlsMedia` | Sha256（主键）、MediaKey（哈希前 32 位，唯一）、LibraryId、Probe（JSON）、DateOrphaned、DateCreated |
+| `HlsRenditions` | (Sha256, Key)、State（Missing/Published/Failed）、JobId、PublishedJobId、RelativeDirectory、Summary、Profile、DatePublished |
+| `HlsJobs` | Id、Kind（Source/Media）、WorkKey（唯一：`source:{ItemId}` 或 `media:{Sha256}`）、ItemId、Sha256、Input（JSON，领取时选定）、Plan（JSON，识别时生成）、Status、Worker、LeaseToken、LeaseExpires、Attempt、Error、DateCreated、DateModified |
+| `HlsJobOutputs` | (JobId, Key)、RelativeDirectory、Summary、Files、Segments（各段秒数） |
 | `HlsDeletions` | RelativeDirectory（主键）、NotBefore、Attempts、Reason、LastError |
 | `HlsVersionItems` | (ItemId, Quality)、VersionId、Signature |
 
-**写入**：所有写操作都经过 `HlsJobStore`，在进程内的锁下以一个事务执行。任务中心是这些表唯一的写入者，所以替代了插件的 IMMEDIATE 事务。
+- 各段时长只存在 `HlsJobOutputs`：已发布的档位经 `PublishedJobId` 找到它的清单，与插件读取文件清单的方式相同。一部长片约 1800 段，所以发布索引（内存）不带各段时长，播放列表按请求从数据库读取。
+- 表之间不设外键，与插件相同：任务被重建时换新 id，旧任务的已发布清单仍按旧 id 保留；删除来源、媒体时由 `HlsJobStore` 自己清理。
+- 时间都是 UTC 的 `DateTime`；JSON 列用 System.Text.Json 的默认设置（PascalCase、数字枚举），探测结果与插件的 JSON 相同，第 8 阶段可以原样导入。
+
+**写入**：所有写操作都经过 `HlsJobStore`（`Jellyfin.Server.Implementations/Hls/`），在进程内的锁下以一个事务执行。任务中心是这些表唯一的写入者，所以替代了插件的 IMMEDIATE 事务。读取不加锁。
 
 **状态机**：以插件的为基础，租约、心跳、重试、取消、校验、发布和删除队列的规则不变；探测和编码合并为一种任务（见 5.2）。插件的 `JobStoreTests` 移植过来，并按新流程改写。
 
-**设置**：放在命名配置 `hls`（`HlsOptions`），包括：启用、媒体库、档位、存储、原始资源策略、租约、重试、孤儿保留、播放授权有效期和签名密钥、仅本地存储使用的「校验修改时间」。
+**设置**：放在命名配置 `hls`（`HlsOptions`），包括：启用、媒体库、档位、存储、原始资源策略、租约、重试、孤儿保留、播放授权有效期和签名密钥。不再有「校验修改时间」：Worker 不再上报修改时间，本地存储的文件由服务器自己写入。
+
+**纯逻辑**（`src/Jellyfin.MediaEncoding.Hls/Published/`，移植插件）：探测解析、阶梯、档位、目录布局、完成校验。DTO 在 `MediaBrowser.Model/Hls/`，Worker API 与任务中心共用；插件的类型名加 `Hls` 前缀（`HlsProbe`、`HlsRenditionSummary` 等），字段不变。
 
 ### 5.2 流程
 
@@ -282,7 +288,32 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 9. **租约**：心跳续期。过期算一次失败，计划中的目录在一个租约长度之后删除。
 10. **孤儿**：没有任何来源引用的内容，超过保留时间后删除它的成果。
 
-### 5.3 与插件相比的变化
+### 5.3 任务的状态与识别
+
+在插件的状态机上合并探测和编码：
+
+- **来源任务**（`source:{ItemId}`）：来源没有哈希时（新文件、指纹变化）在写入来源的同一事务里创建；每 10 分钟的全量排程也为所有没有哈希的来源补建，以免来源在任务运行期间变化后无人接手。
+  - 已完成、或已取消且没有租约的任务换新 id 重建（它可能发布过成果，清单按任务 id 保存）；等待、运行、校验中的不动；失败的等重建工作列表。
+  - 「持有租约」指 `LeaseExpires` 有值：提交成果时租约结束（令牌保留），所以被取消的校验中任务可以重建。
+- **媒体任务**（`media:{Sha256}`）：哈希已知但有需要任务的档位时创建，规则同插件的编码任务（等待中的沿用，进行中的不动，其余换新 id 重建），并把这些档位记到任务上。该内容没有在启用的媒体库中的来源时不创建，否则领取时立即取消、下次排程又重建。
+- **领取**：取最早的等待任务，最多 20 轮，不合格的取消后继续：
+  - 来源任务需要它的来源仍在启用的媒体库中；
+  - 媒体任务需要一个有该哈希、在启用的媒体库中的来源（优先原条目），且至少持有一个档位。没有来源的媒体任务直接取消，替代插件的 R39 和定向领取。
+  - 领取时记下输入（`Input`：条目、路径或目标、长度、修改时间），清空 `Plan`，租约令牌即本次的目录名。
+- **识别**（一个事务）：
+  1. 租约无效：409。已经识别过、哈希相同时原样返回计划（Worker 重试），哈希不同是 400。
+  2. 输入与来源当前的记录不同（路径、长度、修改时间）：任务回到等待，清空输入，不计这次尝试。来源已删除时，来源任务取消；媒体任务回到等待，下次领取改用该内容的其他来源，没有则取消。回 409。
+  3. 媒体任务算出的哈希与任务的不同：清除该来源的哈希并为它建来源任务，媒体任务回到等待。回 409。
+  4. 记下来源的哈希；新哈希保存探测结果，已知哈希沿用已保存的（R44），不同时记日志。来源任务在两次尝试之间文件变成了另一内容时，先释放它持有的旧内容的档位，否则旧内容要等它、并随它一起失败。
+  5. 按已保存的探测结果和当前档位设置同步档位（被取消的档位删除目录）。
+  6. 来源不在启用的媒体库中：任务完成，返回 `Done`。
+  7. 接手所有需要任务的档位；计划 = 本任务持有、仍然需要的档位，按阶梯顺序。为空时任务完成，返回 `Done`（去重）；否则保存并返回计划。
+- **计划**：哈希、`MediaKey`、编码配置版本、已保存的探测结果、切片长度 6 秒、关键帧间隔 2 秒、预期段数 `ceil(时长 / 6)`（至少 1），以及每个档位的键、种类、目录、画面尺寸与帧率、源轨道、声道。
+- **失败后回到等待**：清空 `Input` 和 `Plan`，档位仍记在任务上，下次领取重新识别（输入可能换了来源）。其余（租约过期、Worker 报告失败、校验失败、永久失败、重建）同插件。
+- **完成时释放档位**：任务完成（识别返回 `Done`、发布）时，仍记在它上面的档位一并释放，否则这些档位不会再被排程。
+- **成果在提交时核对**：`SubmitOutputsAsync` 按数据库中的计划运行完成校验，目录只取自计划。
+
+### 5.4 与插件相比的变化
 
 | 方面 | 插件 | 核心 |
 | --- | --- | --- |
@@ -463,7 +494,7 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 | 1 | 切片计划、Planner、关键帧来源（含 MP4 提取器和有时限的按需提取）、播放列表写法、ffmpeg 切点与 seek 的规则（`HlsCuts`）。这一阶段只有独立的组件，控制器仍走旧链路 | jellyfin |
 | 2 | 会话与编码运行：会话管理、`list.csv` 读取与切片就绪事件、重新开始的策略、节流和清理改用段序号、每次 run 重新解析源地址；控制器改用新链路：新的切片 URL、由计划写出的 `main.m3u8`、segment muxer 命令行（`EncodingHelper` 的关键帧参数改用时间列表）；迁移 `DeleteUnalignedKeyframeData`，启用 MP4 的按需提取（默认值与迁移 `AddMp4KeyframeExtraction`） | jellyfin |
 | 3 | HLS 存储与网络存储扩展：存储抽象，S3 的 PUT 预签名、List、Delete，根目录标记，存储测试 | jellyfin |
-| 4 | 任务中心：实体与迁移、`HlsJobStore`（连同测试）、同步与排程、识别、校验、删除、发布索引、Worker API、管理 API | jellyfin |
+| 4 | 任务中心，分三次提交：4a 纯逻辑、实体与迁移、`HlsJobStore`（连同测试）；4b 设置、同步与排程、校验、删除、发布索引；4c Worker API、管理 API | jellyfin |
 | 5 | 播放与交付：源列表、原始资源策略与路由检查、授权与交付路由、服务器生成播放列表、直连与转发、版本条目 | jellyfin |
 | 6 | Worker 1.0 重写；与第 4、5 阶段的服务器做端到端联调后，替换提交并强制推送 | Jellyfin.DistributedHls.Worker |
 | 7 | 「HLS 预编码」管理页 | jellyfin-web |
@@ -593,4 +624,5 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - 2026-10-21：第 1 阶段完成：`Plans/`（`SegmentPlan`、`SegmentPlanner`、`HlsCuts`、`KeyframeSource`）、`Playlist/HlsPlaylistWriter`、MP4 提取器（只注册，旧链路的 MP4 默认值与迁移随第 2 阶段）、ffprobe 提取器减去 start_time 并只读第一条非封面视频流、设置 `KeyframeExtractionTimeoutSeconds`、旧链路只在复制第一条视频流时用关键帧。核对结论写在第二节。配置 ffmpeg 时 MediaEncoding.Hls 109 个、Keyframes 38 个测试全部通过。
 - 2026-10-22：第 2 阶段完成：`Sessions/`（`HlsSessionManager`、`HlsSession`、`HlsEncoderRun`、`list.csv` 读取器与 `HlsSegmentLocator`）、控制器改用新链路（新的切片 URL、由计划写出的 `main.m3u8`、segment muxer 命令行、拼接发送 GOP 文件的 `ConcatenatedFileResult`）、节流与清理改用 run 给出的位置和文件、复用任务时重新解析源地址、迁移 `DeleteUnalignedKeyframeData` 与 `AddMp4KeyframeExtraction`。旧的 `DynamicHlsPlaylistGenerator` 删除，`IsExtractionAllowedForFile` 移入 `KeyframeSource`。配置 ffmpeg 时 MediaEncoding.Hls 142 个测试全部通过（含真实 ffmpeg 的 run 测试），Api 169 个、Controller 218 个、MediaEncoding 194 个、Server 41 个、Integration 129 个通过。
 - 2026-10-22：第 3 阶段完成：`IHlsStore` 与 `IHlsStoreFactory`，本地目录与网络存储两种实现（根目录标记、写入、列出、删除、地址、存储测试）；`INetworkStorageManager` 的客户端、服务器、上传地址与列出、删除；`IObjectStorageProtocol` 与 `S3StorageProtocol` 的预签名 PUT、ListObjectsV2 分页、DeleteObjects 及其回退。S3 的应答按根元素核对（`ListBucketResult`、`DeleteResult`），代理的登录页等其他文档不会被当作空列表。Server.Implementations 中 HLS 存储与网络存储的 137 个测试全部通过（另有 2 个本地化测试因系统语言为中文而失败，与本阶段无关）。
+- 2026-10-22：第 4a 阶段完成：`MediaBrowser.Model/Hls/` 的 DTO；`Published/` 的纯逻辑（探测解析、阶梯、档位、目录布局、完成校验）；七个实体与迁移 `AddHlsTaskCenter`；`HlsJobStore`（来源、媒体、来源任务与媒体任务的领取、识别、提交、发布、失败与租约、档位、孤儿、删除队列）。与 5.3 的差别已写回：「持有租约」以 `LeaseExpires` 为准，媒体任务只在内容有启用媒体库中的来源时创建，来源被删除时媒体任务回到等待，完成时释放档位，提交时按计划校验，来源任务换了内容时释放旧内容的档位。MediaBrowser.Model 与 Server.Implementations 构建 0 警告；MediaEncoding.Hls 295 个测试通过（未配置 ffmpeg，44 个跳过），Server.Implementations 中 HLS 的 105 个测试（其中 `HlsJobStore` 41 个）全部通过。
 - 下一步：第 4 阶段（任务中心）。

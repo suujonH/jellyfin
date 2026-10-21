@@ -654,6 +654,250 @@ namespace Jellyfin.Server.Implementations.Migrations
                     b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
                 });
 
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.HlsDeletion", b =>
+                {
+                    b.Property<string>("RelativeDirectory")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("LastError")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("NotBefore")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("RelativeDirectory");
+
+                    b.HasIndex("NotBefore");
+
+                    b.ToTable("HlsDeletions");
+
+                    b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.HlsJob", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Attempt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("DateCreated")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("DateModified")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Error")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Input")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("ItemId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("LeaseExpires")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LeaseToken")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Plan")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Sha256")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("WorkKey")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Worker")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Sha256");
+
+                    b.HasIndex("WorkKey")
+                        .IsUnique();
+
+                    b.HasIndex("Status", "DateCreated");
+
+                    b.ToTable("HlsJobs");
+
+                    b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.HlsJobOutput", b =>
+                {
+                    b.Property<Guid>("JobId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Key")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Files")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RelativeDirectory")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Segments")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Summary")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("JobId", "Key");
+
+                    b.ToTable("HlsJobOutputs");
+
+                    b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.HlsMedia", b =>
+                {
+                    b.Property<string>("Sha256")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("DateCreated")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("DateOrphaned")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("LibraryId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MediaKey")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Probe")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Sha256");
+
+                    b.HasIndex("MediaKey")
+                        .IsUnique();
+
+                    b.ToTable("HlsMedia");
+
+                    b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.HlsRendition", b =>
+                {
+                    b.Property<string>("Sha256")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Key")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("DatePublished")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("JobId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Profile")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("PublishedJobId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RelativeDirectory")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("State")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Summary")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Sha256", "Key");
+
+                    b.HasIndex("JobId");
+
+                    b.ToTable("HlsRenditions");
+
+                    b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.HlsSource", b =>
+                {
+                    b.Property<Guid>("ItemId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("DateModified")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Length")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("LibraryId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Path")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Sha256")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("ItemId");
+
+                    b.HasIndex("Sha256");
+
+                    b.ToTable("HlsSources");
+
+                    b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.HlsVersionItem", b =>
+                {
+                    b.Property<Guid>("ItemId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Quality")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Signature")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("VersionId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("ItemId", "Quality");
+
+                    b.ToTable("HlsVersionItems");
+
+                    b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
+                });
+
             modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.HomeSection", b =>
                 {
                     b.Property<int>("Id")

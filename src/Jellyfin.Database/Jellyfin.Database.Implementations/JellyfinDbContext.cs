@@ -188,6 +188,41 @@ public class JellyfinDbContext(DbContextOptions<JellyfinDbContext> options, ILog
     /// </summary>
     public DbSet<NetworkStorageFailure> NetworkStorageFailures => Set<NetworkStorageFailure>();
 
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing the library files pre-encoded HLS is made from.
+    /// </summary>
+    public DbSet<HlsSource> HlsSources => Set<HlsSource>();
+
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing the contents of pre-encoded HLS.
+    /// </summary>
+    public DbSet<HlsMedia> HlsMedia => Set<HlsMedia>();
+
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing the renditions of pre-encoded HLS.
+    /// </summary>
+    public DbSet<HlsRendition> HlsRenditions => Set<HlsRendition>();
+
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing the jobs of pre-encoded HLS.
+    /// </summary>
+    public DbSet<HlsJob> HlsJobs => Set<HlsJob>();
+
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing the renditions workers reported.
+    /// </summary>
+    public DbSet<HlsJobOutput> HlsJobOutputs => Set<HlsJobOutput>();
+
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing the rendition directories waiting to be deleted.
+    /// </summary>
+    public DbSet<HlsDeletion> HlsDeletions => Set<HlsDeletion>();
+
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing the version items of published qualities.
+    /// </summary>
+    public DbSet<HlsVersionItem> HlsVersionItems => Set<HlsVersionItem>();
+
     /*public DbSet<Artwork> Artwork => Set<Artwork>();
 
     public DbSet<Book> Books => Set<Book>();
