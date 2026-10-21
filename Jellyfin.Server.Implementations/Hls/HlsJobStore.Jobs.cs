@@ -103,7 +103,7 @@ public sealed partial class HlsJobStore
 
                 if (job.Status == (int)HlsJobStatus.Verifying)
                 {
-                    await DiscardOutputsAsync(context, job.Id, now, "The job was cancelled.", cancellationToken).ConfigureAwait(false);
+                    await DiscardOutputsAsync(context, job, now, "The job was cancelled.", cancellationToken).ConfigureAwait(false);
                 }
 
                 await CancelAsync(context, job, now, cancellationToken).ConfigureAwait(false);
@@ -176,6 +176,7 @@ public sealed partial class HlsJobStore
                     job.Error = null;
                     job.Input = JsonSerializer.Serialize(input);
                     job.Plan = null;
+                    job.Base = null;
                     job.DateModified = request.Now;
                     return lease;
                 }
@@ -259,9 +260,14 @@ public sealed partial class HlsJobStore
                 if (job.Plan is not null)
                 {
                     var planned = Deserialize<HlsEncodePlan>(job.Plan);
-                    return string.Equals(planned.Sha256, sha256, StringComparison.Ordinal)
+                    if (!string.Equals(planned.Sha256, sha256, StringComparison.Ordinal))
+                    {
+                        throw new ArgumentException("The job was already identified as other content.", nameof(request));
+                    }
+
+                    return string.Equals(job.Base, request.Base, StringComparison.Ordinal)
                         ? new HlsIdentifyResult(HlsIdentifyOutcome.Planned, planned)
-                        : throw new ArgumentException("The job was already identified as other content.", nameof(request));
+                        : throw new ArgumentException("The job was already identified with another root of the HLS store: " + job.Base, nameof(request));
                 }
 
                 // The attempt is not counted: the worker read a file that is no longer the one recorded.
@@ -352,6 +358,7 @@ public sealed partial class HlsJobStore
                     HlsEncodingProfile.GetExpectedSegments(storedProbe.DurationSeconds),
                     specs.Select(s => new HlsPlannedRendition(s.Key, s.Kind, HlsRenditionPaths.GetRelativeDirectory(media.MediaKey, s, token), s.Video, s.SourceIndex, s.Channels)).ToList());
                 job.Plan = JsonSerializer.Serialize(plan);
+                job.Base = request.Base;
                 return new HlsIdentifyResult(HlsIdentifyOutcome.Planned, plan, keptStoredProbe);
             },
             cancellationToken);
@@ -404,14 +411,15 @@ public sealed partial class HlsJobStore
     /// Gets the jobs whose outputs wait to be verified, the oldest first.
     /// </summary>
     /// <param name="limit">The most jobs to return.</param>
+    /// <param name="skippedRoots">The roots whose jobs are left out.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The jobs with their outputs.</returns>
-    public Task<IReadOnlyList<HlsVerifyingJob>> GetVerifyingJobsAsync(int limit, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<HlsVerifyingJob>> GetVerifyingJobsAsync(int limit, IReadOnlyCollection<string> skippedRoots, CancellationToken cancellationToken)
         => ReadAsync<IReadOnlyList<HlsVerifyingJob>>(
             async context =>
             {
                 var jobs = await context.HlsJobs.AsNoTracking()
-                    .Where(j => j.Status == (int)HlsJobStatus.Verifying)
+                    .Where(j => j.Status == (int)HlsJobStatus.Verifying && !skippedRoots.Contains(j.Base ?? string.Empty))
                     .OrderBy(j => j.DateModified)
                     .ThenBy(j => j.Id)
                     .Take(limit)
@@ -423,6 +431,7 @@ public sealed partial class HlsJobStore
                     .Select(j => new HlsVerifyingJob(
                         j.Id,
                         j.Sha256!,
+                        j.Base ?? string.Empty,
                         j.Attempt,
                         outputs.Where(o => o.JobId.Equals(j.Id)).Select(o => new HlsVerifyingOutput(o.Key, o.RelativeDirectory, Deserialize<List<HlsOutputFile>>(o.Files))).ToList()))
                     .ToList();
@@ -457,14 +466,14 @@ public sealed partial class HlsJobStore
                     var rendition = await context.HlsRenditions.FindAsync([sha256, output.Key], cancellationToken).ConfigureAwait(false);
                     if (rendition is null || !rendition.JobId.Equals(jobId))
                     {
-                        await QueueDeletionAsync(context, output.RelativeDirectory, now, "The rendition is no longer wanted.", cancellationToken).ConfigureAwait(false);
+                        await QueueDeletionAsync(context, job.Base, output.RelativeDirectory, now, "The rendition is no longer wanted.", cancellationToken).ConfigureAwait(false);
                         context.HlsJobOutputs.Remove(output);
                         continue;
                     }
 
                     if (rendition.RelativeDirectory is { } replaced && !string.Equals(replaced, output.RelativeDirectory, StringComparison.Ordinal))
                     {
-                        await QueueDeletionAsync(context, replaced, now + replacedGrace, "Replaced by a new output.", cancellationToken).ConfigureAwait(false);
+                        await QueueDeletionAsync(context, rendition.Base, replaced, now + replacedGrace, "Replaced by a new output.", cancellationToken).ConfigureAwait(false);
                         await RemoveOutputAsync(context, rendition.PublishedJobId, rendition.Key, cancellationToken).ConfigureAwait(false);
                     }
 
@@ -472,6 +481,7 @@ public sealed partial class HlsJobStore
                     rendition.JobId = null;
                     rendition.PublishedJobId = jobId;
                     rendition.RelativeDirectory = output.RelativeDirectory;
+                    rendition.Base = job.Base;
                     rendition.Summary = output.Summary;
                     rendition.Profile = profile;
                     rendition.DatePublished = now;
@@ -502,7 +512,7 @@ public sealed partial class HlsJobStore
                     return false;
                 }
 
-                await DiscardOutputsAsync(context, jobId, now, "The outputs failed verification.", cancellationToken).ConfigureAwait(false);
+                await DiscardOutputsAsync(context, job, now, "The outputs failed verification.", cancellationToken).ConfigureAwait(false);
                 await FailAsync(context, job, error, maxAttempts, now, cancellationToken).ConfigureAwait(false);
                 return true;
             },
@@ -700,6 +710,7 @@ public sealed partial class HlsJobStore
         job.Status = (int)HlsJobStatus.Pending;
         job.Input = null;
         job.Plan = null;
+        job.Base = null;
         job.LeaseToken = null;
         job.LeaseExpires = null;
         job.Attempt = Math.Max(0, job.Attempt - 1);
@@ -708,12 +719,13 @@ public sealed partial class HlsJobStore
     }
 
     // Queues the directories of every output the job submitted and forgets those outputs.
-    private static async Task DiscardOutputsAsync(JellyfinDbContext context, Guid jobId, DateTime now, string reason, CancellationToken cancellationToken)
+    private static async Task DiscardOutputsAsync(JellyfinDbContext context, HlsJob job, DateTime now, string reason, CancellationToken cancellationToken)
     {
+        var jobId = job.Id;
         var outputs = await context.HlsJobOutputs.Where(o => o.JobId.Equals(jobId)).OrderBy(o => o.Key).ToListAsync(cancellationToken).ConfigureAwait(false);
         foreach (var output in outputs)
         {
-            await QueueDeletionAsync(context, output.RelativeDirectory, now, reason, cancellationToken).ConfigureAwait(false);
+            await QueueDeletionAsync(context, job.Base, output.RelativeDirectory, now, reason, cancellationToken).ConfigureAwait(false);
         }
 
         context.HlsJobOutputs.RemoveRange(outputs);
@@ -726,7 +738,7 @@ public sealed partial class HlsJobStore
         {
             foreach (var rendition in Deserialize<HlsEncodePlan>(job.Plan).Renditions)
             {
-                await QueueDeletionAsync(context, rendition.RelativeDirectory, notBefore, reason, cancellationToken).ConfigureAwait(false);
+                await QueueDeletionAsync(context, job.Base, rendition.RelativeDirectory, notBefore, reason, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -755,6 +767,7 @@ public sealed partial class HlsJobStore
             job.Status = (int)HlsJobStatus.Pending;
             job.Input = null;
             job.Plan = null;
+            job.Base = null;
             return;
         }
 

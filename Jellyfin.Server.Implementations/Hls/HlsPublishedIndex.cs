@@ -247,8 +247,8 @@ public sealed class HlsPublishedIndex : IDisposable
         }
 
         var published = renditions
-            .Where(r => r.State == HlsRenditionState.Published && r.RelativeDirectory is not null && r.Summary is not null)
-            .Select(r => new HlsPublishedRendition(r.Key, r.RelativeDirectory!, r.Summary!))
+            .Where(r => r.State == HlsRenditionState.Published && r.Base is not null && r.RelativeDirectory is not null && r.Summary is not null)
+            .Select(r => new HlsPublishedRendition(r.Key, r.Base!, r.RelativeDirectory!, r.Summary!))
             .ToList();
         if (published.Count == 0)
         {

@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using System.Net.Http;
 using Jellyfin.Server.Implementations.Hls;
 using MediaBrowser.Controller.NetworkStorage;
 using Moq;
@@ -10,7 +9,7 @@ namespace Jellyfin.Server.Implementations.Tests.Hls;
 
 public class HlsStoreFactoryTests
 {
-    private readonly HlsStoreFactory _factory = new(Mock.Of<INetworkStorageManager>(), Mock.Of<IHttpClientFactory>());
+    private readonly HlsStoreFactory _factory = new(Mock.Of<INetworkStorageManager>());
 
     [Theory]
     [InlineData("s3://media", "s3://media")]

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -13,8 +14,8 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Server.Implementations.Hls;
 
 /// <summary>
-/// Publishes the outputs a worker submitted once every reported file is in the HLS store, and verifies published renditions
-/// again on request. Nothing fails while the root of the store cannot be trusted: the files may only seem missing.
+/// Publishes the outputs a worker submitted once every reported file is in its HLS store, and verifies published renditions
+/// again on request. Nothing fails in a root that cannot be trusted: the files may only seem missing.
 /// </summary>
 public sealed class HlsVerificationService : BackgroundService
 {
@@ -38,7 +39,7 @@ public sealed class HlsVerificationService : BackgroundService
     /// </summary>
     /// <param name="store">The data of pre-encoded HLS.</param>
     /// <param name="settings">The settings.</param>
-    /// <param name="monitor">The monitor of the root of the HLS store.</param>
+    /// <param name="monitor">The monitor of the roots of the HLS stores.</param>
     /// <param name="index">The published index.</param>
     /// <param name="coordinator">The coordinator.</param>
     /// <param name="logger">The logger.</param>
@@ -116,8 +117,9 @@ public sealed class HlsVerificationService : BackgroundService
     }
 
     /// <summary>
-    /// Verifies the outputs of the jobs submitted longest ago. A job whose verification throws stays verifying and is tried
-    /// again in the next round.
+    /// Verifies the outputs of the jobs submitted longest ago, each in the root its worker uploaded to; a root that cannot be
+    /// trusted leaves its jobs verifying, and the batch is read again without it, so the jobs of the other roots are not held up.
+    /// A job whose verification throws stays verifying and is tried again in the next round.
     /// </summary>
     /// <param name="now">The current time.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
@@ -125,26 +127,58 @@ public sealed class HlsVerificationService : BackgroundService
     internal async Task VerifyBatchAsync(DateTime now, CancellationToken cancellationToken)
     {
         var settings = _settings.Current;
-        IReadOnlyList<HlsVerifyingJob> jobs;
-        try
+        var skipped = new HashSet<string>(StringComparer.Ordinal);
+        bool skippedMore;
+        do
         {
-            jobs = await _store.GetVerifyingJobsAsync(BatchSize, cancellationToken).ConfigureAwait(false);
-            if (jobs.Count == 0 || await _monitor.CheckAsync(settings, cancellationToken).ConfigureAwait(false) is not null)
+            IReadOnlyList<HlsVerifyingJob> jobs;
+            try
             {
+                jobs = await _store.GetVerifyingJobsAsync(BatchSize, skipped, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogError(ex, "Reading the HLS jobs to verify failed");
                 return;
             }
+
+            // Every round skips one root more or is the last, so this ends.
+            skippedMore = false;
+            foreach (var root in jobs.GroupBy(j => j.Base, StringComparer.Ordinal))
+            {
+                if (!await IsTrustedAsync(root.Key, cancellationToken).ConfigureAwait(false))
+                {
+                    skippedMore |= skipped.Add(root.Key);
+                    continue;
+                }
+
+                await VerifyRootAsync(root.Key, root, settings, now, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        while (skippedMore);
+    }
+
+    private async Task<bool> IsTrustedAsync(string root, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _monitor.CheckAsync(root, cancellationToken).ConfigureAwait(false) is null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
-            _logger.LogError(ex, "Reading the HLS jobs to verify failed");
-            return;
+            _logger.LogError(ex, "Checking the HLS store {Root} failed", root);
+            return false;
         }
+    }
 
+    private async Task VerifyRootAsync(string root, IEnumerable<HlsVerifyingJob> jobs, HlsSettingsSnapshot settings, DateTime now, CancellationToken cancellationToken)
+    {
+        var store = _monitor.Open(root);
         foreach (var job in jobs)
         {
             try
             {
-                await VerifyAsync(job, settings, settings.Store!, now, cancellationToken).ConfigureAwait(false);
+                await VerifyAsync(job, settings, store, now, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
@@ -155,22 +189,14 @@ public sealed class HlsVerificationService : BackgroundService
 
     /// <summary>
     /// Verifies the published renditions of one content, or of every content one at a time, since the manifests of a whole
-    /// library may not fit in memory. A rendition that fails is retired, but never while the root cannot be trusted: then the
-    /// run stops, and the report says why.
+    /// library may not fit in memory. A rendition that fails is retired, but never while its root cannot be trusted: the rest
+    /// of that root is then skipped, the other roots go on, and the report says why.
     /// </summary>
     /// <param name="itemId">The item whose content is verified, or <c>null</c> for every content.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A task.</returns>
     internal async Task ReverifyAsync(Guid? itemId, CancellationToken cancellationToken)
     {
-        var settings = _settings.Current;
-        if (await _monitor.CheckAsync(settings, cancellationToken).ConfigureAwait(false) is { } unavailable)
-        {
-            Report(0, 0, unavailable);
-            return;
-        }
-
-        var store = settings.Store!;
         IReadOnlyList<string> shas;
         if (itemId is { } id)
         {
@@ -188,7 +214,10 @@ public sealed class HlsVerificationService : BackgroundService
         }
 
         int checkedCount = 0, failed = 0;
-        string? aborted = null;
+
+        // Every root is checked once before its first rendition, and again after every failure; one that cannot be trusted
+        // is skipped from then on.
+        var roots = new Dictionary<string, string?>(StringComparer.Ordinal);
         foreach (var sha in shas)
         {
             var retired = false;
@@ -196,17 +225,29 @@ public sealed class HlsVerificationService : BackgroundService
             {
                 foreach (var manifest in await _store.GetPublishedManifestsAsync(sha, cancellationToken).ConfigureAwait(false))
                 {
-                    checkedCount++;
-                    if (await VerifyOutputAsync(store, manifest.RelativeDirectory, manifest.Files, cancellationToken).ConfigureAwait(false) is not { } error)
+                    if (!roots.TryGetValue(manifest.Base, out var problem))
+                    {
+                        problem = await _monitor.CheckAsync(manifest.Base, cancellationToken).ConfigureAwait(false);
+                        roots[manifest.Base] = problem;
+                    }
+
+                    if (problem is not null)
                     {
                         continue;
                     }
 
-                    // Every failure asks whether the root is still there; if it is not, nothing more is retired.
-                    aborted = await _monitor.CheckAsync(settings, cancellationToken).ConfigureAwait(false);
-                    if (aborted is not null)
+                    checkedCount++;
+                    if (await VerifyOutputAsync(_monitor.Open(manifest.Base), manifest.RelativeDirectory, manifest.Files, cancellationToken).ConfigureAwait(false) is not { } error)
                     {
-                        break;
+                        continue;
+                    }
+
+                    // Every failure asks whether the root is still there; if it is not, nothing more is retired from it.
+                    problem = await _monitor.CheckAsync(manifest.Base, cancellationToken).ConfigureAwait(false);
+                    roots[manifest.Base] = problem;
+                    if (problem is not null)
+                    {
+                        continue;
                     }
 
                     failed++;
@@ -225,14 +266,10 @@ public sealed class HlsVerificationService : BackgroundService
             {
                 await FollowAsync(sha, cancellationToken).ConfigureAwait(false);
             }
-
-            if (aborted is not null)
-            {
-                break;
-            }
         }
 
-        Report(checkedCount, failed, aborted);
+        var skipped = roots.Where(r => r.Value is not null).Select(r => r.Key + ": " + r.Value).ToList();
+        Report(checkedCount, failed, skipped.Count == 0 ? null : string.Join("; ", skipped));
     }
 
     /// <inheritdoc />
@@ -304,7 +341,7 @@ public sealed class HlsVerificationService : BackgroundService
         }
 
         // The files may only be missing because the root became unavailable since the batch began; the job then stays verifying.
-        if (await _monitor.CheckAsync(settings, cancellationToken).ConfigureAwait(false) is not null)
+        if (await _monitor.CheckAsync(job.Base, cancellationToken).ConfigureAwait(false) is not null)
         {
             return;
         }

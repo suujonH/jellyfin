@@ -1,11 +1,10 @@
 using System;
-using System.Globalization;
 using System.Linq;
 
 namespace Jellyfin.Server.Implementations.Hls;
 
 /// <summary>
-/// The names the HLS store keeps in its root, and the rule for paths in it.
+/// The names of the marker in the root of an HLS store, and the rule for paths in it.
 /// </summary>
 internal static class HlsStorePaths
 {
@@ -18,33 +17,6 @@ internal static class HlsStorePaths
     /// The marker the DistributedHls plugin wrote, which counts as the marker too.
     /// </summary>
     public const string LegacyMarkerName = ".distributed-hls";
-
-    /// <summary>
-    /// What the marker says.
-    /// </summary>
-    public const string MarkerContent = "Jellyfin HLS store. Do not delete.\n";
-
-    /// <summary>
-    /// The start of the names of the objects a test writes in the root.
-    /// </summary>
-    public const string TestNamePrefix = ".jellyfin-hls-test-";
-
-    /// <summary>
-    /// Gets the directory the file of an upload check of a worker is written in.
-    /// </summary>
-    /// <param name="id">The check.</param>
-    /// <returns>The directory.</returns>
-    public static string GetUploadCheckDirectory(Guid id) => TestNamePrefix + id.ToString("N", CultureInfo.InvariantCulture);
-
-    /// <summary>
-    /// Gets whether a directory is one an upload check writes in.
-    /// </summary>
-    /// <param name="directory">The directory.</param>
-    /// <returns>Whether it is.</returns>
-    public static bool IsUploadCheckDirectory(string? directory)
-        => directory is not null
-            && directory.StartsWith(TestNamePrefix, StringComparison.Ordinal)
-            && Guid.TryParseExact(directory.AsSpan(TestNamePrefix.Length), "N", out _);
 
     /// <summary>
     /// Checks that a path is relative, with forward slashes, and has no empty, <c>.</c> or <c>..</c> parts, no parts that end

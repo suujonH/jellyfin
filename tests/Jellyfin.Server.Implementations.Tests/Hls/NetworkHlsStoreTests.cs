@@ -2,9 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Net;
-using System.Net.Http;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Server.Implementations.Hls;
@@ -15,8 +12,7 @@ using Xunit;
 namespace Jellyfin.Server.Implementations.Tests.Hls;
 
 /// <summary>
-/// A store over a fake bucket <c>media</c>, which network storage lists and deletes in and the store writes and reads with
-/// the addresses network storage gives.
+/// A store over a fake bucket <c>media</c>, which network storage lists and deletes in.
 /// </summary>
 public class NetworkHlsStoreTests
 {
@@ -25,15 +21,12 @@ public class NetworkHlsStoreTests
 
     private readonly SortedDictionary<string, byte[]> _bucket = new(StringComparer.Ordinal);
     private readonly Mock<INetworkStorageManager> _networkStorage = new();
-    private readonly List<string> _sent = [];
     private readonly List<string[]> _deleted = [];
 
     public NetworkHlsStoreTests()
     {
         _networkStorage.Setup(n => n.GetServerAddress(It.IsAny<string>(), It.IsAny<string>()))
             .Returns((string target, string method) => Address(target, method));
-        _networkStorage.Setup(n => n.GetUploadAddress(It.IsAny<string>(), It.IsAny<TimeSpan>()))
-            .Returns((string target, TimeSpan _) => Address(target, "PUT"));
         _networkStorage.Setup(n => n.ListAsync(It.IsAny<string>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()))
             .Returns((string prefix, int? limit, CancellationToken _) => Task.FromResult(List(prefix, limit)));
         _networkStorage.Setup(n => n.DeleteAsync(It.IsAny<IReadOnlyCollection<string>>(), It.IsAny<CancellationToken>()))
@@ -50,9 +43,6 @@ public class NetworkHlsStoreTests
     }
 
     private static CancellationToken CancellationToken => TestContext.Current.CancellationToken;
-
-    // Answers what the stub does not.
-    private Func<HttpRequestMessage, HttpResponseMessage?> Refuse { get; set; } = _ => null;
 
     [Fact]
     public async Task CheckRoot_NoAccess_IsAProblem()
@@ -80,6 +70,7 @@ public class NetworkHlsStoreTests
 
         Assert.Null(await CreateStore(prefix).CheckRootAsync([Published, Other], CancellationToken));
         Assert.Equal([marker], _bucket.Keys);
+        Assert.True(await CreateStore(prefix).HasMarkerAsync(CancellationToken));
     }
 
     [Fact]
@@ -90,12 +81,14 @@ public class NetworkHlsStoreTests
     }
 
     [Fact]
-    public async Task CheckRoot_PredatesTheMarker_GetsItWhenAPublishedDirectoryIsThere()
+    public async Task CheckRoot_Unmarked_IsUsableWhileAPublishedDirectoryIsThere_AndIsNotMarked()
     {
+        // The marker is for the worker to write.
         _bucket["hls/" + Published + "/init.mp4"] = [1];
 
         Assert.Null(await CreateStore().CheckRootAsync([Other, Published], CancellationToken));
-        Assert.Equal("Jellyfin HLS store. Do not delete.\n", Encoding.UTF8.GetString(_bucket["hls/.jellyfin-hls"]));
+        Assert.Equal(["hls/" + Published + "/init.mp4"], _bucket.Keys);
+        Assert.False(await CreateStore().HasMarkerAsync(CancellationToken));
     }
 
     [Fact]
@@ -156,64 +149,18 @@ public class NetworkHlsStoreTests
     }
 
     [Fact]
-    public async Task Addresses_File_AreThoseOfItsObject()
+    public void Addresses_File_AreThoseOfItsObject()
     {
         const string Target = "s3://media/hls/" + Published + "/init.mp4";
         _networkStorage.Setup(n => n.ResolveShortcutTarget(Target)).Returns("https://media.example.com/server");
         _networkStorage.Setup(n => n.GetClientAddress(Target)).Returns(new Uri("https://media.example.com/client"));
         var store = CreateStore();
 
-        Assert.Equal(Address(Target, "PUT"), store.GetUploadAddress(Published + "/init.mp4", TimeSpan.FromHours(1)));
         Assert.Equal("https://media.example.com/server", store.GetServerPath(Published + "/init.mp4"));
         Assert.Equal(new Uri("https://media.example.com/client"), store.GetClientAddress(Published + "/init.mp4"));
         Assert.Throws<ArgumentException>(() => store.GetClientAddress("../x"));
-        await Assert.ThrowsAsync<NotSupportedException>(() => store.WriteAsync(Published + "/init.mp4", new MemoryStream(), CancellationToken));
-    }
-
-    [Fact]
-    public async Task TestAsync_WritableStorage_SucceedsAndLeavesNothing()
-    {
-        var result = await CreateStore().TestAsync(CancellationToken);
-
-        Assert.True(result.Success, result.Message);
-        Assert.False(result.HasMarker);
-        Assert.Empty(_bucket);
-        Assert.Equal(["PUT", "GET"], _sent.Select(s => s.Split(' ')[0]));
-        Assert.StartsWith("PUT /media/hls/.jellyfin-hls-test-", _sent[0], StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task TestAsync_Marked_SaysSo()
-    {
-        _bucket["hls/.jellyfin-hls"] = [1];
-
-        Assert.True((await CreateStore().TestAsync(CancellationToken)).HasMarker);
-    }
-
-    [Fact]
-    public async Task TestAsync_WriteRefused_FailsWithTheMessageOfTheStorage()
-    {
-        Refuse = request => request.Method == HttpMethod.Put
-            ? new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent("<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>") }
-            : null;
-
-        var result = await CreateStore().TestAsync(CancellationToken);
-
-        Assert.False(result.Success);
-        Assert.EndsWith(" failed: 403 AccessDenied: Access Denied", result.Message, StringComparison.Ordinal);
-        Assert.Empty(_deleted);
-    }
-
-    [Fact]
-    public async Task TestAsync_ReadRefused_DeletesTheTestObject()
-    {
-        Refuse = request => request.Method == HttpMethod.Get ? new HttpResponseMessage(HttpStatusCode.Forbidden) : null;
-
-        var result = await CreateStore().TestAsync(CancellationToken);
-
-        Assert.False(result.Success);
-        Assert.Single(_deleted);
-        Assert.Empty(_bucket);
+        Assert.Equal("s3://media/hls", store.Location);
+        Assert.Equal("s3://media", CreateStore(string.Empty).Location);
     }
 
     private static Uri Address(string target, string method)
@@ -235,35 +182,5 @@ public class NetworkHlsStoreTests
             .ToArray();
     }
 
-    private NetworkHlsStore CreateStore(string prefix = "hls/")
-    {
-        var factory = new Mock<IHttpClientFactory>();
-        factory.Setup(f => f.CreateClient(It.IsAny<string>())).Returns(() => new HttpClient(new BucketHandler(this), true));
-        return new NetworkHlsStore(_networkStorage.Object, factory.Object, "media", prefix);
-    }
-
-    // Writes and reads the fake bucket by the path of the address.
-    private sealed class BucketHandler(NetworkHlsStoreTests test) : HttpMessageHandler
-    {
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            var path = request.RequestUri!.AbsolutePath;
-            test._sent.Add(request.Method + " " + path);
-            if (test.Refuse(request) is { } refused)
-            {
-                return refused;
-            }
-
-            var key = path["/media/".Length..];
-            if (request.Method == HttpMethod.Put)
-            {
-                test._bucket[key] = await request.Content!.ReadAsByteArrayAsync(cancellationToken);
-                return new HttpResponseMessage(HttpStatusCode.OK);
-            }
-
-            return test._bucket.TryGetValue(key, out var content)
-                ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(content) }
-                : new HttpResponseMessage(HttpStatusCode.NotFound);
-        }
-    }
+    private NetworkHlsStore CreateStore(string prefix = "hls/") => new(_networkStorage.Object, "media", prefix);
 }

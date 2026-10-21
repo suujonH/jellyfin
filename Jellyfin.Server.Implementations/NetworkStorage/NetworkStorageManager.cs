@@ -291,14 +291,6 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
     }
 
     /// <inheritdoc />
-    public Uri? GetUploadAddress(string target, TimeSpan lifetime)
-        => TryLocate(target, out var location, out var protocol)
-            && protocol is IObjectStorageProtocol objects
-            && FindAccess(protocol, location.Container) is { } access
-                ? objects.GetUploadAddress(access.Access, location, DateTime.UtcNow, lifetime)
-                : null;
-
-    /// <inheritdoc />
     public async Task<IReadOnlyList<StorageObject>> ListAsync(string prefix, int? limit, CancellationToken cancellationToken)
     {
         var (location, protocol, access) = LocateWritable(prefix);

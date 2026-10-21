@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Database.Implementations;
@@ -79,13 +78,11 @@ internal sealed class HlsTestEnvironment : IDisposable
         Store = new HlsJobStore(factory.Object);
 
         Directory.CreateDirectory(TempDirectory);
-        _options = new HlsOptions { Enabled = true, Qualities = Qualities, Store = Root };
+        _options = new HlsOptions { Enabled = true, Qualities = Qualities };
         _configurationManager.Setup(m => m.GetConfiguration(HlsConfigurationStore.StoreKey)).Returns(() => _options);
-        Settings = new HlsSettings(
-            _configurationManager.Object,
-            storeFactory ?? new HlsStoreFactory(Mock.Of<INetworkStorageManager>(), Mock.Of<IHttpClientFactory>()),
-            NullLogger<HlsSettings>.Instance);
-        Monitor = new HlsRootMonitor(Store, NullLogger<HlsRootMonitor>.Instance);
+        Settings = new HlsSettings(_configurationManager.Object, NullLogger<HlsSettings>.Instance);
+        StoreFactory = storeFactory ?? new HlsStoreFactory(Mock.Of<INetworkStorageManager>());
+        Monitor = new HlsRootMonitor(Store, StoreFactory, Settings, NullLogger<HlsRootMonitor>.Instance);
         Index = new HlsPublishedIndex(Store);
     }
 
@@ -93,13 +90,15 @@ internal sealed class HlsTestEnvironment : IDisposable
 
     public HlsSettings Settings { get; }
 
+    public IHlsStoreFactory StoreFactory { get; }
+
     public HlsRootMonitor Monitor { get; }
 
     public HlsPublishedIndex Index { get; }
 
     public string TempDirectory { get; } = Path.Combine(Path.GetTempPath(), "jellyfin-hls-tests", Guid.NewGuid().ToString("N"));
 
-    // The local HLS store the settings name; it does not exist until a test creates it.
+    // The local HLS store the worker reports; it does not exist until a test creates it.
     public string Root => Path.Combine(TempDirectory, "hls");
 
     public DateTime Now { get; set; } = new(2026, 10, 17, 0, 0, 0, DateTimeKind.Utc);
@@ -153,22 +152,22 @@ internal sealed class HlsTestEnvironment : IDisposable
     }
 
     // Claims the oldest pending job and identifies its file as the content, which it must then encode.
-    public async Task<(HlsJobLease Lease, HlsEncodePlan Plan)> ClaimAndPlanAsync(string sha)
+    public async Task<(HlsJobLease Lease, HlsEncodePlan Plan)> ClaimAndPlanAsync(string sha, string? root = null)
     {
         var lease = await Store.ClaimAsync(new HlsClaimRequest("worker", Lease, _ => true, Now), CancellationToken);
         Assert.NotNull(lease);
-        var result = await Store.IdentifyAsync(new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, Probe, Qualities, Profile, _ => true, Now), CancellationToken);
+        var result = await Store.IdentifyAsync(new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, Probe, root ?? Root, Qualities, Profile, _ => true, Now), CancellationToken);
         Assert.Equal(HlsIdentifyOutcome.Planned, result.Outcome);
         return (lease, result.Plan!);
     }
 
     // A new library file identified as the content, whose outputs its source job submitted; their files are written to the store.
-    public async Task<(Guid Item, HlsJobLease Lease, HlsEncodePlan Plan)> SubmitAsync(string sha)
+    public async Task<(Guid Item, HlsJobLease Lease, HlsEncodePlan Plan)> SubmitAsync(string sha, string? root = null)
     {
         var item = await AddSourceAsync();
-        var (lease, plan) = await ClaimAndPlanAsync(sha);
+        var (lease, plan) = await ClaimAndPlanAsync(sha, root);
         Assert.Equal(item, lease.Input.ItemId);
-        WriteFiles(plan);
+        WriteFiles(plan, root);
         Assert.True(await Store.SubmitOutputsAsync(lease.Id, lease.LeaseToken, Outputs(plan), Now, CancellationToken));
         return (item, lease, plan);
     }
@@ -182,12 +181,12 @@ internal sealed class HlsTestEnvironment : IDisposable
     }
 
     // Writes the files a worker uploads for the plan.
-    public void WriteFiles(HlsEncodePlan plan)
+    public void WriteFiles(HlsEncodePlan plan, string? root = null)
     {
         var renditions = plan.Renditions.ToDictionary(r => r.Key, r => r.RelativeDirectory, StringComparer.Ordinal);
         foreach (var output in Outputs(plan))
         {
-            var directory = GetStorePath(renditions[output.Key]);
+            var directory = GetStorePath(renditions[output.Key], root);
             Directory.CreateDirectory(directory);
             foreach (var file in output.Files)
             {
@@ -222,7 +221,7 @@ internal sealed class HlsTestEnvironment : IDisposable
         await command.ExecuteNonQueryAsync(CancellationToken);
     }
 
-    public string GetStorePath(string relativeDirectory) => Path.Combine(Root, relativeDirectory.Replace('/', Path.DirectorySeparatorChar));
+    public string GetStorePath(string relativeDirectory, string? root = null) => Path.Combine(root ?? Root, relativeDirectory.Replace('/', Path.DirectorySeparatorChar));
 
     public JellyfinDbContext CreateDbContext()
         => new(

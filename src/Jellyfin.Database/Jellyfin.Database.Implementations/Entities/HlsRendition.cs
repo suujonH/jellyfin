@@ -38,6 +38,11 @@ public class HlsRendition
     public string? RelativeDirectory { get; set; }
 
     /// <summary>
+    /// Gets or sets the root of the HLS store the published directory is in: an absolute local path, or <c>s3://bucket/prefix</c>.
+    /// </summary>
+    public string? Base { get; set; }
+
+    /// <summary>
     /// Gets or sets the summary of the published output, a <c>MediaBrowser.Model.Hls.HlsRenditionSummary</c> as JSON.
     /// </summary>
     public string? Summary { get; set; }

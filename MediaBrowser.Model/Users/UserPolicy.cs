@@ -100,6 +100,13 @@ namespace MediaBrowser.Model.Users
         public bool EnableLyricManagement { get; set; }
 
         /// <summary>
+        /// Gets or sets a value indicating whether this user can play the original file of an item that has pre-encoded HLS,
+        /// where the settings of pre-encoded HLS allow the original at all.
+        /// </summary>
+        [DefaultValue(false)]
+        public bool EnableOriginalPlayback { get; set; }
+
+        /// <summary>
         /// Gets or sets a value indicating whether this instance is disabled.
         /// </summary>
         /// <value><c>true</c> if this instance is disabled; otherwise, <c>false</c>.</value>

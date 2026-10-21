@@ -213,14 +213,6 @@ public partial class S3StorageProtocol : IObjectStorageProtocol
     }
 
     /// <inheritdoc />
-    public Uri GetUploadAddress(NetworkStorageAccessDto access, StorageLocation location, DateTime now, TimeSpan lifetime)
-    {
-        ArgumentNullException.ThrowIfNull(access);
-        ArgumentNullException.ThrowIfNull(location);
-        return S3UrlSigner.GetUrl(ToS3Access(access), location.Container, location.ObjectPath, now, lifetime, "PUT", null);
-    }
-
-    /// <inheritdoc />
     public async Task<IReadOnlyList<StorageObject>> ListAsync(NetworkStorageAccessDto access, StorageLocation prefix, int? limit, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(access);

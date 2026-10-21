@@ -94,21 +94,50 @@ public sealed partial class HlsJobStore
             cancellationToken);
 
     /// <summary>
-    /// Gets the most recently published directories, which a store root that has no marker yet must still contain.
+    /// Gets the directories published last under a root, which the root must still contain while it has no marker.
     /// </summary>
+    /// <param name="root">The root.</param>
+    /// <param name="ignoreCase">Whether the root is matched whatever its case, as a local path on Windows is.</param>
     /// <param name="limit">The most directories to return.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The directories.</returns>
-    public Task<IReadOnlyList<string>> GetPublishedSampleAsync(int limit, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<string>> GetPublishedSampleAsync(string root, bool ignoreCase, int limit, CancellationToken cancellationToken)
         => ReadAsync<IReadOnlyList<string>>(
             async context => await context.HlsRenditions.AsNoTracking()
                 .Where(r => r.State == (int)HlsRenditionState.Published && r.RelativeDirectory != null)
+                .Where(r => ignoreCase ? EF.Functions.Collate(r.Base, "NOCASE") == root : r.Base == root)
                 .OrderByDescending(r => r.DatePublished)
                 .ThenBy(r => r.RelativeDirectory)
                 .Take(limit)
                 .Select(r => r.RelativeDirectory!)
                 .ToListAsync(cancellationToken)
                 .ConfigureAwait(false),
+            cancellationToken);
+
+    /// <summary>
+    /// Gets every root in use: of a published rendition, of a job whose outputs wait to be verified, or of a queued deletion.
+    /// </summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The roots, in order.</returns>
+    public Task<IReadOnlyList<string>> GetRootsAsync(CancellationToken cancellationToken)
+        => ReadAsync<IReadOnlyList<string>>(
+            async context =>
+            {
+                var published = await context.HlsRenditions.AsNoTracking()
+                    .Where(r => r.State == (int)HlsRenditionState.Published && r.Base != null)
+                    .Select(r => r.Base!)
+                    .Distinct()
+                    .ToListAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                var verifying = await context.HlsJobs.AsNoTracking()
+                    .Where(j => j.Status == (int)HlsJobStatus.Verifying && j.Base != null)
+                    .Select(j => j.Base!)
+                    .Distinct()
+                    .ToListAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                var deletions = await context.HlsDeletions.AsNoTracking().Select(d => d.Base).Distinct().ToListAsync(cancellationToken).ConfigureAwait(false);
+                return published.Concat(verifying).Concat(deletions).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList();
+            },
             cancellationToken);
 
     /// <summary>
@@ -125,12 +154,12 @@ public sealed partial class HlsJobStore
                         context.HlsJobOutputs.AsNoTracking(),
                         r => new { JobId = r.PublishedJobId, r.Key },
                         o => new { JobId = (Guid?)o.JobId, o.Key },
-                        (r, o) => new { r.Sha256, r.Key, o.RelativeDirectory, o.Files })
+                        (r, o) => new { r.Sha256, r.Key, r.Base, o.RelativeDirectory, o.Files })
                     .OrderBy(m => m.Sha256)
                     .ThenBy(m => m.Key)
                     .ToListAsync(cancellationToken)
                     .ConfigureAwait(false))
-                .Select(m => new HlsPublishedManifest(m.Sha256, m.Key, m.RelativeDirectory, Deserialize<List<HlsOutputFile>>(m.Files)))
+                .Select(m => new HlsPublishedManifest(m.Sha256, m.Key, m.Base ?? string.Empty, m.RelativeDirectory, Deserialize<List<HlsOutputFile>>(m.Files)))
                 .ToList(),
             cancellationToken);
 
@@ -155,10 +184,11 @@ public sealed partial class HlsJobStore
                     return false;
                 }
 
-                await QueueDeletionAsync(context, expectedDirectory, now, reason, cancellationToken).ConfigureAwait(false);
+                await QueueDeletionAsync(context, rendition.Base, expectedDirectory, now, reason, cancellationToken).ConfigureAwait(false);
                 await RemoveOutputAsync(context, rendition.PublishedJobId, key, cancellationToken).ConfigureAwait(false);
                 rendition.State = (int)HlsRenditionState.Missing;
                 rendition.RelativeDirectory = null;
+                rendition.Base = null;
                 rendition.Summary = null;
                 rendition.PublishedJobId = null;
                 return true;
@@ -177,6 +207,7 @@ public sealed partial class HlsJobStore
             (HlsRenditionState)rendition.State,
             rendition.JobId,
             rendition.PublishedJobId,
+            rendition.Base,
             rendition.RelativeDirectory,
             rendition.Summary is null ? null : Deserialize<HlsRenditionSummary>(rendition.Summary),
             rendition.Profile);
@@ -190,7 +221,7 @@ public sealed partial class HlsJobStore
         {
             if (rendition.RelativeDirectory is { } directory)
             {
-                await QueueDeletionAsync(context, directory, now, "The rendition is no longer wanted.", cancellationToken).ConfigureAwait(false);
+                await QueueDeletionAsync(context, rendition.Base, directory, now, "The rendition is no longer wanted.", cancellationToken).ConfigureAwait(false);
                 await RemoveOutputAsync(context, rendition.PublishedJobId, rendition.Key, cancellationToken).ConfigureAwait(false);
             }
 

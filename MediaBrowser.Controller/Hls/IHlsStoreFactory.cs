@@ -3,7 +3,7 @@ using System;
 namespace MediaBrowser.Controller.Hls;
 
 /// <summary>
-/// Opens the HLS store a setting names.
+/// Opens the HLS store a root names.
 /// </summary>
 public interface IHlsStoreFactory
 {

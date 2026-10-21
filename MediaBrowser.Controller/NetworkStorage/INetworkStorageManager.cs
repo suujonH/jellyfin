@@ -98,14 +98,6 @@ public interface INetworkStorageManager
     Uri? GetServerAddress(string target, string method);
 
     /// <summary>
-    /// Gets an address an object can be written at with PUT, at the endpoint of its access.
-    /// </summary>
-    /// <param name="target">The object, such as <c>s3://bucket/key</c>.</param>
-    /// <param name="lifetime">How long the address stays valid.</param>
-    /// <returns>The address, or <c>null</c> when the storage cannot be written or no access covers it.</returns>
-    Uri? GetUploadAddress(string target, TimeSpan lifetime);
-
-    /// <summary>
     /// Lists the objects whose keys start with a prefix, in key order.
     /// </summary>
     /// <param name="prefix">The bucket and the prefix of the keys, such as <c>s3://bucket/hls/</c>.</param>

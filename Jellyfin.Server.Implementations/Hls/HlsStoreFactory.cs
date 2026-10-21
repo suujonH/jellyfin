@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using System.Net.Http;
 using MediaBrowser.Common.Net.S3;
 using MediaBrowser.Controller.Hls;
 using MediaBrowser.Controller.NetworkStorage;
@@ -8,30 +7,20 @@ using MediaBrowser.Controller.NetworkStorage;
 namespace Jellyfin.Server.Implementations.Hls;
 
 /// <summary>
-/// Opens the HLS store a setting names: a local directory, or a prefix of a bucket of network storage.
+/// Opens the HLS store a root names: a local directory, or a prefix of a bucket of network storage.
 /// </summary>
 public class HlsStoreFactory : IHlsStoreFactory
 {
     private readonly INetworkStorageManager _networkStorage;
-    private readonly IHttpClientFactory _httpClientFactory;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="HlsStoreFactory"/> class.
     /// </summary>
     /// <param name="networkStorage">The network storage.</param>
-    /// <param name="httpClientFactory">The HTTP client factory.</param>
-    public HlsStoreFactory(INetworkStorageManager networkStorage, IHttpClientFactory httpClientFactory)
+    public HlsStoreFactory(INetworkStorageManager networkStorage)
     {
         _networkStorage = networkStorage;
-        _httpClientFactory = httpClientFactory;
     }
-
-    /// <summary>
-    /// Checks that a setting names a store, without opening it.
-    /// </summary>
-    /// <param name="location">An absolute local path, or <c>s3://bucket/prefix</c>, where the prefix may be empty.</param>
-    /// <exception cref="ArgumentException">The location is neither.</exception>
-    public static void Validate(string location) => _ = Parse(location);
 
     /// <inheritdoc />
     public IHlsStore Create(string location)
@@ -39,7 +28,7 @@ public class HlsStoreFactory : IHlsStoreFactory
         var (bucket, path) = Parse(location);
         return bucket is null
             ? new LocalHlsStore(path)
-            : new NetworkHlsStore(_networkStorage, _httpClientFactory, bucket, path.Length == 0 ? string.Empty : path + "/");
+            : new NetworkHlsStore(_networkStorage, bucket, path.Length == 0 ? string.Empty : path + "/");
     }
 
     // The bucket and the prefix of network storage, or no bucket and the full path of a local directory.

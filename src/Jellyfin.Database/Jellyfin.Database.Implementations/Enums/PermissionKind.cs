@@ -124,4 +124,9 @@ public enum PermissionKind
     /// Whether the user can edit lyrics.
     /// </summary>
     EnableLyricManagement = 23,
+
+    /// <summary>
+    /// Whether the user can play the original file of an item that has pre-encoded HLS.
+    /// </summary>
+    EnableOriginalPlayback = 24,
 }
