@@ -251,6 +251,8 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 **状态机**：以插件的为基础，租约、心跳、重试、取消、校验、发布和删除队列的规则不变；探测和编码合并为一种任务（见 5.2）。插件的 `JobStoreTests` 移植过来，并按新流程改写。
 
 **设置**：放在命名配置 `hls`（`HlsOptions`），包括：启用、媒体库、档位、存储、原始资源策略、租约、重试、孤儿保留、播放授权有效期和签名密钥。不再有「校验修改时间」：Worker 不再上报修改时间，本地存储的文件由服务器自己写入。
+- 保存时校验（`IValidatingConfiguration`），读取时再校验一次：手改的无效设置按关闭处理，并记错误日志。
+- 存储在每次保存设置时打开一次。更换存储只记警告，不迁移成果：已发布的档位按相对路径从新存储读取，新存储没有标记、样本也不在时不可信。要么把成果连同标记复制过去，要么在新存储放上标记后执行「校验已发布成果」，缺失的档位重新编码，旧存储不清理。
 
 **纯逻辑**（`src/Jellyfin.MediaEncoding.Hls/Published/`，移植插件）：探测解析、阶梯、档位、目录布局、完成校验。DTO 在 `MediaBrowser.Model/Hls/`，Worker API 与任务中心共用；插件的类型名加 `Hls` 前缀（`HlsProbe`、`HlsRenditionSummary` 等），字段不变。
 
@@ -259,6 +261,11 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 1. **同步**：后台循环，每 5 秒一次，并跟随媒体库事件。
    - 选定媒体库中的视频：本地文件，以及目标能解析的 `.strm`（s3、http(s)；归档存储也包括在内，预编码正好让归档原件也能播放）。
    - 记录路径或目标、大小、修改时间。`.strm` 的大小用 TrueCache 的 `MediaSize`，修改时间用 `.strm` 文件的。
+   - 只取 `VideoType` 为 `VideoFile` 的条目（光盘目录等不预编码）；`.strm` 的目标须由网络存储解析为 http(s) 地址；大小只取 TrueCache 条目声明的，没有时跳过（条目的 `Size` 这时是文本文件本身的大小）。
+   - 文件夹属于多个媒体库时，任意一个被选中即可。
+   - 检查或记录某个条目时出错，保留它原有的记录，不当作已删除，下次全量排程（每 10 分钟）时重试；同步某个内容的档位出错时同样重试，因为全量排程只能找到已有的档位。
+   - 媒体库事件从任务中心创建时就开始记录，启动时的首次全量同步之前发生的变化也不会丢失。
+   - 发布索引某次刷新失败时，记下没有读到的条目和内容，下次刷新一并读取；任务中心每 5 秒请求一次，所以提交之后的刷新失败不会让播放长期看不到变化。
 2. **排程**：
    - 来源还没有哈希（新文件或指纹变化）：建任务 `source:{ItemId}`。
    - 哈希已知但有缺失的档位（新增档位、编码配置变化、校验失败）：建任务 `media:{Sha256}`，输入取该内容的任意一个来源，优先原条目。
@@ -283,8 +290,14 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 
    上报的各段时长会保存下来，用来生成播放列表。
 6. **校验**：本地目录逐个 stat；网络存储按档位目录 List，核对大小。根目录不可信时暂停。
-7. **发布**：在一个事务里把档位切换到新目录。被替换的目录在宽限期后删除，宽限期取播放授权有效期与存储外部地址有效期中较长的一个。
+   - 有待校验的任务时才检查根目录：网络存储的每次检查都要发请求。
+   - 某个档位核对失败时再检查一次根目录，仍然可信才判定校验失败，否则任务留在校验中。
+   - 「校验已发布成果」对每一个核对失败的档位都先检查根目录，不可信时停止，已撤下的档位照常刷新索引并排程。
+7. **发布**：在一个事务里把档位切换到新目录。被替换的目录在宽限期后删除，宽限期取播放授权有效期与存储外部地址有效期中较长的一个。第 4 阶段只用播放授权有效期，外部地址有效期随第 5 阶段的直连加入。
 8. **删除队列**：失败按 1、2、4 分钟……退避重试，最长 6 小时，不阻塞派发。
+   - 删除之后根目录仍然可信，才把这一批移出队列：从失去挂载的根目录「删除」的目录可能根本不在那里。
+   - 路径不合法的记录记日志后移出队列，不删除任何东西。
+   - 已知限制：最后一个已发布的内容成为孤儿、而它的目录删除之前挂载恰好失效时，没有样本可核对，空的挂载点会被当作新存储，这批记录移出队列，文件留在原存储上。只会遗留文件，不会误删或重新编码；要避免它，需要记住根目录曾经有过标记。
 9. **租约**：心跳续期。过期算一次失败，计划中的目录在一个租约长度之后删除。
 10. **孤儿**：没有任何来源引用的内容，超过保留时间后删除它的成果。
 
@@ -414,7 +427,7 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 
 ### 7.2 授权与播放列表
 
-**授权**：匿名授权放在路径里（移植 `PlaybackGrant`），客户端不需要认证头。
+**授权**：匿名授权放在路径里（移植 `PlaybackGrant`），客户端不需要认证头。签名密钥为空时，第一次签发授权前生成并保存（第 4 阶段只校验格式：空，或至少 32 字节的 Base64）。
 
 **路由**（`HlsDeliveryController`）：
 - `GET /HlsPlayback/{grant}/master.m3u8`、`{q}p.m3u8`，可加 `-a{序号}` 后缀：主播放列表，按请求时已发布的内容生成。
@@ -438,6 +451,7 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 ### 7.4 版本条目
 
 移植 `VersionCatalog`：每个已发布的档位和「自动」各建一个视频条目，作为原始条目的备用版本，供按 id 打开版本的客户端（如 Android TV）使用。
+- 第 4 阶段的同步还没有排除这些条目，随本节实现：同步跳过版本条目，发布索引增加 `Changed` 事件和 `FindOriginalByPath`，供版本条目跟随发布变化。
 
 ## 八、管理页与 API
 
@@ -625,4 +639,5 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - 2026-10-22：第 2 阶段完成：`Sessions/`（`HlsSessionManager`、`HlsSession`、`HlsEncoderRun`、`list.csv` 读取器与 `HlsSegmentLocator`）、控制器改用新链路（新的切片 URL、由计划写出的 `main.m3u8`、segment muxer 命令行、拼接发送 GOP 文件的 `ConcatenatedFileResult`）、节流与清理改用 run 给出的位置和文件、复用任务时重新解析源地址、迁移 `DeleteUnalignedKeyframeData` 与 `AddMp4KeyframeExtraction`。旧的 `DynamicHlsPlaylistGenerator` 删除，`IsExtractionAllowedForFile` 移入 `KeyframeSource`。配置 ffmpeg 时 MediaEncoding.Hls 142 个测试全部通过（含真实 ffmpeg 的 run 测试），Api 169 个、Controller 218 个、MediaEncoding 194 个、Server 41 个、Integration 129 个通过。
 - 2026-10-22：第 3 阶段完成：`IHlsStore` 与 `IHlsStoreFactory`，本地目录与网络存储两种实现（根目录标记、写入、列出、删除、地址、存储测试）；`INetworkStorageManager` 的客户端、服务器、上传地址与列出、删除；`IObjectStorageProtocol` 与 `S3StorageProtocol` 的预签名 PUT、ListObjectsV2 分页、DeleteObjects 及其回退。S3 的应答按根元素核对（`ListBucketResult`、`DeleteResult`），代理的登录页等其他文档不会被当作空列表。Server.Implementations 中 HLS 存储与网络存储的 137 个测试全部通过（另有 2 个本地化测试因系统语言为中文而失败，与本阶段无关）。
 - 2026-10-22：第 4a 阶段完成：`MediaBrowser.Model/Hls/` 的 DTO；`Published/` 的纯逻辑（探测解析、阶梯、档位、目录布局、完成校验）；七个实体与迁移 `AddHlsTaskCenter`；`HlsJobStore`（来源、媒体、来源任务与媒体任务的领取、识别、提交、发布、失败与租约、档位、孤儿、删除队列）。与 5.3 的差别已写回：「持有租约」以 `LeaseExpires` 为准，媒体任务只在内容有启用媒体库中的来源时创建，来源被删除时媒体任务回到等待，完成时释放档位，提交时按计划校验，来源任务换了内容时释放旧内容的档位。MediaBrowser.Model 与 Server.Implementations 构建 0 警告；MediaEncoding.Hls 295 个测试通过（未配置 ffmpeg，44 个跳过），Server.Implementations 中 HLS 的 105 个测试（其中 `HlsJobStore` 41 个）全部通过。
-- 下一步：第 4 阶段（任务中心）。
+- 2026-10-22：第 4b 阶段完成：命名配置 `hls`（`HlsOptions`，保存时校验）、`HlsSettings`、`HlsRootMonitor`、发布索引 `HlsPublishedIndex`、任务中心循环 `HlsCoordinator`（同步、排程、租约回收、全量排程、孤儿）、`HlsVerificationService`（校验、发布、校验已发布成果）、`HlsDeletionService`，三个服务注册为托管服务。与 5.2 的差别已写回：只取 `VideoFile`、`.strm` 的大小只取 TrueCache 条目、多媒体库任选其一、失败在下次全量排程时重试、根目录只在有工作时检查、宽限期暂用播放授权有效期、索引刷新失败自动补读、删除队列的已知限制；签名密钥的生成与版本条目的排除留到第 5 阶段（见 7.2、7.4）。另有一个提交修复 Debug 构建的分析器错误（master 的网络存储代码与前几个阶段的 HLS 代码），WSL 下 Debug 构建 0 错误。Release 构建 0 警告；Server.Implementations 中 HLS 的 163 个测试全部通过（另有 2 个本地化测试因系统语言为中文而失败），MediaEncoding.Hls 300 个（44 个跳过）、Integration 129 个通过。
+- 下一步：第 4c 阶段（Worker API、管理 API）。

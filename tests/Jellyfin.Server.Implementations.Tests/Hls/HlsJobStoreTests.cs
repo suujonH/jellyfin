@@ -3,82 +3,36 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
-using System.Threading;
 using System.Threading.Tasks;
-using Jellyfin.Database.Implementations;
 using Jellyfin.Database.Implementations.Entities;
-using Jellyfin.Database.Implementations.Locking;
-using Jellyfin.Database.Providers.Sqlite;
 using Jellyfin.MediaEncoding.Hls.Published;
 using Jellyfin.Server.Implementations.Hls;
-using MediaBrowser.Common.Configuration;
 using MediaBrowser.Model.Hls;
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging.Abstractions;
-using Moq;
 using Xunit;
+using static Jellyfin.Server.Implementations.Tests.Hls.HlsTestEnvironment;
 
 namespace Jellyfin.Server.Implementations.Tests.Hls;
 
 public sealed class HlsJobStoreTests : IDisposable
 {
-    private const string Profile = HlsEncodingProfile.Version;
     private const string NextProfile = "next-profile";
     private const int MaxAttempts = 3;
 
-    private static readonly TimeSpan _lease = TimeSpan.FromMinutes(5);
-
-    // What the verification passes to PublishAsync: the lifetime of a playback grant.
-    private static readonly TimeSpan _replacedGrace = TimeSpan.FromHours(24);
-    private static readonly int[] _qualities = [1080, 720];
-    private static readonly Guid _library = Guid.Parse("0123456789abcdef0123456789abcdef");
-    private static readonly Guid _otherLibrary = Guid.Parse("fedcba9876543210fedcba9876543210");
-    private static readonly DateTime _modified = new(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc);
-
-    // One audio track (index 1), one text subtitle (index 2) and one graphic subtitle (index 3, never planned); 60 seconds, so 10 segments.
-    private static readonly HlsProbe _probe = new(
-        1920,
-        1080,
-        25,
-        60,
-        "h264",
-        "yuv420p",
-        "bt709",
-        "progressive",
-        0,
-        [new(1, "aac", 6, 48000, "eng", string.Empty, true)],
-        [new(2, "subrip", "eng", string.Empty, false), new(3, "hdmv_pgs_subtitle", "eng", string.Empty, false)]);
-
-    // HlsRenditionPlanner.GetDesired(_probe, _qualities), in planner order, and in the order the store lists them.
+    // HlsRenditionPlanner.GetDesired(Probe, Qualities), in planner order, and in the order the store lists them.
     private static readonly string[] _plannedKeys = ["v1080", "v720", "a1", "s2", "preview"];
     private static readonly string[] _sortedKeys = ["a1", "preview", "s2", "v1080", "v720"];
 
-    private readonly SqliteConnection _connection;
-    private readonly DbContextOptions<JellyfinDbContext> _dbOptions;
+    private readonly HlsTestEnvironment _environment = new();
     private readonly HlsJobStore _store;
     private DateTime _now = new(2026, 10, 17, 0, 0, 0, DateTimeKind.Utc);
 
     public HlsJobStoreTests()
     {
-        _connection = new SqliteConnection("Data Source=:memory:");
-        _connection.Open();
-        _dbOptions = new DbContextOptionsBuilder<JellyfinDbContext>().UseSqlite(_connection).Options;
-        using (var context = CreateDbContext())
-        {
-            context.Database.EnsureCreated();
-        }
-
-        var factory = new Mock<IDbContextFactory<JellyfinDbContext>>();
-        factory.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>())).ReturnsAsync(CreateDbContext);
-        _store = new HlsJobStore(factory.Object);
+        _store = _environment.Store;
     }
 
-    public void Dispose()
-    {
-        _store.Dispose();
-        _connection.Dispose();
-    }
+    public void Dispose() => _environment.Dispose();
 
     // ---- Sources
 
@@ -90,7 +44,7 @@ public sealed class HlsJobStoreTests : IDisposable
         var other = Guid.NewGuid();
 
         var results = await _store.UpsertSourcesAsync(
-            [LibraryFile(item, _otherLibrary), LibraryFile(other), LibraryFile(item) with { Length = 2000 }],
+            [LibraryFile(item, OtherLibraryId), LibraryFile(other), LibraryFile(item) with { Length = 2000 }],
             _now,
             TestContext.Current.CancellationToken);
 
@@ -199,10 +153,10 @@ public sealed class HlsJobStoreTests : IDisposable
     [Fact]
     public async Task Claim_CancelsSourceJobsOutsideTheEnabledLibraries()
     {
-        var other = await AddSourceAsync(_otherLibrary);
+        var other = await AddSourceAsync(OtherLibraryId);
         var item = await AddSourceAsync();
 
-        var lease = await ClaimAsync(eligible: l => l.Equals(_library));
+        var lease = await ClaimAsync(eligible: l => l.Equals(LibraryId));
 
         Assert.Equal(item, lease!.Input.ItemId);
         Assert.Equal((int)HlsJobStatus.Cancelled, (await SourceJobAsync(other)).Status);
@@ -220,19 +174,19 @@ public sealed class HlsJobStoreTests : IDisposable
         Assert.Equal(HlsJobKind.Source, lease.Kind);
         Assert.Equal(LibraryFile(item), lease.Input);
         Assert.Equal(1, lease.Attempt);
-        Assert.Equal(_now + _lease, lease.LeaseExpires);
+        Assert.Equal(_now + Lease, lease.LeaseExpires);
         Assert.Null(lease.Plan);
         Assert.Equal("worker", (await JobAsync(lease.Id)).Worker);
 
-        Assert.False(await _store.HeartbeatAsync(lease.Id, "other", _lease, _now, TestContext.Current.CancellationToken));
+        Assert.False(await _store.HeartbeatAsync(lease.Id, "other", Lease, _now, TestContext.Current.CancellationToken));
         Assert.Null(await _store.GetLeaseAsync(lease.Id, "other", _now, TestContext.Current.CancellationToken));
 
         _now += TimeSpan.FromMinutes(4);
-        Assert.True(await _store.HeartbeatAsync(lease.Id, lease.LeaseToken, _lease, _now, TestContext.Current.CancellationToken));
-        Assert.Equal(_now + _lease, (await _store.GetLeaseAsync(lease.Id, lease.LeaseToken, _now, TestContext.Current.CancellationToken))!.LeaseExpires);
+        Assert.True(await _store.HeartbeatAsync(lease.Id, lease.LeaseToken, Lease, _now, TestContext.Current.CancellationToken));
+        Assert.Equal(_now + Lease, (await _store.GetLeaseAsync(lease.Id, lease.LeaseToken, _now, TestContext.Current.CancellationToken))!.LeaseExpires);
 
-        _now += _lease;
-        Assert.False(await _store.HeartbeatAsync(lease.Id, lease.LeaseToken, _lease, _now, TestContext.Current.CancellationToken));
+        _now += Lease;
+        Assert.False(await _store.HeartbeatAsync(lease.Id, lease.LeaseToken, Lease, _now, TestContext.Current.CancellationToken));
         Assert.Null(await _store.GetLeaseAsync(lease.Id, lease.LeaseToken, _now, TestContext.Current.CancellationToken));
         Assert.Equal(HlsIdentifyOutcome.LeaseLost, (await IdentifyAsync(lease, Sha('a'))).Outcome);
     }
@@ -255,7 +209,7 @@ public sealed class HlsJobStoreTests : IDisposable
         Assert.Equal(Sha('a'), plan.Sha256);
         Assert.Equal(mediaKey, plan.MediaKey);
         Assert.Equal(Profile, plan.Profile);
-        Assert.Equal(Json(_probe), Json(plan.Probe));
+        Assert.Equal(Json(Probe), Json(plan.Probe));
         Assert.Equal(6, plan.SegmentSeconds);
         Assert.Equal(2, plan.KeyframeSeconds);
         Assert.Equal(48000, plan.AudioSampleRate);
@@ -271,7 +225,7 @@ public sealed class HlsJobStoreTests : IDisposable
         Assert.Equal(Sha('a'), (await _store.GetSourceAsync(item, TestContext.Current.CancellationToken))!.Sha256);
         var media = (await _store.GetMediaAsync(Sha('a'), TestContext.Current.CancellationToken))!;
         Assert.Equal(mediaKey, media.MediaKey);
-        Assert.Equal(_library, media.LibraryId);
+        Assert.Equal(LibraryId, media.LibraryId);
         Assert.Null(media.DateOrphaned);
         Assert.Equal([Sha('a')], await _store.GetMediaShasAsync(TestContext.Current.CancellationToken));
         var renditions = await _store.GetRenditionsAsync(Sha('a'), TestContext.Current.CancellationToken);
@@ -319,7 +273,7 @@ public sealed class HlsJobStoreTests : IDisposable
     public async Task Identify_KnownContent_KeepsItsStoredProbe()
     {
         await EncodeAndPublishAsync(Sha('a'));
-        var other = _probe with { Rotation = 90, FramesPerSecond = 50 };
+        var other = Probe with { Rotation = 90, FramesPerSecond = 50 };
         await AddSourceAsync();
         var lease = (await ClaimAsync())!;
 
@@ -329,8 +283,8 @@ public sealed class HlsJobStoreTests : IDisposable
         Assert.Equal(HlsIdentifyOutcome.Planned, result.Outcome);
         Assert.True(result.KeptStoredProbe);
         var plan = result.Plan!;
-        Assert.Equal(Json(_probe), Json(plan.Probe));
-        Assert.Equal(Json(_probe), Json((await _store.GetMediaAsync(Sha('a'), TestContext.Current.CancellationToken))!.Probe));
+        Assert.Equal(Json(Probe), Json(plan.Probe));
+        Assert.Equal(Json(Probe), Json((await _store.GetMediaAsync(Sha('a'), TestContext.Current.CancellationToken))!.Probe));
         Assert.Equal(25, plan.Renditions[0].Video!.FramesPerSecond);
     }
 
@@ -477,7 +431,7 @@ public sealed class HlsJobStoreTests : IDisposable
     public async Task Claim_MediaJobReadsItsItem_OrAnotherFileOfTheContent()
     {
         var (first, _, _) = await EncodeAndPublishAsync(Sha('a'));
-        var second = await AddSourceAsync(_otherLibrary);
+        var second = await AddSourceAsync(OtherLibraryId);
         Assert.Equal(HlsIdentifyOutcome.Done, (await IdentifyAsync((await ClaimAsync())!, Sha('a'))).Outcome);
         var id = await EnsureMediaJobAsync(Sha('a'), NextProfile, second);
 
@@ -485,7 +439,7 @@ public sealed class HlsJobStoreTests : IDisposable
         Assert.Equal((id, second), (lease.Id, lease.Input.ItemId));
         Assert.True(await ReleaseAsync(lease));
 
-        lease = (await ClaimAsync(eligible: l => l.Equals(_library)))!;
+        lease = (await ClaimAsync(eligible: l => l.Equals(LibraryId)))!;
         Assert.Equal((id, first, 2), (lease.Id, lease.Input.ItemId, lease.Attempt));
     }
 
@@ -522,7 +476,7 @@ public sealed class HlsJobStoreTests : IDisposable
         Assert.Equal((int)HlsJobStatus.Verifying, job.Status);
         Assert.Null(job.LeaseExpires);
         Assert.False(await SubmitAsync(lease, Outputs(plan)));
-        Assert.False(await _store.HeartbeatAsync(lease.Id, lease.LeaseToken, _lease, _now, TestContext.Current.CancellationToken));
+        Assert.False(await _store.HeartbeatAsync(lease.Id, lease.LeaseToken, Lease, _now, TestContext.Current.CancellationToken));
         var verifying = Assert.Single(await _store.GetVerifyingJobsAsync(10, TestContext.Current.CancellationToken));
         Assert.Equal((lease.Id, Sha('a'), 1), (verifying.Id, verifying.Sha256, verifying.Attempt));
         Assert.Equal(_sortedKeys, verifying.Outputs.Select(o => o.Key));
@@ -550,7 +504,7 @@ public sealed class HlsJobStoreTests : IDisposable
 
         Assert.Equal(Sha('a'), result.Sha256);
         Assert.Equal(_sortedKeys, result.PublishedKeys);
-        AssertQueued(await DeletionsAsync(), Directories(plan), _now + _replacedGrace);
+        AssertQueued(await DeletionsAsync(), Directories(plan), _now + ReplacedGrace);
         Assert.Equal(Directories(nextPlan), (await _store.GetPublishedManifestsAsync(null, TestContext.Current.CancellationToken)).Select(m => m.RelativeDirectory).Order(StringComparer.Ordinal));
         Assert.Empty(await OutputsAsync(lease.Id));
         Assert.Equal((int)HlsJobStatus.Complete, (await JobAsync(next.Id)).Status);
@@ -698,7 +652,7 @@ public sealed class HlsJobStoreTests : IDisposable
         var grace = TimeSpan.FromMinutes(10);
         Assert.Equal(0, await _store.ReapExpiredLeasesAsync(MaxAttempts, grace, _now, TestContext.Current.CancellationToken));
 
-        _now += _lease;
+        _now += Lease;
         Assert.Equal(1, await _store.ReapExpiredLeasesAsync(MaxAttempts, grace, _now, TestContext.Current.CancellationToken));
 
         AssertQueued(await DeletionsAsync(), Directories(plan), _now + grace);
@@ -716,7 +670,7 @@ public sealed class HlsJobStoreTests : IDisposable
 
         Assert.True(await _store.CancelJobAsync(id!.Value, _now, TestContext.Current.CancellationToken));
 
-        Assert.False(await _store.HeartbeatAsync(lease.Id, lease.LeaseToken, _lease, _now, TestContext.Current.CancellationToken));
+        Assert.False(await _store.HeartbeatAsync(lease.Id, lease.LeaseToken, Lease, _now, TestContext.Current.CancellationToken));
         Assert.Equal(HlsIdentifyOutcome.LeaseLost, (await IdentifyAsync(lease, Sha('a'), NextProfile)).Outcome);
         Assert.Equal([Sha('a')], await _store.GetShasNeedingJobsAsync(NextProfile, TestContext.Current.CancellationToken));
         Assert.Null(await EnsureMediaJobAsync(Sha('a'), NextProfile));
@@ -740,12 +694,12 @@ public sealed class HlsJobStoreTests : IDisposable
         var (lease, plan) = await ClaimAndPlanAsync(Sha('a'));
         Assert.True(await _store.CancelJobAsync(lease.Id, _now, TestContext.Current.CancellationToken));
 
-        _now += _lease;
-        Assert.Equal(1, await _store.ReapExpiredLeasesAsync(MaxAttempts, _replacedGrace, _now, TestContext.Current.CancellationToken));
+        _now += Lease;
+        Assert.Equal(1, await _store.ReapExpiredLeasesAsync(MaxAttempts, ReplacedGrace, _now, TestContext.Current.CancellationToken));
 
         var job = await JobAsync(lease.Id);
         Assert.Equal(((int)HlsJobStatus.Cancelled, 1, (string?)null, (DateTime?)null), (job.Status, job.Attempt, job.Error, job.LeaseExpires));
-        AssertQueued(await DeletionsAsync(), Directories(plan), _now + _replacedGrace);
+        AssertQueued(await DeletionsAsync(), Directories(plan), _now + ReplacedGrace);
     }
 
     [Fact]
@@ -784,11 +738,11 @@ public sealed class HlsJobStoreTests : IDisposable
         AssertQueued(deletions, Directories(plan), _now);
         Assert.All(deletions, d => Assert.Equal("The job was cancelled.", d.Reason));
         Assert.Empty(await _store.GetVerifyingJobsAsync(10, TestContext.Current.CancellationToken));
-        Assert.Null(await _store.PublishAsync(lease.Id, _replacedGrace, _now, TestContext.Current.CancellationToken));
+        Assert.Null(await _store.PublishAsync(lease.Id, ReplacedGrace, _now, TestContext.Current.CancellationToken));
         Assert.All(await _store.GetRenditionsAsync(Sha('b'), TestContext.Current.CancellationToken), r => Assert.Equal((HlsRenditionState.Missing, (Guid?)null), (r.State, r.JobId)));
 
         // Nothing is left to release or reap: submitting the outputs ended the lease.
-        Assert.Equal(0, await _store.ReapExpiredLeasesAsync(MaxAttempts, _replacedGrace, _now + _lease, TestContext.Current.CancellationToken));
+        Assert.Equal(0, await _store.ReapExpiredLeasesAsync(MaxAttempts, ReplacedGrace, _now + Lease, TestContext.Current.CancellationToken));
         Assert.NotNull(await EnsureMediaJobAsync(Sha('b'), Profile));
     }
 
@@ -843,8 +797,8 @@ public sealed class HlsJobStoreTests : IDisposable
     public async Task SyncRenditions_AddsNewKeys_AndRemovesThoseNoLongerWanted()
     {
         var (_, _, plan) = await EncodeAndPublishAsync(Sha('a'));
-        Assert.False(await _store.SyncRenditionsAsync(Sha('a'), _qualities, _now, TestContext.Current.CancellationToken));
-        Assert.False(await _store.SyncRenditionsAsync(Sha('b'), _qualities, _now, TestContext.Current.CancellationToken));
+        Assert.False(await _store.SyncRenditionsAsync(Sha('a'), Qualities, _now, TestContext.Current.CancellationToken));
+        Assert.False(await _store.SyncRenditionsAsync(Sha('b'), Qualities, _now, TestContext.Current.CancellationToken));
 
         Assert.True(await _store.SyncRenditionsAsync(Sha('a'), [720, 480], _now, TestContext.Current.CancellationToken));
 
@@ -906,7 +860,7 @@ public sealed class HlsJobStoreTests : IDisposable
     {
         await AddSourceAsync();
         var (_, plan) = await ClaimAndPlanAsync(Sha('a'));
-        _now += _lease;
+        _now += Lease;
         await _store.ReapExpiredLeasesAsync(MaxAttempts, TimeSpan.FromMinutes(10), _now, TestContext.Current.CancellationToken);
         Assert.Empty(await _store.GetDueDeletionsAsync(_now, 10, TestContext.Current.CancellationToken));
 
@@ -946,35 +900,9 @@ public sealed class HlsJobStoreTests : IDisposable
 
     // ---- Helpers
 
-    private static string Sha(char c) => new(c, 64);
-
     private static string Json(object value) => JsonSerializer.Serialize(value);
 
-    private static HlsSourceFile LibraryFile(Guid item, Guid? libraryId = null)
-        => new(item, libraryId ?? _library, "/media/" + item.ToString("N", CultureInfo.InvariantCulture) + ".mkv", 1000, _modified);
-
     private static IEnumerable<string> Directories(HlsEncodePlan plan) => plan.Renditions.Select(r => r.RelativeDirectory).Order(StringComparer.Ordinal);
-
-    // What a worker reports: every rendition of the plan with the files and segment durations it should have.
-    private static HlsRenditionOutput[] Outputs(HlsEncodePlan plan)
-    {
-        HlsOutputFile[] segments = [new(HlsRenditionPaths.InitFile, 900), .. Enumerable.Range(0, plan.ExpectedSegments).Select(i => new HlsOutputFile(HlsRenditionPaths.GetSegmentFile(i), 1000))];
-        double[] durations = [.. Enumerable.Repeat(plan.SegmentSeconds, plan.ExpectedSegments)];
-        return
-        [
-            .. plan.Renditions.Select(r => r.Kind switch
-            {
-                HlsRenditionKind.Video => new HlsRenditionOutput(
-                    r.Key,
-                    new HlsRenditionSummary(r.Video!.Name, r.Video.Width, r.Video.Height, r.Video.FramesPerSecond, 5_000_000, 4_000_000, "avc1.640028"),
-                    segments,
-                    durations),
-                HlsRenditionKind.Audio => new HlsRenditionOutput(r.Key, new HlsRenditionSummary(SourceIndex: r.SourceIndex, Channels: r.Channels, Bandwidth: 192_000), segments, durations),
-                HlsRenditionKind.Subtitle => new HlsRenditionOutput(r.Key, new HlsRenditionSummary(SourceIndex: r.SourceIndex), [new HlsOutputFile(HlsRenditionPaths.SubtitleFile, 100)], []),
-                _ => new HlsRenditionOutput(r.Key, new HlsRenditionSummary(), [new HlsOutputFile(HlsRenditionPaths.PreviewFile, 100)], [])
-            })
-        ];
-    }
 
     private static void AssertQueued(IReadOnlyList<HlsDeletion> deletions, IEnumerable<string> directories, DateTime notBefore)
     {
@@ -1000,10 +928,10 @@ public sealed class HlsJobStoreTests : IDisposable
     }
 
     private Task<HlsJobLease?> ClaimAsync(string worker = "worker", Func<Guid, bool>? eligible = null)
-        => _store.ClaimAsync(new HlsClaimRequest(worker, _lease, eligible ?? (_ => true), _now), TestContext.Current.CancellationToken);
+        => _store.ClaimAsync(new HlsClaimRequest(worker, Lease, eligible ?? (_ => true), _now), TestContext.Current.CancellationToken);
 
     private Task<HlsIdentifyResult> IdentifyAsync(HlsJobLease lease, string sha, string profile = Profile, Func<Guid, bool>? eligible = null, HlsProbe? probe = null, int[]? qualities = null)
-        => _store.IdentifyAsync(new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, probe ?? _probe, qualities ?? _qualities, profile, eligible ?? (_ => true), _now), TestContext.Current.CancellationToken);
+        => _store.IdentifyAsync(new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, probe ?? Probe, qualities ?? Qualities, profile, eligible ?? (_ => true), _now), TestContext.Current.CancellationToken);
 
     // Claims the oldest pending job and identifies its file as the content, which it must then encode.
     private async Task<(HlsJobLease Lease, HlsEncodePlan Plan)> ClaimAndPlanAsync(string sha, string profile = Profile, int[]? qualities = null)
@@ -1021,7 +949,7 @@ public sealed class HlsJobStoreTests : IDisposable
     private async Task<HlsPublishResult> PublishAsync(HlsJobLease lease, HlsEncodePlan plan)
     {
         Assert.True(await SubmitAsync(lease, Outputs(plan)));
-        var result = await _store.PublishAsync(lease.Id, _replacedGrace, _now, TestContext.Current.CancellationToken);
+        var result = await _store.PublishAsync(lease.Id, ReplacedGrace, _now, TestContext.Current.CancellationToken);
         Assert.NotNull(result);
         return result;
     }
@@ -1042,35 +970,20 @@ public sealed class HlsJobStoreTests : IDisposable
     private Task<Guid?> EnsureMediaJobAsync(string sha, string profile, Guid? preferredItem = null, Func<Guid, bool>? eligible = null)
         => _store.EnsureMediaJobAsync(sha, preferredItem, profile, eligible ?? (_ => true), _now, TestContext.Current.CancellationToken);
 
-    private async Task<HlsJob> JobAsync(Guid id)
-    {
-        await using var context = CreateDbContext();
-        return await context.HlsJobs.AsNoTracking().SingleAsync(j => j.Id.Equals(id), TestContext.Current.CancellationToken);
-    }
+    private Task<HlsJob> JobAsync(Guid id) => _environment.JobAsync(id);
 
     private async Task<HlsJob> SourceJobAsync(Guid item)
     {
         var workKey = "source:" + item.ToString("N", CultureInfo.InvariantCulture);
-        await using var context = CreateDbContext();
+        await using var context = _environment.CreateDbContext();
         return await context.HlsJobs.AsNoTracking().SingleAsync(j => j.WorkKey == workKey, TestContext.Current.CancellationToken);
     }
 
     private async Task<List<HlsJobOutput>> OutputsAsync(Guid jobId)
     {
-        await using var context = CreateDbContext();
+        await using var context = _environment.CreateDbContext();
         return await context.HlsJobOutputs.AsNoTracking().Where(o => o.JobId.Equals(jobId)).OrderBy(o => o.Key).ToListAsync(TestContext.Current.CancellationToken);
     }
 
-    private async Task<List<HlsDeletion>> DeletionsAsync()
-    {
-        await using var context = CreateDbContext();
-        return await context.HlsDeletions.AsNoTracking().OrderBy(d => d.RelativeDirectory).ToListAsync(TestContext.Current.CancellationToken);
-    }
-
-    private JellyfinDbContext CreateDbContext()
-        => new(
-            _dbOptions,
-            NullLogger<JellyfinDbContext>.Instance,
-            new SqliteDatabaseProvider(Mock.Of<IApplicationPaths>(), NullLogger<SqliteDatabaseProvider>.Instance),
-            new NoLockBehavior(NullLogger<NoLockBehavior>.Instance));
+    private Task<List<HlsDeletion>> DeletionsAsync() => _environment.DeletionsAsync();
 }

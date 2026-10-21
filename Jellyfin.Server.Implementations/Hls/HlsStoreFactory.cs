@@ -26,8 +26,24 @@ public class HlsStoreFactory : IHlsStoreFactory
         _httpClientFactory = httpClientFactory;
     }
 
+    /// <summary>
+    /// Checks that a setting names a store, without opening it.
+    /// </summary>
+    /// <param name="location">An absolute local path, or <c>s3://bucket/prefix</c>, where the prefix may be empty.</param>
+    /// <exception cref="ArgumentException">The location is neither.</exception>
+    public static void Validate(string location) => _ = Parse(location);
+
     /// <inheritdoc />
     public IHlsStore Create(string location)
+    {
+        var (bucket, path) = Parse(location);
+        return bucket is null
+            ? new LocalHlsStore(path)
+            : new NetworkHlsStore(_networkStorage, _httpClientFactory, bucket, path.Length == 0 ? string.Empty : path + "/");
+    }
+
+    // The bucket and the prefix of network storage, or no bucket and the full path of a local directory.
+    private static (string? Bucket, string Path) Parse(string location)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(location);
         location = location.Trim();
@@ -48,7 +64,7 @@ public class HlsStoreFactory : IHlsStoreFactory
                 HlsStorePaths.Validate(prefix, nameof(location));
             }
 
-            return new NetworkHlsStore(_networkStorage, _httpClientFactory, bucket, prefix.Length == 0 ? string.Empty : prefix + "/");
+            return (bucket, prefix);
         }
 
         if (!Path.IsPathFullyQualified(location))
@@ -56,6 +72,6 @@ public class HlsStoreFactory : IHlsStoreFactory
             throw new ArgumentException("The HLS store must be an absolute local path or s3://bucket/prefix: " + location, nameof(location));
         }
 
-        return new LocalHlsStore(Path.TrimEndingDirectorySeparator(Path.GetFullPath(location)));
+        return (null, Path.TrimEndingDirectorySeparator(Path.GetFullPath(location)));
     }
 }

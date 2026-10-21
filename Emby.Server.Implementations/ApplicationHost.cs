@@ -574,6 +574,13 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<INetworkStorageProtocol, HttpStorageProtocol>();
             serviceCollection.AddSingleton<INetworkStorageManager, NetworkStorageManager>();
             serviceCollection.AddSingleton<IHlsStoreFactory, HlsStoreFactory>();
+            serviceCollection.AddSingleton<HlsJobStore>();
+            serviceCollection.AddSingleton<HlsSettings>();
+            serviceCollection.AddSingleton<HlsRootMonitor>();
+            serviceCollection.AddSingleton<HlsPublishedIndex>();
+            serviceCollection.AddSingleton<HlsCoordinator>();
+            serviceCollection.AddSingleton<HlsVerificationService>();
+            serviceCollection.AddSingleton<HlsDeletionService>();
             serviceCollection.AddSingleton<IMediaEncoder, MediaBrowser.MediaEncoding.Encoder.MediaEncoder>();
             serviceCollection.AddSingleton<EncodingHelper>();
             serviceCollection.AddSingleton<IPathManager, PathManager>();

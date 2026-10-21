@@ -18,6 +18,7 @@ using Jellyfin.Networking.HappyEyeballs;
 using Jellyfin.Server.Extensions;
 using Jellyfin.Server.HealthChecks;
 using Jellyfin.Server.Implementations.Extensions;
+using Jellyfin.Server.Implementations.Hls;
 using Jellyfin.Server.Implementations.Users;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Controller.Configuration;
@@ -157,6 +158,9 @@ namespace Jellyfin.Server
             services.AddHostedService<UserDataChangeNotifier>();
             services.AddHostedService<RecordingNotifier>();
             services.AddHostedService<DeviceAccessHost>();
+            services.AddHostedService(provider => provider.GetRequiredService<HlsCoordinator>());
+            services.AddHostedService(provider => provider.GetRequiredService<HlsVerificationService>());
+            services.AddHostedService(provider => provider.GetRequiredService<HlsDeletionService>());
         }
 
         /// <summary>
