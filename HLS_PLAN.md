@@ -14,12 +14,11 @@
 **预编码的问题**（DistributedHls 插件 0.2 + Worker 0.3）：
 - 插件依赖服务器内部接口，靠装饰器和全局过滤器接入。
 - 成果目录必须是服务器路径，放到 S3 时需要 s3fs 挂载，再由 S3Storage 插件把文件响应改成 302。
-- Worker 自己保存存储凭据。
 - 核心已经有网络存储（访问权限、外部地址、逐对象签名）和 TrueCache，两套机制重复。
 
 **目标**：
 - 一套 HLS 模型：实时转码（服务器本机）与预编码（Worker）共用切片计划和播放列表写法。
-- 预编码成果可以放在本地目录或网络存储（S3）。存储设置了外部地址时，客户端直接从存储读取切片。
+- 预编码成果可以放在本地目录或网络存储（S3），由 Worker 决定并上报根。档位的根设置了外部地址时，客户端直接从存储读取切片。
 - 任务中心并入核心，Worker 按新的任务中心彻底重写。
 
 ## 已确认的决定
@@ -32,11 +31,11 @@
 - **第 0 阶段的原型已完成**，切法见附录。
 - **Worker 只做预编码**。实时转码始终由服务器本机完成，切片存在本地。
 - **任务中心并入 fork 核心**，数据放进 `jellyfin.db`。插件停用，数据迁移过来。
-- **Worker 不保存任何存储凭据**：网络存储由服务器签发预签名 PUT；本地存储由 Worker 上传给服务器。
-- **直连 = 存储设置了外部地址**，沿用「配置外部地址 = 公开」，不另设开关。
-- **Worker 彻底重写，不保留历史包袱**：
-  - 不兼容旧协议，去掉 `submit` 和存储映射。
-  - 在 `Jellyfin.DistributedHls.Worker` 的 `main` 上直接重写，用一个提交替换现有的 0.3.0 提交，并强制推送到 `origin/main`。
+- **Worker 自持凭据，服务器不下发任何存储配置**：Worker 维护 S3 与 SFTP 连接库，在识别时上报自己的存储根，用自己的凭据上传；服务器只给根之下的相对目录，并逐任务、逐档位、逐删除记录记住根（第四节）。
+- **档位三层过滤**：阶梯 → 全局开启 → 媒体库单独选择（5.1）。Worker 添加媒体时可以随手预编码一部分档位（5.3）。
+- **S3 上的媒体必须有 TrueCache 条目**，由 Worker 调用 `Jellyfin.TrueCache.Tool` 生成（第六节）。
+- **直连 = 档位的根设置了外部地址**，沿用「配置外部地址 = 公开」，不另设开关。
+- **Worker 彻底重写，不保留历史包袱**：不兼容旧协议，去掉 `submit`；仓库为 `suujonH/Jellyfin.HLS.Worker`。
 
 ## 一、总体结构
 
@@ -46,7 +45,7 @@ PlaybackInfo → 源列表：原始 ／ 预编码档位（1080p…）／ 自动
   预编码档位   → 交付：授权 → 服务器生成播放列表 → 切片：存储直连 或 服务器转发
 
 任务中心：媒体库同步 → 排程 → Worker 领取 → 识别（哈希 + 探测）→ 编码计划
-          → 编码 → 申请上传地址并上传 → 完成 → 校验 → 发布 → 删除队列
+          → 编码 → 用 Worker 自己的凭据上传到它的根 → 完成 → 校验 → 发布 → 删除队列
 ```
 
 ## 二、切片计划（两条链路共用）
@@ -184,64 +183,79 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 
 ## 四、HLS 存储（预编码成果）
 
-**两种存储**（设置项 `Store`）：
-- 本地目录 `LocalPath`，必须是绝对路径；
-- 网络存储前缀 `s3://桶/前缀`，前缀可以为空（整个桶）。
-  - 这个桶必须有一条访问权限，且不能是归档：归档的存储客户端无法播放。
-  - 只支持 s3，因为 http 不能写入。
+**服务器没有 HLS 存储设置**。Worker 自持凭据，在识别（和预编码）时上报自己的存储根 `Base`，形式与原来的 `Store` 相同：
+- 本地目录：服务器上的绝对路径（Worker 经 SFTP 写入）；
+- 网络存储：`s3://桶/前缀`，前缀可以为空（整个桶）。只支持 s3。
 
-**存储抽象**（第 3 阶段）：`IHlsStore`（`MediaBrowser.Controller/Hls/`），由 `IHlsStoreFactory.Create(设置值)` 打开；实现 `LocalHlsStore`、`NetworkHlsStore` 在 `Jellyfin.Server.Implementations/Hls/`。路径相对于存储根目录，用 `/` 分隔，不允许空段、以点或空格结尾的段（Windows 会去掉它们，`...` 就成了上级目录）、`\`、`:` 和控制字符（列出网络存储时 XML 无法携带）；本地目录还核对完整路径确实在根目录之下。
+根之下的相对目录仍由服务器在计划中给出，Worker 把根拼在前面后用自己的凭据上传。根逐任务（`HlsJobs.Base`）、逐档位（`HlsRenditions.Base`）、逐删除记录（`HlsDeletions.Base`）保存；多个根并存，同一内容的不同档位允许来自不同的根。
+
+**根的校验**（`Identify`、`Jobs/Eager` 和 `Bases/Check` 共用同一个实现，结果为 `HlsStoreTestResult`）：
+1. 能由 `HlsStoreFactory` 解析（路径规则见下）；
+2. s3：服务器有该桶的访问权限，且不是归档（归档的存储客户端无法播放）；
+3. 本地目录：绝对路径、目录存在、不在任何媒体库路径之下、也不在服务器数据目录之下；
+4. 列出根目录一次成功。
+
+不通过时 `Identify`、`Jobs/Eager` 回 `400` 带原因，`Bases/Check` 返回失败及原因。服务器只要求该桶有一条访问权限：没有时由 Worker 用自己的凭据创建，服务器不参与。
+
+**存储抽象**：`IHlsStore`（`MediaBrowser.Controller/Hls/`）只剩读取与删除，按根由 `HlsStoreFactory.Create(根)` 打开，可按根缓存；实现 `LocalHlsStore`、`NetworkHlsStore` 在 `Jellyfin.Server.Implementations/Hls/`。路径相对于根目录，用 `/` 分隔，不允许空段、以点或空格结尾的段（Windows 会去掉它们，`...` 就成了上级目录）、`\`、`:` 和控制字符（列出网络存储时 XML 无法携带）；本地目录还核对完整路径确实在根目录之下。
 - `CheckRootAsync(已发布目录样本)`：根目录不可信时返回原因（见下文的根目录标记）。网络存储还要求有访问权限且不是归档。
 - `ListAsync(目录)`：目录下的全部文件（含子目录），路径相对于该目录，带大小和修改时间；目录不存在时为空。
 - `DeleteDirectoryAsync(目录)`：删除目录及其文件；本地目录还删除因此变空的上级目录，直到根目录。
-- `WriteAsync(路径, 内容)`：只用于本地目录，先写同目录的临时文件再替换；网络存储抛出 `NotSupportedException`。
-- `GetUploadAddress`、`GetServerPath`、`GetClientAddress`：见下表。
-- `TestAsync()`：在根目录写入、读回、删除一个 `.jellyfin-hls-test-*` 测试对象，并报告是否有标记。本地目录不存在时不创建（可能是挂载点）。
-- 读写失败统一为 `IOException`。
+- `GetServerPath`、`GetClientAddress`：见下表。
+- 读取和删除失败统一为 `IOException`。
+- **删除**：`WriteAsync`、`GetUploadAddress`、`TestAsync`，以及两个实现中的写入、写标记、写测试对象逻辑。
 
-**布局**沿用插件，迁移来的成果因此不需要移动：`{媒体}/{video|audio|subtitles|preview}/{序号}/{租约令牌}/`。
+**布局**沿用插件，迁移来的成果因此不需要移动：`{媒体}/{video|audio|subtitles|preview}/{序号}/{租约令牌}/`。目录名含租约令牌，一个租约只属于一个任务、一个根，所以 `HlsDeletions` 仍以 `RelativeDirectory` 为主键。
 
-**根目录标记**：`.jellyfin-hls`，也接受旧名 `.distributed-hls`。规则沿用插件：
+**根目录标记**：`.jellyfin-hls`，也接受旧名 `.distributed-hls`。**服务器不再写标记**，标记由 Worker 在配置或测试目标时写入。规则：
 - 根目录不存在或读不出来：不可信。
-- 有标记：可信。没有发布过任何成果：可信，但不写标记（本地目录可能是尚未挂载的挂载点，必须保持为空）。
-- 没有标记、已发布目录的样本也一个都不在：不可信，也不写标记。否则写入标记，可信。
-- 不可信时校验和删除暂停，不消耗重试次数（第 4 阶段）。
+- 有标记：可信。
+- 该根下没有已发布的成果：可信。
+- 没有标记、已发布目录的样本至少有一个在：可信（不写标记）；一个都不在：不可信。
+- 不可信时，只有记在这个根上的记录暂停校验和删除，不消耗重试次数；其他根照常。
 - 网络存储同样适用，防止访问权限被改到别的桶后，系统误以为成果全部丢失、整库重新编码。
+
+**按根监视**（`HlsRootMonitor`）：取已发布档位、校验中的任务和删除队列中出现的全部根，逐个抽样核对（样本取该根下的已发布目录）。`HlsStatus.StoreProblem` 改为列出有问题的根及原因。
 
 | 操作 | 本地目录 | 网络存储 |
 | --- | --- | --- |
-| Worker 上传 | `PUT` 到服务器（先写临时文件，再改名） | 服务器签发预签名 `PUT`，走访问权限的 Endpoint |
-| 校验 | 逐个 stat，可选核对修改时间 | 按档位目录 `ListObjectsV2`，核对存在与大小 |
+| Worker 上传 | Worker 经 SFTP 写入，服务器不参与 | Worker 用自己的 S3 凭据写入，服务器不参与 |
+| 校验 | 逐个 stat | 按档位目录 `ListObjectsV2`，核对存在与大小 |
 | 删除 | 删目录 | 列出前缀后批量 `DeleteObjects`，服务不支持时逐个 `DELETE` |
 | 服务器读取（转发） | `PhysicalFile` | 按网络存储的规则读取：公开读外部地址，否则读 Endpoint（`ResolveShortcutTarget`） |
 | 客户端地址 | 无 | 外部地址，逐对象签名，按小时对齐；不公开或归档时没有 |
 
+完成核对、校验、删除分别用任务、档位、删除记录上的根打开存储。
+
 **网络存储的扩展**：
-- `INetworkStorageManager` 新增以下方法，都以 `s3://桶/键` 为参数：
+- `INetworkStorageManager` 保留以下方法，都以 `s3://桶/键` 为参数：
   - `GetClientAddress(target)`：外部地址；不公开、归档或没有访问权限时返回 null；
   - `GetServerAddress(target, method)`：访问权限的 Endpoint，按方法签名，用于检查等维护操作（公开时也不用外部地址）；
-  - `GetUploadAddress(target, lifetime)`：Endpoint 上的预签名 PUT；
   - `ListAsync(prefix, limit)`：按键的顺序；
   - `DeleteAsync(targets)`：按桶分组；不存在的对象视为已删除。
   - 列出和删除时没有访问权限、存储拒绝或无法连接，都抛出 `IOException`；目标不是可写的存储时抛出 `ArgumentException`。
-- 新接口 `IObjectStorageProtocol : INetworkStorageProtocol`（上传地址、列出、删除），只有 `S3StorageProtocol` 实现，复用 `S3UrlSigner.GetUrl(..., method, parameters)`：
+- `IObjectStorageProtocol : INetworkStorageProtocol`（列出、删除），只有 `S3StorageProtocol` 实现，复用 `S3UrlSigner.GetUrl(..., method, parameters)`：
   - ListObjectsV2 的 XML 解析（`S3Xml`，按元素的本地名称匹配，不要求命名空间），按 `NextContinuationToken` 分页；截断却没有令牌时报错，不会反复读同一页。
   - DeleteObjects 每次至多 1000 个键，quiet 模式，带 `Content-MD5`；结果中 `NoSuchKey` 以外的错误抛出异常。服务不接受（400、401、403、405、501，例如不支持预签名 POST 的服务）时，本次调用的剩余对象改为逐个 `DELETE`，404 视为已删除。
+- **删除** PUT 预签名整条链：`INetworkStorageManager.GetUploadAddress`、`IObjectStorageProtocol` 与 `S3StorageProtocol` 中的上传地址。访问权限测试不走这条链（已核对）。
 
 ## 五、任务中心（并入核心）
 
-### 5.1 数据（`jellyfin.db`，EF Core 实体加迁移 `AddHlsTaskCenter`）
+### 5.1 数据（`jellyfin.db`，EF Core 实体加迁移 `AddHlsTaskCenter`、`AddHlsBase`）
 
 | 表 | 主要字段 |
 | --- | --- |
 | `HlsSources` | ItemId（主键）、LibraryId、Path（文件路径或 `.strm` 目标）、Length、DateModified、Sha256 |
 | `HlsMedia` | Sha256（主键）、MediaKey（哈希前 32 位，唯一）、LibraryId、Probe（JSON）、DateOrphaned、DateCreated |
-| `HlsRenditions` | (Sha256, Key)、State（Missing/Published/Failed）、JobId、PublishedJobId、RelativeDirectory、Summary、Profile、DatePublished |
-| `HlsJobs` | Id、Kind（Source/Media）、WorkKey（唯一：`source:{ItemId}` 或 `media:{Sha256}`）、ItemId、Sha256、Input（JSON，领取时选定）、Plan（JSON，识别时生成）、Status、Worker、LeaseToken、LeaseExpires、Attempt、Error、DateCreated、DateModified |
+| `HlsRenditions` | (Sha256, Key)、State（Missing/Published/Failed）、JobId、PublishedJobId、RelativeDirectory、**Base**、Summary、Profile、DatePublished |
+| `HlsJobs` | Id、Kind（Source/Media）、WorkKey（唯一：`source:{ItemId}` 或 `media:{Sha256}`）、ItemId、Sha256、**Base**（识别时记下）、Input（JSON，领取时选定）、Plan（JSON，识别时生成）、Status、Worker、LeaseToken、LeaseExpires、Attempt、Error、DateCreated、DateModified |
 | `HlsJobOutputs` | (JobId, Key)、RelativeDirectory、Summary、Files、Segments（各段秒数） |
-| `HlsDeletions` | RelativeDirectory（主键）、NotBefore、Attempts、Reason、LastError |
+| `HlsDeletions` | RelativeDirectory（主键）、**Base**、NotBefore、Attempts、Reason、LastError |
 | `HlsVersionItems` | (ItemId, Quality)、VersionId、Signature |
 
+- 迁移 `AddHlsBase` 给三张表加 `Base` 列（非空，默认空串）。第 4 阶段没有发布过任何版本，空串的记录不会出现在实际数据中；读到空串的根按不可信处理。
+- `HlsPublishedRendition`（发布索引）与 `HlsVerifyingJob` 带上根。
+- 关联只存数据库，现有七张表够用：重新扫描后通过 SHA-256 重新接上成果。多分辨率、多音轨已在模型中。
 - 各段时长只存在 `HlsJobOutputs`：已发布的档位经 `PublishedJobId` 找到它的清单，与插件读取文件清单的方式相同。一部长片约 1800 段，所以发布索引（内存）不带各段时长，播放列表按请求从数据库读取。
 - 表之间不设外键，与插件相同：任务被重建时换新 id，旧任务的已发布清单仍按旧 id 保留；删除来源、媒体时由 `HlsJobStore` 自己清理。
 - 时间都是 UTC 的 `DateTime`；JSON 列用 System.Text.Json 的默认设置（PascalCase、数字枚举），探测结果与插件的 JSON 相同，第 8 阶段可以原样导入。
@@ -250,9 +264,30 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 
 **状态机**：以插件的为基础，租约、心跳、重试、取消、校验、发布和删除队列的规则不变；探测和编码合并为一种任务（见 5.2）。插件的 `JobStoreTests` 移植过来，并按新流程改写。
 
-**设置**：放在命名配置 `hls`（`HlsOptions`），包括：启用、媒体库、档位、存储、原始资源策略、租约、重试、孤儿保留、播放授权有效期和签名密钥。不再有「校验修改时间」：Worker 不再上报修改时间，本地存储的文件由服务器自己写入。
-- 保存时校验（`IValidatingConfiguration`），读取时再校验一次：手改的无效设置按关闭处理，并记错误日志。
-- 存储在每次保存设置时打开一次。更换存储只记警告，不迁移成果：已发布的档位按相对路径从新存储读取，新存储没有标记、样本也不在时不可信。要么把成果连同标记复制过去，要么在新存储放上标记后执行「校验已发布成果」，缺失的档位重新编码，旧存储不清理。
+**设置**：放在命名配置 `hls`（`HlsOptions`）：
+- `Enabled`、`Libraries`（启用哪些库，语义不变）、`Qualities`（全局开启的档位）；
+- `LibraryQualities`：媒体库 id 到档位数组的列表（`{LibraryId, Qualities}`）；
+- `AllowOriginal`（全局允许原片）、`AllowLocalOriginal`（见 7.1）；
+- 租约、重试、孤儿保留、播放授权有效期和签名密钥。
+- **删除** `Store` 和 `OriginalUsers`。用户是否可用原片改由 `UserPolicy.EnableOriginalPlayback` 决定，默认关闭。
+
+**档位三层过滤**：
+1. 代码阶梯 `HlsEncodingLadder.Heights` 是支持范围；
+2. `Qualities` 是全局开启的档位；
+3. 媒体库在 `LibraryQualities` 中有一项时，它的生效档位 = 该项 ∩ 全局；没有时 = 全局。未启用的媒体库生效档位为空，它在 `LibraryQualities` 中的项被忽略。
+
+由 `HlsSettingsSnapshot.GetQualities(libraryId)` 给出生效档位。**一个内容应有的档位** = 它在启用媒体库中的所有来源（按 `HlsSources.LibraryId`）的生效档位的并集：
+- 没有这样的来源时，取 `HlsMedia.LibraryId` 的生效档位（预编码创建的内容在扫描入库前就是这样）；
+- 仍为空时不同步档位，已有的保持不变，由孤儿规则处理（停用媒体库不会立即撤下成果）。
+- 并集缩小时按现有规则撤下多余档位（删除记录与目录）。
+- 这条解析替换三处对全局 `Qualities` 的直接使用：`HlsCoordinator` 调用 `SyncRenditionsAsync`、`HlsTaskCenter` 构造 `HlsIdentifyRequest`、`HlsJobStore.Jobs` 的 `GetDesired`。解析在 `HlsJobStore` 的事务内进行（需要读该内容的来源），参数从档位数组改为 `Func<Guid, IReadOnlyCollection<int>>`。
+- 全局 `Qualities` 或 `LibraryQualities` 变化时，与原来 `Qualities` 变化一样触发全量同步。
+
+**校验**（`IValidatingConfiguration`，读取时再校验一次：手改的无效设置按关闭处理，并记错误日志）：
+- `LibraryQualities` 中媒体库 id 不为空、不重复；每项的档位在阶梯内且不重复；
+- 每项与全局的交集不得为空，为空时拒绝保存，原因中指出该媒体库。
+
+**`HlsSettingsSnapshot`** 去掉 `Store`、`UploadLifetime`、`UploadGrace`。依赖它们的位置一并改：`HlsSettings` 打开存储、`HlsCoordinator` 的 `AppliedSettings.Store` 与存储变更告警（删除）、`HlsTaskCenter` 四处、`HlsVerificationService` 两处、`HlsDeletionService`、`HlsRootMonitor`、`HlsController` 的默认位置。存储一律按记录上的根打开。
 
 **纯逻辑**（`src/Jellyfin.MediaEncoding.Hls/Published/`，移植插件）：探测解析、阶梯、档位、目录布局、完成校验。DTO 在 `MediaBrowser.Model/Hls/`，Worker API 与任务中心共用；插件的类型名加 `Hls` 前缀（`HlsProbe`、`HlsRenditionSummary` 等），字段不变。
 
@@ -261,45 +296,44 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 1. **同步**：后台循环，每 5 秒一次，并跟随媒体库事件。
    - 选定媒体库中的视频：本地文件，以及目标能解析的 `.strm`（s3、http(s)；归档存储也包括在内，预编码正好让归档原件也能播放）。
    - 记录路径或目标、大小、修改时间。`.strm` 的大小用 TrueCache 的 `MediaSize`，修改时间用 `.strm` 文件的。
-   - 只取 `VideoType` 为 `VideoFile` 的条目（光盘目录等不预编码）；`.strm` 的目标须由网络存储解析为 http(s) 地址；大小只取 TrueCache 条目声明的，没有时跳过（条目的 `Size` 这时是文本文件本身的大小）。
-   - 文件夹属于多个媒体库时，任意一个被选中即可。
+   - 只取 `VideoType` 为 `VideoFile` 的条目（光盘目录等不预编码）；`.strm` 的目标须由网络存储解析为 http(s) 地址；大小只取 TrueCache 条目声明的，没有时跳过（条目的 `Size` 这时是文本文件本身的大小）。所以 S3 上的媒体必须有 TrueCache 条目。
+   - 文件夹属于多个媒体库时，任意一个被选中即可，`LibraryId` 记第一个启用的媒体库，生效档位按它计算。
    - 检查或记录某个条目时出错，保留它原有的记录，不当作已删除，下次全量排程（每 10 分钟）时重试；同步某个内容的档位出错时同样重试，因为全量排程只能找到已有的档位。
    - 媒体库事件从任务中心创建时就开始记录，启动时的首次全量同步之前发生的变化也不会丢失。
    - 发布索引某次刷新失败时，记下没有读到的条目和内容，下次刷新一并读取；任务中心每 5 秒请求一次，所以提交之后的刷新失败不会让播放长期看不到变化。
 2. **排程**：
    - 来源还没有哈希（新文件或指纹变化）：建任务 `source:{ItemId}`。
    - 哈希已知但有缺失的档位（新增档位、编码配置变化、校验失败）：建任务 `media:{Sha256}`，输入取该内容的任意一个来源，优先原条目。
-3. **领取与识别**：Worker 领取任务，取得输入，算 SHA-256，运行 ffprobe，然后调用 `Identify`。任务中心：
+3. **领取与识别**：Worker 领取任务，取得输入，算 SHA-256，运行 ffprobe，然后带上自己的根调用 `Identify`。任务中心：
+   - 校验根（第四节），不通过回 `400`；通过时记在任务上；
    - 记下来源的哈希，按哈希保存探测结果，相同内容共享成果；
-   - 由探测结果和档位配置得出应有的档位（沿用插件的阶梯规则）；
+   - 由探测结果和该内容应有的档位（5.1 的三层过滤）得出应有的档位（沿用插件的阶梯规则）；
    - 缺失的档位没有其他任务负责时，本任务接手，返回编码计划，包括：
      - 每个档位的参数；
      - 切片计划：切片长度默认 6 秒，关键帧间隔 2 秒，以及预期段数，都计入编码配置版本；
-     - 允许上传的文件名：`init.mp4`、`segment-000000.m4s` 起的切片（段数允许比计划多 1）、`subtitle.vtt`、`preview.jpg`；
+     - 允许的文件名：`init.mp4`、`segment-000000.m4s` 起的切片（段数允许比计划多 1）、`subtitle.vtt`、`preview.jpg`；
    - 否则返回 `Done`，任务完成，也就是在这里去重；
    - `media:` 任务的输入哈希与预期不同时，说明来源已变化：回 409，并重新同步这个来源。
 4. **编码与上传**：
-   - Worker 每编完一个档位就申请上传地址，直接上传到存储。
-   - 目录名含租约令牌，Worker 无法覆盖已发布的成果。
-   - 预签名地址有效期 1 小时，过期（403）后重新申请。
-   - 根目录不可信时不签发上传地址，也不接收上传（`503`）；本地存储每写一个文件都先检查根目录，挂载在上传途中失效时，文件不会写进挂载点下面的磁盘。本地存储从不创建根目录。
-5. **完成**（202）：服务器核对：
+   - Worker 每编完一个档位，就用自己的凭据上传到 `根/计划给出的目录`，服务器不签发地址、不接收文件。
+   - 目录名含租约令牌，Worker 不会覆盖已发布的成果。
+5. **完成**（202）：服务器用任务上的根打开存储并核对：
    - 档位和文件是否在计划之内；
    - 段号是否从 0 连续；
    - 段数与计划相差是否不超过 1；
    - 末段以外每段的时长，与计划相差是否不超过一帧（视频）或一个 AAC 帧（音频）。附录 B 的测量支持这条规则。
 
    上报的各段时长会保存下来，用来生成播放列表。
-6. **校验**：本地目录逐个 stat；网络存储按档位目录 List，核对大小。根目录不可信时暂停。
-   - 有待校验的任务时才检查根目录：网络存储的每次检查都要发请求。
+6. **校验**：用任务上的根打开存储。本地目录逐个 stat；网络存储按档位目录 List，核对大小。该根不可信时暂停。
+   - 有待校验的任务时才检查它们的根：网络存储的每次检查都要发请求。
    - 某个档位核对失败时再检查一次根目录，仍然可信才判定校验失败，否则任务留在校验中。
-   - 「校验已发布成果」对每一个核对失败的档位都先检查根目录，不可信时停止，已撤下的档位照常刷新索引并排程。
-7. **发布**：在一个事务里把档位切换到新目录。被替换的目录在宽限期后删除，宽限期取播放授权有效期与存储外部地址有效期中较长的一个。第 4 阶段只用播放授权有效期，外部地址有效期随第 5 阶段的直连加入。
-8. **删除队列**：失败按 1、2、4 分钟……退避重试，最长 6 小时，不阻塞派发。
-   - 删除之后根目录仍然可信，才把这一批移出队列：从失去挂载的根目录「删除」的目录可能根本不在那里。
-   - 路径不合法的记录记日志后移出队列，不删除任何东西。
-   - 已知限制：最后一个已发布的内容成为孤儿、而它的目录删除之前挂载恰好失效时，没有样本可核对，空的挂载点会被当作新存储，这批记录移出队列，文件留在原存储上。只会遗留文件，不会误删或重新编码；要避免它，需要记住根目录曾经有过标记。
-9. **租约**：心跳续期。过期算一次失败。过期或 Worker 报告失败时，计划中的目录在上传地址有效期（1 小时）再加一个租约长度之后删除：失去联系的 Worker 可能仍在用已签发的地址上传，早删的目录会被重新写出来，再也没人清理。Worker 的上传测试对象同样如此。
+   - 「校验已发布成果」用每个档位自己的根，对每一个核对失败的档位都先检查它的根，不可信时跳过这个根上的其余档位，已撤下的档位照常刷新索引并排程。
+7. **发布**：在一个事务里把档位切换到新目录和新根。被替换的目录（连同旧根）在宽限期后删除，宽限期取播放授权有效期与旧根的外部地址有效期中较长的一个。第 4 阶段只用播放授权有效期，外部地址有效期随第 5 阶段的直连加入。
+8. **删除队列**：用删除记录上的根打开存储。失败按 1、2、4 分钟……退避重试，最长 6 小时，不阻塞派发。
+   - 删除之后该根仍然可信，才把这一批移出队列：从失去挂载的根目录「删除」的目录可能根本不在那里。
+   - 路径或根不合法的记录记日志后移出队列，不删除任何东西。
+   - 已知限制：某个根上最后一个已发布的内容成为孤儿、而它的目录删除之前挂载恰好失效时，没有样本可核对，空的挂载点会被当作新存储，这批记录移出队列，文件留在原存储上。只会遗留文件，不会误删或重新编码；Worker 写了标记的根不受影响。
+9. **租约**：心跳续期。过期算一次失败。过期或 Worker 报告失败时，计划中的目录在**一个租约长度**之后删除（失去联系的 Worker 可能仍在上传）；任务还没有识别、没有根时无目录可删。
 10. **孤儿**：没有任何来源引用的内容，超过保留时间后删除它的成果。
 
 ### 5.3 任务的状态与识别
@@ -313,28 +347,41 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - **领取**：取最早的等待任务，最多 20 轮，不合格的取消后继续：
   - 来源任务需要它的来源仍在启用的媒体库中；
   - 媒体任务需要一个有该哈希、在启用的媒体库中的来源（优先原条目），且至少持有一个档位。没有来源的媒体任务直接取消，替代插件的 R39 和定向领取。
-  - 领取时记下输入（`Input`：条目、路径或目标、长度、修改时间），清空 `Plan`，租约令牌即本次的目录名。
+  - 领取时记下输入（`Input`：条目、路径或目标、长度、修改时间），清空 `Plan` 和 `Base`，租约令牌即本次的目录名。
 - **识别**（一个事务）：
-  1. 租约无效：409。已经识别过、哈希相同时原样返回计划（Worker 重试），哈希不同是 400。
-  2. 输入与来源当前的记录不同（路径、长度、修改时间）：任务回到等待，清空输入，不计这次尝试。来源已删除时，来源任务取消；媒体任务回到等待，下次领取改用该内容的其他来源，没有则取消。回 409。
-  3. 媒体任务算出的哈希与任务的不同：清除该来源的哈希并为它建来源任务，媒体任务回到等待。回 409。
-  4. 记下来源的哈希；新哈希保存探测结果，已知哈希沿用已保存的（R44），不同时记日志。来源任务在两次尝试之间文件变成了另一内容时，先释放它持有的旧内容的档位，否则旧内容要等它、并随它一起失败。
-  5. 按已保存的探测结果和当前档位设置同步档位（被取消的档位删除目录）。
-  6. 来源不在启用的媒体库中：任务完成，返回 `Done`。
-  7. 接手所有需要任务的档位；计划 = 本任务持有、仍然需要的档位，按阶梯顺序。为空时任务完成，返回 `Done`（去重）；否则保存并返回计划。
+  1. 租约无效：409。已经识别过、哈希和根都相同时原样返回计划（Worker 重试），哈希或根不同是 400。
+  2. 根不通过校验（第四节）：400，任务不变，不计尝试（校验在事务之外先做，结果随请求传入）。
+  3. 输入与来源当前的记录不同（路径、长度、修改时间）：任务回到等待，清空输入，不计这次尝试。来源已删除时，来源任务取消；媒体任务回到等待，下次领取改用该内容的其他来源，没有则取消。回 409。
+  4. 媒体任务算出的哈希与任务的不同：清除该来源的哈希并为它建来源任务，媒体任务回到等待。回 409。
+  5. 记下来源的哈希；新哈希保存探测结果，已知哈希沿用已保存的（R44），不同时记日志。来源任务在两次尝试之间文件变成了另一内容时，先释放它持有的旧内容的档位，否则旧内容要等它、并随它一起失败。
+  6. 按已保存的探测结果和该内容应有的档位同步档位（被取消的档位删除目录）。
+  7. 来源不在启用的媒体库中：任务完成，返回 `Done`。
+  8. 接手所有需要任务的档位；计划 = 本任务持有、仍然需要的档位，按阶梯顺序。为空时任务完成，返回 `Done`（去重）；否则记下根，保存并返回计划。
 - **计划**：哈希、`MediaKey`、编码配置版本、已保存的探测结果、切片长度 6 秒、关键帧间隔 2 秒、预期段数 `ceil(时长 / 6)`（至少 1），以及每个档位的键、种类、目录、画面尺寸与帧率、源轨道、声道。
-- **失败后回到等待**：清空 `Input` 和 `Plan`，档位仍记在任务上，下次领取重新识别（输入可能换了来源）。其余（租约过期、Worker 报告失败、校验失败、永久失败、重建）同插件。
+- **失败后回到等待**：清空 `Input`、`Plan` 和 `Base`，档位仍记在任务上，下次领取重新识别（输入可能换了来源，Worker 可能换了根）。其余（租约过期、Worker 报告失败、校验失败、永久失败、重建）同插件。
 - **完成时释放档位**：任务完成（识别返回 `Done`、发布）时，仍记在它上面的档位一并释放，否则这些档位不会再被排程。
-- **成果在提交时核对**：`SubmitOutputsAsync` 按数据库中的计划运行完成校验，目录只取自计划。
+- **成果在提交时核对**：`SubmitOutputsAsync` 按数据库中的计划运行完成校验，目录只取自计划，根只取自任务。
+
+**预编码任务**（`POST /HlsWorker/Jobs/Eager`）：Worker 添加媒体时可以随手编一部分档位，没编的部分在扫描入库后由正常流程补齐。请求 `{Worker, LibraryId, Sha256, ProbeJson, Base, Qualities}`，规则依次为：
+1. 媒体库未启用、哈希或探测结果无效、根不通过校验：`400`。
+2. `Qualities` 为空，或不是该库生效档位的子集：`400`。
+3. 该内容已存在时沿用已保存的探测结果（R44）。该内容应有的档位已全部发布：`200 {Done:true}`。
+4. 该内容的 `media:` 任务处于等待、运行或校验中，或它的档位由其他任务持有：`409`。
+5. 内容不存在时创建 `HlsMedia`，写入 `LibraryId`，`DateOrphaned` 设为当前时间；扫描后来源出现时按孤儿规则清空。已存在的内容不改这两项。
+6. 同步档位；计划只含请求的画质档位，音轨、文本字幕和预览图总是包含（完成校验要求上报计划中的每个档位）。没有需要任务的档位时 `200 {Done:true}`。
+7. 任务为 `media:` 类型（WorkKey 规则同媒体任务，已完成或已取消的换新 id），`ItemId` 与 `Input` 为空，记下根和计划，创建即租给该 Worker（状态为运行，租约令牌即目录名）。返回 `200 {Lease, Plan}`。
+
+之后心跳、完成、校验、发布与普通任务完全一致。这个任务没有输入：`Jobs/{id}/Input` 回 `404`；失败或租约过期后回到等待，领取时没有来源即取消，与普通媒体任务相同。
 
 ### 5.4 与插件相比的变化
 
 | 方面 | 插件 | 核心 |
 | --- | --- | --- |
 | 数据 | 独立的 `jobs.db` | `jellyfin.db` |
-| 任务 | 探测、编码两种任务，加定向领取 | 一种任务：领取 → 识别 → 计划 → 编码 → 上传；识别时去重 |
-| 成果位置 | 服务器路径，放 S3 时要挂 s3fs | HLS 存储，不需要挂载 |
-| 上传 | Worker 自带映射和凭据 | 服务器签发地址 |
+| 任务 | 探测、编码两种任务，加定向领取 | 一种任务：领取 → 识别 → 计划 → 编码 → 上传；识别时去重；另有添加媒体时的预编码任务 |
+| 成果位置 | 服务器路径，放 S3 时要挂 s3fs | Worker 上报的根（本地目录或 S3），多根并存，不需要挂载 |
+| 上传 | Worker 自带映射和凭据 | Worker 自持凭据，上传到自己上报的根，服务器只给相对目录 |
+| 档位 | 全局 | 阶梯 ∩ 全局 ∩ 媒体库 |
 | 来源 | 只有本地文件 | 本地文件和 `.strm` |
 | 播放列表 | Worker 生成，服务器原样发送 | 服务器按切片计划和上报的时长生成 |
 | 交付到存储 | S3Storage 插件 302，Worker 改写播放列表 | 媒体播放列表中直接写外部地址 |
@@ -342,96 +389,99 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 
 ## 六、Worker 1.0（重写）
 
-`Jellyfin.DistributedHls.Worker` 按核心任务中心重新设计。
+仓库 `suujonH/Jellyfin.HLS.Worker`，按核心任务中心重新设计。
 
-**不再保留的旧功能**：
-- 协议 2；
-- `submit`（库外文件）；
-- 探测任务和定向领取；
-- 存储映射（S3/SCP/Local）以及 AWSSDK.S3 依赖。
+**不再保留的旧功能**：协议 2；`submit`（库外文件，由「添加媒体」取代）；探测任务和定向领取；Scp 上传（换为 SSH.NET 的 SFTP）。保留 S3 与 Local 上传和 AWSSDK.S3。
 
-**配置**（`worker.json`）：
-- 连接：`Server`、`ApiKey`（环境变量 `JELLYFIN_HLS_API_KEY` 优先）、`Name`；
-- ffmpeg：`Ffmpeg`、`Ffprobe`、`Encoder`（libx264、h264_nvenc、h264_qsv、h264_amf、h264_vaapi）、`HardwareDevice`、`Threads`；
-- 运行：`WorkDirectory`、`Concurrency`、`UploadConcurrency`、`PollSeconds`、`ControlTimeoutSeconds`、`InputCacheGiB`、`KeepFailedJobs`；
-- `Sources`（可选，服务器路径 → 本机路径）。
+**结构**：
+- **引擎**做成库：服务器客户端、连接库、任务执行与心跳、输入缓存、识别、编码、上传、添加媒体、本地数据库；
+- **GUI 宿主**用 Avalonia；
+- **无头 `run` 宿主**：只跑引擎，供服务器部署（systemd）。
 
-没有任何存储凭据。
+**连接库**：Worker 自持凭据（管理员 API Key），维护 S3 与 SFTP 两类连接。
+- 媒体库及其服务器路径取自 `GET /Library/VirtualFolders`。每个媒体库一条默认连接，添加文件时可改选。
+- SFTP 连接除主机、凭据和远端根目录外，还要填「该根目录在服务器上的路径」：媒体库目录由此映射，HLS 根放在 SFTP 时也由此得出上报的服务器路径。SFTP 用户必须与 Jellyfin 同用户或同组（0.3 README 中 umask 的问题）。
+- 媒体对象放 S3 时，服务器上没有该桶的访问权限，Worker 用同一凭据调 `POST /NetworkStorage/Accesses` 建一条。
+- **HLS 目标**是每个 Worker 一条全局设置，选连接库中任意一条加前缀或路径，即上报的 `Base`；不按媒体库、不按任务选。配置或测试时 Worker 在该根写入标记 `.jellyfin-hls`。「测试」做两件事：用自己的凭据写删一个测试对象，再调 `Bases/Check`。
 
-**命令**：`init`、`check`、`run [--once]`、`--help`、`--version`。
+**添加媒体**：
+1. 选文件或文件夹、媒体库和连接，保留相对于所选媒体库路径的目录结构；`GET /HlsWorker/Libraries` 取得该库的生效档位；
+2. 可选择不编、编一部分或全编，编的部分经 `Jobs/Eager` 提交，按普通任务的编码、上传、完成流程走；
+3. 媒体对象上 S3 时，对象上传到 `{前缀}/{相对路径}/{文件名}`，上传时顺便算 SHA-256；`.strm`、`__true_cache__` 条目和外挂文件经 SFTP 写进媒体库目录，顺序是外挂文件、条目目录、最后 `.strm`（`.strm` 出现时扫描即可读到条目）；
+   `.strm` 写在 `{库路径}/{相对路径}/{文件名}.strm`，条目在旁边的 `__true_cache__/{文件名}.strm/`，经 SFTP 先写 `.` 开头的临时目录再改名，与工具的做法相同；
+4. 媒体直传 SFTP 时只能进媒体库目录，以临时名传入再改名，不生成 TrueCache；
+5. TrueCache 条目由 Worker 调用 `Jellyfin.TrueCache.Tool` 子进程生成，不在 Worker 里重写提取逻辑（产物必须与服务器逐项一致）；工具随 Worker 发布为自包含程序。工具新增一个模式：按本地文件生成、条目名为 `.strm`、`source.size` 取本地文件大小、不写 `source.modified`（在 jellyfin 仓库实现）；trickplay、章节等设置取自 `GET /System/Configuration`。`--server-data` 读库签名下载 `.strm` 目标的能力保留，供迁移已有 S3 内容。
+6. 生成到本地临时目录与经连接落地分成两步，落地走连接抽象，为今后把 `__true_cache__` 移到 S3 预留；
+7. 一批结束后调 `POST /Items/{媒体库 ItemId}/Refresh` 触发扫描。
+
+**本地数据库**（SQLite）：记本地路径、目标、大小、SHA-256。目标对 S3 媒体是 `s3://` 地址，对 SFTP 媒体是服务器路径。领到任务时按来源的目标加大小命中（不看修改时间：`.strm` 的修改时间是文本文件的），命中就直接读本地文件并沿用记下的 SHA-256；没命中才经 `Input` 下载，并记下新路径。
+
+**调度**：处理列表（上传、TrueCache、随添加的预编码）优先；列表为空且有空闲名额时才 Poll。这是 Worker 侧规则，服务器不改。
 
 **协议**：所有请求带 API Key（不接受用户会话）和请求头 `X-Jellyfin-Hls-Protocol: 1`。
 
 | 方法与路径 | 请求 | 应答 |
 | --- | --- | --- |
 | `GET /HlsWorker/Protocol` | — | `{"Version":1}` |
+| `GET /HlsWorker/Libraries` | — | 启用的媒体库：`[{Id, Name, Qualities}]`，`Qualities` 为生效档位（路径取自 `VirtualFolders`） |
+| `POST /HlsWorker/Bases/Check` | `{Base}` | `HlsStoreTestResult`，校验同第四节 |
 | `POST /HlsWorker/Poll` | `{Worker}` | `200 {Lease, Source, InputUrl}`；没有任务时 `204` |
-| `GET /HlsWorker/Jobs/{id}/Input?leaseToken=` | — | 本地文件返回文件流，支持 Range，文件不存在时 `404`；`.strm` 返回 302，指向服务器当场签发的存储地址 |
+| `POST /HlsWorker/Jobs/Eager` | `{Worker, LibraryId, Sha256, ProbeJson, Base, Qualities}` | `200 {Lease, Plan}` 或 `200 {Done:true}`；规则见 5.3 |
+| `GET /HlsWorker/Jobs/{id}/Input?leaseToken=` | — | 本地文件返回文件流，支持 Range，文件不存在时 `404`；`.strm` 返回 302，指向服务器当场签发的存储地址；预编码任务 `404` |
 | `POST /HlsWorker/Jobs/{id}/Heartbeat` | `{LeaseToken}` | `204`；租约失效时 `409` |
-| `POST /HlsWorker/Jobs/{id}/Identify` | `{LeaseToken, Sha256, ProbeJson}` | `200 {Plan}` 或 `200 {Done:true}`；来源已变化或租约失效时 `409` |
-| `POST /HlsWorker/Jobs/{id}/Uploads` | `{LeaseToken, Key, Files[{Path, Length}]}` | `{Files[{Path, Method, Url, Headers}]}`：网络存储为一小时有效的签名地址，本地存储为下一行的服务器路由 |
-| `PUT /HlsWorker/Jobs/{id}/Files/{key}/{file}?leaseToken=` | 文件内容 | `204`（仅本地存储） |
+| `POST /HlsWorker/Jobs/{id}/Identify` | `{LeaseToken, Sha256, ProbeJson, Base}` | `200 {Plan}` 或 `200 {Done:true}`；根不通过 `400`；来源已变化或租约失效时 `409` |
 | `POST /HlsWorker/Jobs/{id}/Complete` | `{LeaseToken, Renditions[{Key, Summary, Files[{Path, Length}], SegmentDurations}]}` | `202` 或 `409` |
 | `POST /HlsWorker/Jobs/{id}/Failed` | `{LeaseToken, Error}` | `204` 或 `409` |
-| `POST /HlsWorker/UploadCheck` | `{Worker}` | 一个测试对象的上传地址 `{Path, Method, Url, Headers}`，供 `check` 使用；没有可用的存储时 `503` |
-| `PUT /HlsWorker/UploadCheck/{id}` | 文件内容 | `204`，写入后立即删除（仅本地存储）；未知或已过期时 `404` |
 
+- **删除**：`Uploads`、`Files/{key}/{file}`、两条 `UploadCheck` 路由；`IHlsTaskCenter` 的上传地址、本地写入、两个上传测试方法；DTO `HlsUploadAddress`、`HlsUploadRequest`、`HlsUploadResponse`、`HlsUploadTarget`、`HlsUploadCheck`；`HlsStorePaths` 的测试对象前缀与两个方法，以及删除服务里的对应分支。对应测试一并处理。
 - **认证**：`HlsWorkerProtocolAttribute` 在管理员策略之后检查：用户会话 `403`，协议请求头缺失或不符 `400`。
-- **错误**：请求不合理（档位或文件不在计划中、哈希或探测结果无效等）为 `400`，租约失效为 `409`，存储不可用为 `503`，都带原因。
-- **地址**：`InputUrl` 和本地存储的上传地址是相对于服务器地址的路径，反向代理的路径前缀因此保留。
-- **测试对象**：放在 `.jellyfin-hls-test-{id}/check`，地址过期后（同 5.2 第 9 条）由删除队列删除；本地存储写入后立即删除，删除队列只是兜底。
-- **存储不可用**：根目录不可信时，`Uploads`、文件上传和 `UploadCheck` 都回 `503`。Worker 把 `503` 当作暂时性错误，保持心跳并稍后重试，不报告失败。
+- **错误**：请求不合理（档位或文件不在计划中、哈希或探测结果无效、根不通过等）为 `400`，租约失效或内容有进行中的任务为 `409`，都带原因。
+- **地址**：`InputUrl` 是相对于服务器地址的路径，反向代理的路径前缀因此保留。
+- **完成时存储不可用**：任务上的根不可信时 `Complete` 回 `503`，Worker 把它当作暂时性错误，保持心跳并稍后重试，不报告失败。
 
 **一个任务的流程**：
 1. **领取**：得到租约和来源（ItemId、路径或目标、长度、修改时间）。
    - 每隔租约的三分之一发一次心跳。
    - `409` 立即停止；心跳连续失败、租约将尽时也停止，规则沿用 0.3。
 2. **输入**：
-   - `Sources` 映射命中且长度一致时，就地读取。
+   - 本地数据库命中时（见上），就地读取。
    - 否则把 `InputUrl` 下载到输入缓存，下载的同时计算 SHA-256。缓存按 ItemId、长度和修改时间命名，有容量上限。
    - 302 跳转时不带凭据跟随。
-3. **识别**：发送 SHA-256 和 ffprobe 结果，得到编码计划；收到 `Done` 就结束。
+3. **识别**：发送 SHA-256、ffprobe 结果和根，得到编码计划；收到 `Done` 就结束。
 4. **编码**（按计划；参数已在附录 B 验证）：
    - **视频**：一次解码，多路输出。`split` 之后，每个档位各自去隔行、色调映射、缩放、设定帧率和编码，输出 `init.mp4` 和 `segment-%06d.m4s`。`-hls_time` 取计划的切片长度，关键帧间隔取计划值，闭合 GOP。
    - **音频**：一次运行输出全部音轨，AAC，声道和码率由计划给出。
    - **字幕**：文本字幕转 WebVTT，带 `X-TIMESTAMP-MAP`。
    - **预览图**：截一帧。
    - **自检**：编完后核对文件齐全、段号连续、段数和时长在误差内；算出峰值和平均码率，以及 `avc1` 编码字符串。
-5. **上传**：
-   - 每个档位申请地址，每批至多 500 个文件。
-   - 按地址 PUT，带 `Content-Type` 和 `Content-MD5`。单个任务内并发 4 个文件。
-   - 暂时性错误重试；地址过期（403）时重新申请。
+5. **上传**：每编完一个档位就上传（少占磁盘；失败时租约到期后删除队列清理半成品），用根所属连接的凭据上传到 `根/计划给出的目录`（S3 带 `Content-Type` 和 `Content-MD5`；本地目录经 SFTP，先写临时名再改名）。单个任务内并发 4 个文件，暂时性错误重试。
 6. **完成**：上报每个档位的摘要、文件列表和各段时长，收到 202 后删除任务目录。失败时报告 `Failed`，同样清理目录，开启 `KeepFailedJobs` 时保留。
 
 **并发**：`Concurrency` 个任务同时取输入、识别和编码。编完的任务等待 `UploadConcurrency` 个上传名额，这时下一个任务可以开始编码。
 
-**`check`**：ffmpeg 和 ffprobe 的版本；用配置的编码器编两帧；工作目录可写；协议版本；通过 `UploadCheck` 实际上传一个测试文件。
+**`check`**：ffmpeg 和 ffprobe 的版本；用配置的编码器编两帧；工作目录可写；协议版本；每条连接可用；HLS 根用自己的凭据写删一个测试对象，并经 `Bases/Check` 通过。
 
-**发布形式**：自包含包（win-x64、linux-x64、linux-arm64）和 systemd unit 保留，脚本随之更新；README 重写。
-
-**仓库处理**：
-1. 在 `main` 上直接重写。
-2. 完成并验证后，先在本地给旧提交打标签 `archive/0.3.0`，不推送这个标签。
-3. 用 `git commit --amend` 把唯一的提交替换为 `Distributed HLS Worker 1.0.0`，作者为 suujonH。
-4. `git push --force origin main`。
+**发布形式**：自包含包（win-x64、linux-x64、linux-arm64）和 systemd unit（无头宿主），脚本随之更新；README 重写。
 
 ## 七、播放与交付
 
-### 7.1 源列表与原始资源策略
+### 7.1 源列表与原片策略
 
 **由谁管理**：选定媒体库中有已发布 HLS 的条目，由 `MediaSourceManager` 直接组织它的源列表，不再使用装饰器。没有用户的调用（服务器内部的流、字幕、附件处理）仍然得到原始源，与插件相同。
 
-**源列表顺序**：原始（允许时）→ 固定档位（从高到低）→ 自动。规则沿用插件：
-- 没有播放权限，或者不允许使用原始资源且 HLS 尚未发布时，返回 `NoCompatibleStream`。
-- 「自动」在请求来自内网、允许使用原始资源、且原始资源能播放时，解析为原始资源（在 `MediaInfoHelper` 中处理）。
+**源列表**由服务器命名并排序：`自动`、`源文件 (1080p 60fps)`、各档位从高到低，只列已发布档位。
+- 没有播放权限，或者不允许原片且 HLS 尚未发布时，返回 `NoCompatibleStream`。
+- 「自动」在允许原片、原片能播放、且请求来自内网时，解析为原片（在 `MediaInfoHelper` 中处理）；否则解析为 HLS。
+- 播放器中带 √ 的源列表是 Web 第 7 阶段的工作。
 
-**原始资源策略**：
-- 允许使用原始资源的情况：内网请求（`AllowLocalOriginal`），或用户在 `OriginalUsers` 中。
-- 不允许时，以下路由对原始资源返回 403：
+**原片出现的条件**：
+- 已发布 HLS 时：`AllowOriginal`、未归档、且（请求来自内网并开启 `AllowLocalOriginal`，或用户的 `EnableOriginalPlayback`）。
+- 未发布 HLS 时：只看归档（归档时没有原片，也就没有可播放的源）。
+- 使用 API Key 的请求不受限制。
+- 归档并入这条规则；`StreamingHelpers` 与 `MediaInfoHelper` 现有的归档检查保留作兜底。原计划中「与归档相互独立」作废。
+- 不允许时，以下路由对原片返回 403：
   - `/Items/{id}/File`、`/Items/{id}/Download`；
   - 静态流和实时流路由：`VideosController`、`AudioController`、`UniversalAudioController`、`DynamicHlsController`，统一在 `StreamingHelpers` 中检查。
-- 使用 API Key 的请求不受限制。
-- 这项策略与网络存储的「归档」相互独立。
 
 ### 7.2 授权与播放列表
 
@@ -440,17 +490,19 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 **路由**（`HlsDeliveryController`）：
 - `GET /HlsPlayback/{grant}/master.m3u8`、`{q}p.m3u8`，可加 `-a{序号}` 后缀：主播放列表，按请求时已发布的内容生成。
 - `GET /HlsPlayback/{grant}/r/{kind}/{index}/index.m3u8`：媒体播放列表，**由服务器生成**，依据切片计划和保存的各段时长。
-- `GET /HlsPlayback/{grant}/r/{kind}/{index}/{file}`：转发模式下的文件。
+- `GET /HlsPlayback/{grant}/r/{kind}/{index}/{file}`：转发模式下的文件，按该档位的根读取。
 - `GET /HlsPlayback/Versions/{versionId}/master.m3u8`：已登录用户 302 到带授权的地址。核心自己的流路由遇到 HLS 源 id 时也 302 过去。
 
 所有播放列表都带 `Cache-Control: no-store`，每次请求重新生成。
 
 ### 7.3 直连与转发
 
-**直连**：媒体播放列表中的 `init.mp4`、切片和 `subtitle.vtt` 写成存储的外部地址（逐对象签名，按小时对齐）。条件是：
-1. HLS 存储是网络存储，且它的访问权限设置了外部地址；
+**直连**：媒体播放列表中的 `init.mp4`、切片和 `subtitle.vtt` 写成存储的外部地址（逐对象签名，按小时对齐），按**每个档位的根**生成。条件是：
+1. 该档位的根是网络存储，且其访问权限设置了外部地址；
 2. 档位已发布，即只指向校验通过的文件；
 3. 授权有效。
+
+同一个主播放列表中，各档位可以分别直连或转发。
 
 **转发**：不满足以上条件时，写相对地址，由服务器发送本地文件，或从存储读取后转发。
 
@@ -460,26 +512,28 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 
 移植 `VersionCatalog`：每个已发布的档位和「自动」各建一个视频条目，作为原始条目的备用版本，供按 id 打开版本的客户端（如 Android TV）使用。
 - 第 4 阶段的同步还没有排除这些条目，随本节实现：同步跳过版本条目，发布索引增加 `Changed` 事件和 `FindOriginalByPath`，供版本条目跟随发布变化。
+- 撤下档位时删除对应的 `HlsVersionItems` 和假条目。
 
 ## 八、管理页与 API
 
 **管理 API**（`HlsController`，需要管理员权限）：
 - `GET`/`PUT Hls/Settings`：经命名配置 `hls` 保存，设置无效时 `400` 带原因。
-- `GET Hls/Status`：启用、设置错误、存储问题、任务计数、最近一次校验。
+- `GET Hls/Status`：启用、设置错误、有问题的根（`StoreProblem` 列出根及原因）、任务计数、最近一次校验。
 - `GET Hls/Jobs?limit=`：默认 200，至多 1000。
 - `POST Hls/Rebuild`：`202`。
 - `POST Hls/Verify?itemId=`：`202`；已有校验在运行时 `409`。
-- `POST Hls/Store/Test?location=`：写入、读取、删除一个测试对象，并检查根目录标记。给出 `location` 时测试该位置，保存前即可测试；不给时测试已保存的存储。
+- **删除** `POST Hls/Store/Test`。
 
 **管理页**（jellyfin-web）：新页面「HLS 预编码」，放在侧栏「播放」下，分三个标签页：
-- **状态**：任务计数、存储状态、最近一次校验、删除队列；
+- **状态**：任务计数、各根的状态、最近一次校验、删除队列；
 - **设置**：
   - 启用；
-  - 媒体库、档位；
-  - 存储：本地目录，或选择网络存储访问权限并填写前缀；
-  - 原始资源：内网访问、指定用户；
+  - 媒体库、全局档位，以及每个媒体库单独选档位（只能选全局开启的）；
+  - 原片：全局允许、内网访问；
   - 高级设置；
 - **任务**：最近的任务列表，以及「重建工作列表」「校验已发布成果」两个按钮。
+
+用户编辑页增加「允许播放原片」（`EnableOriginalPlayback`）。播放器的源列表（带 √）也在第 7 阶段完成。
 
 写法参照「网络存储」页面（react-query、MUI、globalize），文案只加 en-us 和 zh-cn。
 
@@ -488,38 +542,41 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 **迁移 routine**：`Jellyfin.Server/Migrations/Routines/*_MigrateDistributedHlsPlugin.cs`
 - **数据**：存在 `data/distributed-hls/jobs.db`、且 HLS 表为空时导入。
   - 导入来源、媒体、已发布的档位及其清单、版本条目和删除队列。未完成的任务不导入，由任务中心重新计划。
+  - 档位和删除记录的根取自插件的 `OutputPath`（转换规则见下）。
   - 完成后把文件改名为 `jobs.db.migrated`。
-- **各段时长**：迁移来的档位没有保存这项数据。第一次生成播放列表时，从存储读取它目录里的 `index.m3u8`，取出各段时长写入数据库。
-- **设置**：从 `plugins/configurations/Jellyfin.Plugin.DistributedHls.xml` 转入 `hls.xml`。
-- **存储**：`OutputPath` 位于 S3Storage 插件的某个映射内时，转为该映射的 `s3://桶/前缀 + 余下路径`。
+- **各段时长**：迁移来的档位没有保存这项数据。第一次生成播放列表时，从该档位的根读取它目录里的 `index.m3u8`，取出各段时长写入数据库。
+- **设置**：从 `plugins/configurations/Jellyfin.Plugin.DistributedHls.xml` 转入 `hls.xml`（没有存储设置）。
+- **根**：`OutputPath` 位于 S3Storage 插件的某个映射内时，转为该映射的 `s3://桶/前缀 + 余下路径`。
   - 该桶还没有访问权限时，用映射中的凭据建一条，不归档、不公开，外部地址需要管理员在网络存储页面设置。
   - 不在任何映射内时，作为本地目录。
 
 **停用插件**：`PluginManager` 不再加载 DistributedHls（`1d46b74f-…`），状态标为 `NotSupported`，并在日志中说明功能已并入服务器。
 
-**S3Storage 插件不停用**：它可能还在为媒体库提供 s3fs 挂载。迁移后 HLS 存储不再是它映射的目录，它的 302 过滤器也就不会再碰 HLS。文档提示：
+**S3Storage 插件不停用**：它可能还在为媒体库提供 s3fs 挂载。迁移后 HLS 根不再是它映射的目录，它的 302 过滤器也就不会再碰 HLS。文档提示：
 - 原来为 `OutputPath` 设置的映射和挂载可以删除；
 - 直连改用核心网络存储的外部地址。用 Cloudflare Worker 时需要重新部署核心的 `tools/network-storage-worker`，因为授权格式不同于插件的 `/media/{token}/{key}`。
 
 ## 十、阶段与提交
 
 **分支**：
-- jellyfin：`feature/hls`，从 `master` 拉出（`feature/network-storage` 已合并）。
-- jellyfin-web：第 7 阶段从 `master` 拉出 `feature/hls`。
-- Worker：按第六节，直接在 `main` 上工作，替换提交后强制推送。
+- jellyfin：`feature/hls`，从 `master` 拉出（`feature/network-storage` 已合并）。每个功能从 `feature/hls` 拉出功能分支，完成并通过 review 后合并回 `feature/hls` 并推送。
+- jellyfin-web：整条 revert 提交 `4bcb07c2e5`，删除远端 `distributed-hls`；本地 `redesign/decoupled-v2` 永不推送。第 7 阶段从 `master` 拉出 `feature/hls`。
+- Worker：`suujonH/Jellyfin.HLS.Worker`，同样按功能分支开发，review 后提交推送。
 
-**每个阶段**：构建 0 警告、测试通过、Codex review 直到没有问题，然后提交。提交作者 suujonH，与现有提交相同，不加署名行。
+**每个阶段**：构建 0 警告、测试通过、Codex review 直到没有问题（吹毛求疵的意见可以拒绝），然后提交并推送。提交作者一律 `suujonH <suujonh@gmail.com>`；提交、README 和代码中不出现任何 AI 相关署名或字样。
 
 | 阶段 | 内容 | 仓库 |
 | --- | --- | --- |
 | 0 | **切点原型**：比较 hls muxer 与 segment muxer 在 TS 和 fMP4 下、`-copyts` 加 `-ss` 重新开始后的实际切点；验证预编码的均匀切片和一次解码多路输出。结论见附录，测试保留作回归，没有配置 ffmpeg 时跳过 | jellyfin |
 | 1 | 切片计划、Planner、关键帧来源（含 MP4 提取器和有时限的按需提取）、播放列表写法、ffmpeg 切点与 seek 的规则（`HlsCuts`）。这一阶段只有独立的组件，控制器仍走旧链路 | jellyfin |
 | 2 | 会话与编码运行：会话管理、`list.csv` 读取与切片就绪事件、重新开始的策略、节流和清理改用段序号、每次 run 重新解析源地址；控制器改用新链路：新的切片 URL、由计划写出的 `main.m3u8`、segment muxer 命令行（`EncodingHelper` 的关键帧参数改用时间列表）；迁移 `DeleteUnalignedKeyframeData`，启用 MP4 的按需提取（默认值与迁移 `AddMp4KeyframeExtraction`） | jellyfin |
-| 3 | HLS 存储与网络存储扩展：存储抽象，S3 的 PUT 预签名、List、Delete，根目录标记，存储测试 | jellyfin |
+| 3 | HLS 存储与网络存储扩展：存储抽象，S3 的 PUT 预签名、List、Delete，根目录标记，存储测试（PUT 与写入部分在 4d 删除） | jellyfin |
 | 4 | 任务中心，分三次提交：4a 纯逻辑、实体与迁移、`HlsJobStore`（连同测试）；4b 设置、同步与排程、校验、删除、发布索引；4c Worker API、管理 API | jellyfin |
-| 5 | 播放与交付：源列表、原始资源策略与路由检查、授权与交付路由、服务器生成播放列表、直连与转发、版本条目 | jellyfin |
-| 6 | Worker 1.0 重写；与第 4、5 阶段的服务器做端到端联调后，替换提交并强制推送 | Jellyfin.DistributedHls.Worker |
-| 7 | 「HLS 预编码」管理页 | jellyfin-web |
+| 4d | **按根改造与协议裁减**：三张表的 `Base` 列与迁移 `AddHlsBase`，发布索引与校验中任务带根，存储按根打开与缓存；`HlsOptions` 删除 `Store`、`OriginalUsers`，新增 `AllowOriginal`（`LibraryQualities` 随 4e），`HlsSettingsSnapshot` 去掉存储与上传有效期；`UserPolicy.EnableOriginalPlayback`；根的校验、`Identify` 带根、`Bases/Check`；按根监视、校验、删除，`StoreProblem` 列出根；租约丢失的宽限改为一个租约长度；第四、六、八节标为「删除」的服务器代码与测试 | jellyfin |
+| 4e | **档位三层过滤与预编码**：`LibraryQualities` 与校验、按内容取应有档位（替换三处）、`GET /HlsWorker/Libraries`、`POST /HlsWorker/Jobs/Eager` | jellyfin |
+| 5 | 播放与交付：源列表与原片规则（7.1）、路由检查、授权与交付路由、服务器生成播放列表、逐档位的直连与转发、版本条目（含撤下时删除） | jellyfin |
+| 6 | 6a `Jellyfin.TrueCache.Tool` 的新模式（jellyfin）；6b Worker 1.0：引擎库、连接库、SFTP、SQLite、添加媒体与预编码、无头 `run` 宿主、Avalonia GUI；与服务器端到端联调 | jellyfin、Jellyfin.HLS.Worker |
+| 7 | 「HLS 预编码」管理页、用户的原片权限、播放器源列表 | jellyfin-web |
 | 8 | 插件迁移与停用、新文档 `HLS.md`（中文，风格同 S3.md），补充 `S3.md` 和 `TRUE_CACHE.md`，删除本文件 | jellyfin |
 
 ## 关键文件
@@ -528,56 +585,61 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - **新增**：
   - `src/Jellyfin.MediaEncoding.Hls/` 下：`Plans/`、`Sessions/`、`Playlist/HlsPlaylistWriter.cs`、`Published/`（移植 `DistributedHls.Core` 的纯逻辑：阶梯、档位、路径、探测解析、授权、主播放列表）；
   - `src/Jellyfin.MediaEncoding.Keyframes/Mp4/`；
-  - `Jellyfin.Server.Implementations/Hls/`（JobStore、任务中心、校验、删除、发布索引、存储、版本条目、源列表、原始资源策略）；
+  - `Jellyfin.Server.Implementations/Hls/`（JobStore、任务中心、根的校验、校验、删除、发布索引、存储、版本条目、源列表、原片策略）；
   - 接口与 DTO：`MediaBrowser.Controller/Hls/`、`MediaBrowser.Model/Hls/`；
   - 实体：`src/Jellyfin.Database/.../Entities/Hls*.cs`，加 Sqlite 迁移；
   - 控制器：`Jellyfin.Api/Controllers/{HlsWorkerController,HlsDeliveryController,HlsController}.cs`。
 - **修改**：
   - 实时 HLS：`Jellyfin.Api/Controllers/DynamicHlsController.cs`；`Jellyfin.Api/Helpers/{DynamicHlsHelper,StreamingHelpers,MediaInfoHelper}.cs`；`src/Jellyfin.MediaEncoding.Hls/{Playlist/DynamicHlsPlaylistGenerator,Cache/CacheDecorator}.cs`；`MediaBrowser.MediaEncoding/Transcoding/TranscodeManager.cs`；`MediaBrowser.Controller/MediaEncoding/{EncodingHelper,TranscodingThrottler,TranscodingSegmentCleaner}.cs`。
   - 网络存储：`MediaBrowser.Controller/NetworkStorage/INetworkStorageManager.cs`；`Jellyfin.Server.Implementations/NetworkStorage/{NetworkStorageManager,S3StorageProtocol}.cs`；`MediaBrowser.Common/Net/S3/`。
+  - 用户策略：`UserPolicy.EnableOriginalPlayback`（实体、DTO 与迁移按现有用户策略字段的写法）。
+  - TrueCache 工具：`src/Jellyfin.TrueCache.Tool/`。
   - 播放接入：`Emby.Server.Implementations/Library/MediaSourceManager.cs`；`Jellyfin.Api/Controllers/{LibraryController,VideosController,AudioController,UniversalAudioController}.cs`。
   - 注册与其他：`Emby.Server.Implementations/ApplicationHost.cs`、`Jellyfin.Server/Startup.cs`（后台服务）、`Emby.Server.Implementations/Plugins/PluginManager.cs`、迁移 routine。
 
-**Jellyfin.DistributedHls.Worker**（整个仓库重写）：
-- `src/DistributedHls.Worker/`：命令行与配置、服务器客户端、任务执行与心跳、输入缓存（边下载边算哈希）、识别、编码（ffmpeg 参数，一次解码多路输出）、上传、自检；
+**Jellyfin.HLS.Worker**（整个仓库重写）：
+- 引擎库：服务器客户端、连接库（S3、SFTP）、任务执行与心跳、输入缓存（边下载边算哈希）、识别、编码（ffmpeg 参数，一次解码多路输出）、上传、添加媒体、TrueCache 子进程、SQLite、自检；
+- 宿主：无头 `run`、Avalonia GUI；
 - `tests/`、`deploy/`、`scripts/`、README。
 
 **jellyfin-web**：
 - 新增 `src/apps/dashboard/features/hls/`、`routes/hls/`；
-- 修改侧栏 `ServerDrawerSection.tsx`、`_asyncRoutes.ts`，以及 `strings/en-us.json` 和 `zh-cn.json`。
+- 修改侧栏 `ServerDrawerSection.tsx`、`_asyncRoutes.ts`、用户编辑页、播放器源列表，以及 `strings/en-us.json` 和 `zh-cn.json`。
 
 **复用的现有实现**：
 - `S3StorageProtocol.GetExternalAddress` 和 `AlignToHour`：直连地址；
 - `NetworkStorageManager.ResolveShortcutTarget`：服务器读取、run 的源地址、Worker 输入的 302；
-- `S3UrlSigner.GetUrl(..., method, parameters)`：PUT、List、Delete；
+- `S3UrlSigner.GetUrl(..., method, parameters)`：List、Delete；
 - `TranscodeManager.StartFfMpeg` 和 `KillTranscodingJobs`；
 - `CacheDecorator` 和 `KeyframeRepository`；
 - `FileStreamResponseHelpers.GetStaticRemoteStreamResult`：从存储转发；
 - 插件的 `DistributedHls.Core` 及其测试；
-- Worker 0.3 中已验证的规则：心跳容错、输入缓存、`avcC` 编码字符串、HDR 色调映射滤镜。
+- Worker 0.3 中已验证的规则：心跳容错、输入缓存、`avcC` 编码字符串、HDR 色调映射滤镜，以及 S3 与 Local 上传。
 
 ## 验证
 
 1. **构建与测试**：
    - jellyfin：按项目 `dotnet build -c Release`，要求 0 警告；运行受影响的测试项目（MediaEncoding.Hls、Keyframes、Server.Implementations、Api、Integration、Server）。
-   - Worker：`dotnet build`、`dotnet test`，测试用回环 HTTP 服务器和假 ffmpeg。
+   - Worker：`dotnet build`、`dotnet test`，测试用回环 HTTP 服务器、假 ffmpeg 和本地 SFTP/S3 替身。
    - jellyfin-web：tsc、eslint、vitest。
 2. **切点测试**（`tests/Jellyfin.MediaEncoding.Hls.Tests/Ffmpeg/`）：设置环境变量 `JELLYFIN_FFMPEG` 指向 ffmpeg（同目录需要 ffprobe，且有 libx264）后运行，否则跳过。覆盖附录中的每条结论。
 3. **单元测试**：
    - 计划：关键帧计划、均匀计划、小数帧率、末段；
    - 实时会话：重新开始的策略和就绪等待，用假 runner；
-   - 识别：去重、来源已变化时回 409、计划内容；
-   - 上传授权：只签计划内的文件，需要有效租约；
+   - 识别：去重、来源已变化时回 409、计划内容、根的校验与记录；
+   - 档位：三层过滤、多来源并集、并集缩小时撤下、没有来源时取内容的媒体库、设置校验；
+   - 预编码任务：Done、409、子集校验、计划内容、孤儿时间、之后与普通任务一致；
+   - 按根：多根并存时只暂停不可信根上的记录；
    - S3：List 和 Delete 的解析；
-   - 交付：直连与转发两种模式下生成的播放列表、授权校验；
+   - 交付：逐档位直连与转发生成的播放列表、授权校验；原片规则；
    - JobStore 状态机；
    - 插件迁移：用样例 `jobs.db`。
-4. **集成测试**：一个假 Worker 走完整个流程：领取 → 识别 → 编码计划 → 上传到本地存储 → 完成 → 校验 → 发布 → PlaybackInfo 出现档位 → 主播放列表和媒体播放列表 → 读取切片。
+4. **集成测试**：一个假 Worker 走完整个流程：领取 → 识别（带本地根）→ 编码计划 → 直接写入根 → 完成 → 校验 → 发布 → PlaybackInfo 出现档位 → 主播放列表和媒体播放列表 → 读取切片；另走一遍预编码任务。
 5. **端到端**（MinIO 或 R2，加 Worker 1.0 和开发服务器）：
-   - Worker 运行 `check`，再处理一个本地文件和一个 S3 上的 `.strm`。
-   - 设置外部地址后，网页播放器的网络面板里切片来自存储的域名；去掉外部地址后改由服务器转发。
+   - Worker 运行 `check`，再处理一个本地文件和一个 S3 上的 `.strm`；通过「添加媒体」上 S3 并预编码一部分档位，扫描后其余档位补齐。
+   - 设置外部地址后，网页播放器的网络面板里切片来自存储的域名；去掉外部地址后改由服务器转发；两个根并存时各档位分别处理。
    - 实时 remux 和转码中来回 seek，切片不重复也不缺失。
-   - 归档存储上的 `.strm` 能生成 HLS 并播放，原件仍然不能播放。
+   - 归档存储上的 `.strm` 能生成 HLS 并播放，原片仍然不能播放。
 
 ## 附录 A：第 0 阶段结论（实时 HLS）
 
@@ -649,4 +711,5 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - 2026-10-22：第 4a 阶段完成：`MediaBrowser.Model/Hls/` 的 DTO；`Published/` 的纯逻辑（探测解析、阶梯、档位、目录布局、完成校验）；七个实体与迁移 `AddHlsTaskCenter`；`HlsJobStore`（来源、媒体、来源任务与媒体任务的领取、识别、提交、发布、失败与租约、档位、孤儿、删除队列）。与 5.3 的差别已写回：「持有租约」以 `LeaseExpires` 为准，媒体任务只在内容有启用媒体库中的来源时创建，来源被删除时媒体任务回到等待，完成时释放档位，提交时按计划校验，来源任务换了内容时释放旧内容的档位。MediaBrowser.Model 与 Server.Implementations 构建 0 警告；MediaEncoding.Hls 295 个测试通过（未配置 ffmpeg，44 个跳过），Server.Implementations 中 HLS 的 105 个测试（其中 `HlsJobStore` 41 个）全部通过。
 - 2026-10-22：第 4b 阶段完成：命名配置 `hls`（`HlsOptions`，保存时校验）、`HlsSettings`、`HlsRootMonitor`、发布索引 `HlsPublishedIndex`、任务中心循环 `HlsCoordinator`（同步、排程、租约回收、全量排程、孤儿）、`HlsVerificationService`（校验、发布、校验已发布成果）、`HlsDeletionService`，三个服务注册为托管服务。与 5.2 的差别已写回：只取 `VideoFile`、`.strm` 的大小只取 TrueCache 条目、多媒体库任选其一、失败在下次全量排程时重试、根目录只在有工作时检查、宽限期暂用播放授权有效期、索引刷新失败自动补读、删除队列的已知限制；签名密钥的生成与版本条目的排除留到第 5 阶段（见 7.2、7.4）。另有一个提交修复 Debug 构建的分析器错误（master 的网络存储代码与前几个阶段的 HLS 代码），WSL 下 Debug 构建 0 错误。Release 构建 0 警告；Server.Implementations 中 HLS 的 163 个测试全部通过（另有 2 个本地化测试因系统语言为中文而失败），MediaEncoding.Hls 300 个（44 个跳过）、Integration 129 个通过。
 - 2026-10-22：第 4c 阶段完成：`IHlsTaskCenter` 与 `HlsTaskCenter`（领取、输入、心跳、识别、上传地址、本地写入、完成、失败、上传测试、状态与任务列表），`HlsWorkerController`、`HlsController`，`HlsWorkerProtocolAttribute`。与第六、八节的差别已写回：Worker 只接受 API Key（用户会话 `403`），错误码 `400`/`409`/`503` 带原因，`InputUrl` 与本地上传地址为相对路径，本地存储的上传测试走服务器路由，测试对象经删除队列删除，存储测试可指定位置；与 5.2 的差别：根目录不可信时不签发也不接收上传，租约结束后目录等上传地址过期再删除。Release 构建 0 警告，WSL 下 Debug 构建 0 警告；Server.Implementations 中 HLS 的 182 个测试全部通过（另有 2 个本地化测试因系统语言为中文而失败），Api 173 个、MediaEncoding.Hls 300 个（44 个跳过）、Integration 132 个通过。
-- 下一步：第 5 阶段（播放与交付，签名密钥，版本条目）。
+- 2026-10-22：设计变更写回计划：Worker 自持凭据并上报存储根、服务器去掉存储设置与上传通道、档位三层过滤、添加媒体时的预编码任务、原片规则并入归档与用户权限、Worker 仓库改为 `Jellyfin.HLS.Worker`。新增第 4d、4e 阶段。
+- 下一步：第 4d 阶段（按根改造与协议裁减）。
