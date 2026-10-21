@@ -10,6 +10,7 @@ using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.IO;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -25,6 +26,7 @@ namespace Emby.Server.Implementations.IO
         private readonly IFileSystem _fileSystem;
         private readonly IDirectoryService _directoryService;
         private readonly DotIgnoreIgnoreRule _dotIgnoreIgnoreRule;
+        private readonly ITrueCacheService _trueCache;
 
         /// <summary>
         /// The file system watchers.
@@ -59,6 +61,7 @@ namespace Emby.Server.Implementations.IO
         /// <param name="directoryService">The directory service.</param>
         /// <param name="appLifetime">The <see cref="IHostApplicationLifetime"/>.</param>
         /// <param name="dotIgnoreIgnoreRule">The .ignore rule handler.</param>
+        /// <param name="trueCache">The <c>__true_cache__</c> lookup.</param>
         public LibraryMonitor(
             ILogger<LibraryMonitor> logger,
             ILibraryManager libraryManager,
@@ -66,7 +69,8 @@ namespace Emby.Server.Implementations.IO
             IFileSystem fileSystem,
             IDirectoryService directoryService,
             IHostApplicationLifetime appLifetime,
-            DotIgnoreIgnoreRule dotIgnoreIgnoreRule)
+            DotIgnoreIgnoreRule dotIgnoreIgnoreRule,
+            ITrueCacheService trueCache)
         {
             _libraryManager = libraryManager;
             _logger = logger;
@@ -74,6 +78,7 @@ namespace Emby.Server.Implementations.IO
             _fileSystem = fileSystem;
             _directoryService = directoryService;
             _dotIgnoreIgnoreRule = dotIgnoreIgnoreRule;
+            _trueCache = trueCache;
 
             appLifetime.ApplicationStarted.Register(Start);
             appLifetime.ApplicationStopping.Register(Dispose);
@@ -380,6 +385,29 @@ namespace Emby.Server.Implementations.IO
                 return;
             }
 
+            // A change inside a __true_cache__ entry is a change of the resource it describes.
+            if (TrueCacheLayout.TryGetResourceOfCachePath(path, out var resourcePath))
+            {
+                if (resourcePath is null)
+                {
+                    // A cache folder moved in or out as a whole raises no events for what it holds, yet it changes the entry
+                    // of every resource next to it: the folder holding them is refreshed.
+                    var trimmed = Path.TrimEndingDirectorySeparator(path);
+                    if (!TrueCacheLayout.IsCacheFolderName(Path.GetFileName(trimmed.AsSpan())))
+                    {
+                        return;
+                    }
+
+                    resourcePath = Path.GetDirectoryName(trimmed);
+                    if (string.IsNullOrEmpty(resourcePath))
+                    {
+                        return;
+                    }
+                }
+
+                path = resourcePath;
+            }
+
             if (IgnorePatterns.ShouldIgnore(path))
             {
                 return;
@@ -453,7 +481,7 @@ namespace Emby.Server.Implementations.IO
                     }
                 }
 
-                var newRefresher = new FileRefresher(path, _configurationManager, _libraryManager, _logger);
+                var newRefresher = new FileRefresher(path, _configurationManager, _libraryManager, _trueCache, _logger);
                 newRefresher.Completed += OnNewRefresherCompleted;
                 _activeRefreshers.Add(newRefresher);
             }

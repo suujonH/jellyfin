@@ -18,6 +18,7 @@ using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Subtitles;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
@@ -43,6 +44,7 @@ namespace MediaBrowser.Providers.MediaInfo
         private readonly SubtitleResolver _subtitleResolver;
         private readonly IMediaAttachmentRepository _mediaAttachmentRepository;
         private readonly IMediaStreamRepository _mediaStreamRepository;
+        private readonly ITrueCacheService _trueCache;
 
         public FFProbeVideoInfo(
             ILogger<FFProbeVideoInfo> logger,
@@ -57,7 +59,8 @@ namespace MediaBrowser.Providers.MediaInfo
             AudioResolver audioResolver,
             SubtitleResolver subtitleResolver,
             IMediaAttachmentRepository mediaAttachmentRepository,
-            IMediaStreamRepository mediaStreamRepository)
+            IMediaStreamRepository mediaStreamRepository,
+            ITrueCacheService trueCache)
         {
             _logger = logger;
             _mediaSourceManager = mediaSourceManager;
@@ -72,6 +75,7 @@ namespace MediaBrowser.Providers.MediaInfo
             _subtitleResolver = subtitleResolver;
             _mediaAttachmentRepository = mediaAttachmentRepository;
             _mediaStreamRepository = mediaStreamRepository;
+            _trueCache = trueCache;
         }
 
         public async Task<ItemUpdateType> ProbeVideo<T>(
@@ -83,6 +87,19 @@ namespace MediaBrowser.Providers.MediaInfo
             BlurayDiscInfo? blurayDiscInfo = null;
 
             Model.MediaInfo.MediaInfo? mediaInfoResult = null;
+
+            // A declared resource is never read: its probe result, and for discs its structure, come from its __true_cache__ entry.
+            var lookup = _trueCache.Lookup(item.Path);
+            if (lookup.IsDeclared)
+            {
+                if (!lookup.IsValid)
+                {
+                    throw TrueCacheRejectedException.For(item.Path, lookup);
+                }
+
+                await Fetch(item, cancellationToken, lookup.Entry.CreateMediaInfo(true), lookup.Entry.CreateBluRayInfo(), options).ConfigureAwait(false);
+                return ItemUpdateType.MetadataImport;
+            }
 
             if (!item.IsShortcut || options.EnableRemoteContentProbe)
             {
@@ -604,41 +621,15 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <returns>An array of dummy chapters.</returns>
         internal ChapterInfo[] CreateDummyChapters(Video video)
         {
-            var runtime = video.RunTimeTicks.GetValueOrDefault();
-
-            // Only process files with a runtime greater than 0 and less than 12h. The latter are likely corrupted.
-            if (runtime < 0 || runtime > TimeSpan.FromHours(12).Ticks)
+            // Shared with the validation of __true_cache__ entries, which must expect the same chapters.
+            try
             {
-                throw new ArgumentException(
-                    string.Format(
-                        CultureInfo.InvariantCulture,
-                        "{0} has an invalid runtime of {1} minutes",
-                        video.Name,
-                        TimeSpan.FromTicks(runtime).TotalMinutes));
+                return TrueCacheRules.CreateDummyChapters(video.RunTimeTicks.GetValueOrDefault(), _config.Configuration.DummyChapterDuration);
             }
-
-            long dummyChapterDuration = TimeSpan.FromSeconds(_config.Configuration.DummyChapterDuration).Ticks;
-
-            if (runtime <= 0)
+            catch (ArgumentException ex)
             {
-                return [];
+                throw new ArgumentException(video.Name + ": " + ex.Message, ex);
             }
-
-            int chapterCount = Math.Max(1, (int)(runtime / dummyChapterDuration));
-            var chapters = new ChapterInfo[chapterCount];
-
-            long currentChapterTicks = 0;
-            for (int i = 0; i < chapterCount; i++)
-            {
-                chapters[i] = new ChapterInfo
-                {
-                    StartPositionTicks = currentChapterTicks
-                };
-
-                currentChapterTicks += dummyChapterDuration;
-            }
-
-            return chapters;
         }
     }
 }

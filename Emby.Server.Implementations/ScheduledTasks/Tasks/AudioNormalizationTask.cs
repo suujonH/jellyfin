@@ -16,6 +16,7 @@ using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.Tasks;
 using Microsoft.Extensions.Logging;
@@ -33,6 +34,7 @@ public partial class AudioNormalizationTask : IScheduledTask
     private readonly IApplicationPaths _applicationPaths;
     private readonly ILocalizationManager _localization;
     private readonly ILogger<AudioNormalizationTask> _logger;
+    private readonly ITrueCacheService _trueCache;
 
     private static readonly TimeSpan _dbSaveInterval = TimeSpan.FromMinutes(5);
 
@@ -45,13 +47,15 @@ public partial class AudioNormalizationTask : IScheduledTask
     /// <param name="applicationPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
     /// <param name="localizationManager">Instance of the <see cref="ILocalizationManager"/> interface.</param>
     /// <param name="logger">Instance of the <see cref="ILogger{AudioNormalizationTask}"/> interface.</param>
+    /// <param name="trueCache">Instance of the <see cref="ITrueCacheService"/> interface.</param>
     public AudioNormalizationTask(
         IItemPersistenceService persistenceService,
         ILibraryManager libraryManager,
         IMediaEncoder mediaEncoder,
         IApplicationPaths applicationPaths,
         ILocalizationManager localizationManager,
-        ILogger<AudioNormalizationTask> logger)
+        ILogger<AudioNormalizationTask> logger,
+        ITrueCacheService trueCache)
     {
         _persistenceService = persistenceService;
         _libraryManager = libraryManager;
@@ -59,6 +63,7 @@ public partial class AudioNormalizationTask : IScheduledTask
         _applicationPaths = applicationPaths;
         _localization = localizationManager;
         _logger = logger;
+        _trueCache = trueCache;
     }
 
     /// <inheritdoc />
@@ -104,9 +109,19 @@ public partial class AudioNormalizationTask : IScheduledTask
                     // Album gain
                     var albumTracks = ((MusicAlbum)a).Tracks.Where(x => x.IsFileProtocol).ToList();
 
-                    // Skip albums that don't have multiple tracks, album gain is useless here
-                    if (albumTracks.Count > 1)
+                    // A declared album, or one with a declared track, is never read as a whole: its loudness is declared, or stays unknown.
+                    var album = _trueCache.LookupAlbum(a.Path);
+                    if (album.IsDeclared || albumTracks.Any(x => _trueCache.Lookup(x.Path).IsDeclared))
                     {
+                        if (album.IsValid)
+                        {
+                            a.LUFS = album.Entry.Manifest.AlbumLufs;
+                            toSaveDbItems.Add(a);
+                        }
+                    }
+                    else if (albumTracks.Count > 1)
+                    {
+                        // Skip albums that don't have multiple tracks, album gain is useless here
                         _logger.LogInformation("Calculating LUFS for album: {Album} with id: {Id}", a.Name, a.Id);
                         var tempDir = _applicationPaths.TempDirectory;
                         Directory.CreateDirectory(tempDir);
@@ -171,7 +186,17 @@ public partial class AudioNormalizationTask : IScheduledTask
             var tracksComplete = 0;
             foreach (var t in tracks)
             {
-                if (!t.NormalizationGain.HasValue && !t.LUFS.HasValue && t.IsFileProtocol)
+                var declared = t.IsFileProtocol ? _trueCache.Lookup(t.Path) : TrueCacheLookup.None;
+                if (declared.IsDeclared)
+                {
+                    // A declared track is never read: its loudness comes from its __true_cache__ entry.
+                    if (declared.IsValid && !t.LUFS.HasValue && !t.NormalizationGain.HasValue)
+                    {
+                        t.LUFS = declared.Entry.Manifest.Audio?.Lufs;
+                        toSaveDbItems.Add(t);
+                    }
+                }
+                else if (!t.NormalizationGain.HasValue && !t.LUFS.HasValue && t.IsFileProtocol)
                 {
                     t.LUFS = await CalculateLUFSAsync(
                         string.Format(CultureInfo.InvariantCulture, "-i \"{0}\"", t.Path.EscapeProcessArgument()),
@@ -225,7 +250,19 @@ public partial class AudioNormalizationTask : IScheduledTask
         };
     }
 
-    private async Task<float?> CalculateLUFSAsync(string inputArgs, bool waitForExit, CancellationToken cancellationToken)
+    private Task<float?> CalculateLUFSAsync(string inputArgs, bool waitForExit, CancellationToken cancellationToken)
+        => CalculateLUFSAsync(_mediaEncoder.EncoderPath, inputArgs, waitForExit, _logger, cancellationToken);
+
+    /// <summary>
+    /// Measures the integrated loudness of an input exactly as this task does; the <c>__true_cache__</c> generator uses it too.
+    /// </summary>
+    /// <param name="encoderPath">The ffmpeg executable.</param>
+    /// <param name="inputArgs">The ffmpeg input arguments.</param>
+    /// <param name="waitForExit">Whether to wait for ffmpeg to exit.</param>
+    /// <param name="logger">The logger.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The loudness, or <c>null</c> when ffmpeg reported none.</returns>
+    public static async Task<float?> CalculateLUFSAsync(string encoderPath, string inputArgs, bool waitForExit, ILogger logger, CancellationToken cancellationToken)
     {
         var args = $"-hide_banner {inputArgs} -af ebur128=framelog=verbose -f null -";
 
@@ -233,21 +270,21 @@ public partial class AudioNormalizationTask : IScheduledTask
         {
             StartInfo = new ProcessStartInfo
             {
-                FileName = _mediaEncoder.EncoderPath,
+                FileName = encoderPath,
                 Arguments = args,
                 StandardErrorEncoding = Encoding.UTF8,
                 RedirectStandardError = true
             },
         })
         {
-            _logger.LogDebug("Starting ffmpeg with arguments: {Arguments}", args);
+            logger.LogDebug("Starting ffmpeg with arguments: {Arguments}", args);
             try
             {
                 process.Start();
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error starting ffmpeg with arguments: {Arguments}", args);
+                logger.LogError(ex, "Error starting ffmpeg with arguments: {Arguments}", args);
                 return null;
             }
 
@@ -257,7 +294,7 @@ public partial class AudioNormalizationTask : IScheduledTask
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Error setting ffmpeg process priority");
+                logger.LogWarning(ex, "Error setting ffmpeg process priority");
             }
 
             using var reader = process.StandardError;
@@ -282,7 +319,7 @@ public partial class AudioNormalizationTask : IScheduledTask
 
             if (lufs is null)
             {
-                _logger.LogError("Failed to find LUFS value in output");
+                logger.LogError("Failed to find LUFS value in output");
             }
 
             if (waitForExit)

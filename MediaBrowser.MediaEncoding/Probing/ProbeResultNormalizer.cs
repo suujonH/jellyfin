@@ -96,6 +96,19 @@ namespace MediaBrowser.MediaEncoding.Probing
         /// <param name="protocol">Path media protocol.</param>
         /// <returns>The <see cref="MediaInfo"/>.</returns>
         public MediaInfo GetMediaInfo(InternalMediaInfoResult data, VideoType? videoType, bool isAudio, string path, MediaProtocol protocol)
+            => GetMediaInfo(data, videoType, isAudio, path, protocol, true);
+
+        /// <summary>
+        /// Transforms a FFprobe response into its <see cref="MediaInfo"/> equivalent.
+        /// </summary>
+        /// <param name="data">The <see cref="InternalMediaInfoResult"/>.</param>
+        /// <param name="videoType">The <see cref="VideoType"/>.</param>
+        /// <param name="isAudio">A boolean indicating whether the media is audio.</param>
+        /// <param name="path">Path to media file.</param>
+        /// <param name="protocol">Path media protocol.</param>
+        /// <param name="readTimestamp">Whether to read the transport stream timestamp from the file; a stored probe result declares it instead.</param>
+        /// <returns>The <see cref="MediaInfo"/>.</returns>
+        public MediaInfo GetMediaInfo(InternalMediaInfoResult data, VideoType? videoType, bool isAudio, string path, MediaProtocol protocol, bool readTimestamp)
         {
             var info = new MediaInfo
             {
@@ -243,7 +256,10 @@ namespace MediaBrowser.MediaEncoding.Probing
 
                 FetchWtvInfo(info, data);
 
-                ExtractTimestamp(info);
+                if (readTimestamp)
+                {
+                    ExtractTimestamp(info);
+                }
 
                 if (tags.TryGetValue("stereo_mode", out var stereoMode) && string.Equals(stereoMode, "left_right", StringComparison.OrdinalIgnoreCase))
                 {
@@ -1765,8 +1781,13 @@ namespace MediaBrowser.MediaEncoding.Probing
             }
         }
 
+        /// <summary>
+        /// Reads the timestamp kind of a transport stream file.
+        /// </summary>
+        /// <param name="path">The file.</param>
+        /// <returns>The timestamp kind.</returns>
         // REVIEW: find out why the byte array needs to be 197 bytes long and comment the reason
-        private static TransportStreamTimestamp GetMpegTimestamp(string path)
+        public static TransportStreamTimestamp GetMpegTimestamp(string path)
         {
             var packetBuffer = new byte[197];
 

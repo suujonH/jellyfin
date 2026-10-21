@@ -14,6 +14,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
@@ -24,11 +25,15 @@ namespace MediaBrowser.MediaEncoding.Attachments
     /// <inheritdoc cref="IAttachmentExtractor"/>
     public sealed class AttachmentExtractor : IAttachmentExtractor, IDisposable
     {
+        // Names the entry revision the copies of declared attachments came from.
+        private const string DeclaredRevisionFile = ".truecache-revision";
+
         private readonly ILogger<AttachmentExtractor> _logger;
         private readonly IFileSystem _fileSystem;
         private readonly IMediaEncoder _mediaEncoder;
         private readonly IMediaSourceManager _mediaSourceManager;
         private readonly IPathManager _pathManager;
+        private readonly ITrueCacheService _trueCache;
 
         private readonly AsyncKeyedLocker<string> _semaphoreLocks = new(o =>
         {
@@ -44,18 +49,90 @@ namespace MediaBrowser.MediaEncoding.Attachments
         /// <param name="mediaEncoder">The <see cref="IMediaEncoder"/>.</param>
         /// <param name="mediaSourceManager">The <see cref="IMediaSourceManager"/>.</param>
         /// <param name="pathManager">The <see cref="IPathManager"/>.</param>
+        /// <param name="trueCache">The <see cref="ITrueCacheService"/>.</param>
         public AttachmentExtractor(
             ILogger<AttachmentExtractor> logger,
             IFileSystem fileSystem,
             IMediaEncoder mediaEncoder,
             IMediaSourceManager mediaSourceManager,
-            IPathManager pathManager)
+            IPathManager pathManager,
+            ITrueCacheService trueCache)
         {
             _logger = logger;
             _fileSystem = fileSystem;
             _mediaEncoder = mediaEncoder;
             _mediaSourceManager = mediaSourceManager;
             _pathManager = pathManager;
+            _trueCache = trueCache;
+        }
+
+        /// <summary>
+        /// Gets the <c>__true_cache__</c> entry of the resource behind a media source.
+        /// </summary>
+        /// <returns>The entry, or <c>null</c> when the resource has none.</returns>
+        /// <exception cref="TrueCacheRejectedException">The resource has an entry, but it is incomplete.</exception>
+        private TrueCacheEntry? GetDeclaredEntry(MediaSourceInfo mediaSource)
+        {
+            // Playback points a .strm source at the target it names and a symlinked file at the link target,
+            // but the entry sits next to the library item.
+            var resourcePath = mediaSource.ItemPath ?? mediaSource.Path;
+            if (string.IsNullOrEmpty(resourcePath))
+            {
+                return null;
+            }
+
+            var lookup = _trueCache.Lookup(resourcePath);
+            if (!lookup.IsDeclared)
+            {
+                return null;
+            }
+
+            return lookup.IsValid ? lookup.Entry : throw TrueCacheRejectedException.For(resourcePath, lookup);
+        }
+
+        /// <summary>
+        /// Copies the attachments of a declared resource into the server's attachment folder, where the encoder looks for fonts.
+        /// </summary>
+        private async Task CopyDeclaredAttachments(TrueCacheEntry entry, MediaSourceInfo mediaSource, CancellationToken cancellationToken)
+        {
+            var outputFolder = _pathManager.GetAttachmentFolderPath(mediaSource.Id);
+            if (outputFolder is null)
+            {
+                return;
+            }
+
+            // Concurrent transcodes of a source share its folder: a caller must neither copy over another one
+            // nor find a font that is still being copied.
+            using (await _semaphoreLocks.LockAsync(outputFolder, cancellationToken).ConfigureAwait(false))
+            {
+                // Copies from another revision of the entry, or left by an interrupted copy, are replaced:
+                // a replaced entry can bring other fonts under the same names.
+                var revisionFile = Path.Combine(outputFolder, DeclaredRevisionFile);
+                if (Directory.Exists(outputFolder)
+                    && (!File.Exists(revisionFile)
+                        || !string.Equals(await File.ReadAllTextAsync(revisionFile, cancellationToken).ConfigureAwait(false), entry.Hash, StringComparison.Ordinal)))
+                {
+                    Directory.Delete(outputFolder, true);
+                }
+
+                Directory.CreateDirectory(outputFolder);
+                foreach (var attachment in mediaSource.MediaAttachments)
+                {
+                    if (string.Equals(attachment.Codec, "mjpeg", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    var name = TrueCacheRules.GetAttachmentFileName(attachment);
+                    var target = Path.Combine(outputFolder, name);
+                    if (!File.Exists(target))
+                    {
+                        File.Copy(Path.Combine(entry.GetAttachmentsDirectory(), name), target);
+                    }
+                }
+
+                await File.WriteAllTextAsync(revisionFile, entry.Hash, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         /// <inheritdoc />
@@ -100,6 +177,13 @@ namespace MediaBrowser.MediaEncoding.Attachments
             MediaSourceInfo mediaSource,
             CancellationToken cancellationToken)
         {
+            // A declared resource is not read; for disc folders the input is a concat list, so the media source decides.
+            if (!inputFile.EndsWith(".mks", StringComparison.OrdinalIgnoreCase) && GetDeclaredEntry(mediaSource) is { } entry)
+            {
+                await CopyDeclaredAttachments(entry, mediaSource, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             var shouldExtractOneByOne = mediaSource.MediaAttachments.Any(a => !string.IsNullOrEmpty(a.FileName)
                                                                               && !string.Equals(PathHelper.GetSafeLeafFileName(a.FileName), a.FileName, StringComparison.Ordinal));
             if (shouldExtractOneByOne && !inputFile.EndsWith(".mks", StringComparison.OrdinalIgnoreCase))
@@ -368,6 +452,12 @@ namespace MediaBrowser.MediaEncoding.Attachments
             MediaAttachment mediaAttachment,
             CancellationToken cancellationToken)
         {
+            // The attachments of a declared resource were extracted in advance into its __true_cache__ entry.
+            if (GetDeclaredEntry(mediaSource) is { } entry)
+            {
+                return AsyncFile.OpenRead(Path.Combine(entry.GetAttachmentsDirectory(), TrueCacheRules.GetAttachmentFileName(mediaAttachment)));
+            }
+
             var attachmentPath = await ExtractAttachment(mediaSource.Path, mediaSource, mediaAttachment, cancellationToken)
                 .ConfigureAwait(false);
             return AsyncFile.OpenRead(attachmentPath);

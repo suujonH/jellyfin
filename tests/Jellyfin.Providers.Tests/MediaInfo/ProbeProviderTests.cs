@@ -11,6 +11,7 @@ using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Controller.Subtitles;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.MediaInfo;
@@ -49,7 +50,16 @@ public class ProbeProviderTests
             new NamingOptions(),
             Mock.Of<ILyricManager>(),
             Mock.Of<IMediaAttachmentRepository>(),
-            Mock.Of<IMediaStreamRepository>());
+            Mock.Of<IMediaStreamRepository>(),
+            NoTrueCacheService.Instance);
+    }
+
+    [Fact]
+    public void ProbeProvider_IsAPreRefreshProvider()
+    {
+        // Only this provider notices a changed __true_cache__ declaration of a book. Being a pre-refresh provider
+        // makes the metadata service run the local readers too (EPUB, comic), which read the declared documents.
+        Assert.IsAssignableFrom<IPreRefreshProvider>(_probeProvider);
     }
 
     [Fact]

@@ -33,6 +33,13 @@ namespace MediaBrowser.Model.Dto
 
         public string Path { get; set; }
 
+        /// <summary>
+        /// Gets or sets the path of the library item the source belongs to. <see cref="Path"/> can name something else:
+        /// the target of a .strm file or of a symbolic link, or a substituted path.
+        /// </summary>
+        [JsonIgnore]
+        public string ItemPath { get; set; }
+
         public string EncoderPath { get; set; }
 
         public MediaProtocol? EncoderProtocol { get; set; }

@@ -82,6 +82,7 @@ using MediaBrowser.Controller.Session;
 using MediaBrowser.Controller.Sorting;
 using MediaBrowser.Controller.Subtitles;
 using MediaBrowser.Controller.SyncPlay;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Controller.TV;
 using MediaBrowser.LocalMetadata.Savers;
 using MediaBrowser.MediaEncoding.BdInfo;
@@ -564,6 +565,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<IKeyframeRepository, KeyframeRepository>();
             serviceCollection.AddSingleton<IItemTypeLookup, ItemTypeLookup>();
 
+            serviceCollection.AddSingleton<ITrueCacheService, MediaBrowser.MediaEncoding.TrueCache.TrueCacheService>();
             serviceCollection.AddSingleton<IMediaEncoder, MediaBrowser.MediaEncoding.Encoder.MediaEncoder>();
             serviceCollection.AddSingleton<EncodingHelper>();
             serviceCollection.AddSingleton<IPathManager, PathManager>();
@@ -702,6 +704,7 @@ namespace Emby.Server.Implementations
             BaseItem.Logger = Resolve<ILogger<BaseItem>>();
             BaseItem.MediaSegmentManager = Resolve<IMediaSegmentManager>();
             BaseItem.MediaSourceManager = Resolve<IMediaSourceManager>();
+            BaseItem.TrueCache = Resolve<ITrueCacheService>();
             BaseItem.ProviderManager = Resolve<IProviderManager>();
             BaseItem.UserDataManager = Resolve<IUserDataManager>();
             CollectionFolder.XmlSerializer = _xmlSerializer;

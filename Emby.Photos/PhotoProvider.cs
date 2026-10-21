@@ -8,6 +8,7 @@ using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Drawing;
 using MediaBrowser.Model.Entities;
 using Microsoft.Extensions.Logging;
@@ -25,6 +26,7 @@ public class PhotoProvider : ICustomMetadataProvider<Photo>, IForcedProvider, IH
 {
     private readonly ILogger<PhotoProvider> _logger;
     private readonly IImageProcessor _imageProcessor;
+    private readonly ITrueCacheService _trueCache;
 
     // Other extensions might cause taglib to hang
     private readonly string[] _includeExtensions = [".jpg", ".jpeg", ".png", ".tiff", ".cr2", ".webp", ".avif"];
@@ -34,10 +36,12 @@ public class PhotoProvider : ICustomMetadataProvider<Photo>, IForcedProvider, IH
     /// </summary>
     /// <param name="logger">The logger.</param>
     /// <param name="imageProcessor">The image processor.</param>
-    public PhotoProvider(ILogger<PhotoProvider> logger, IImageProcessor imageProcessor)
+    /// <param name="trueCache">The <c>__true_cache__</c> lookup.</param>
+    public PhotoProvider(ILogger<PhotoProvider> logger, IImageProcessor imageProcessor, ITrueCacheService trueCache)
     {
         _logger = logger;
         _imageProcessor = imageProcessor;
+        _trueCache = trueCache;
     }
 
     /// <inheritdoc />
@@ -48,6 +52,12 @@ public class PhotoProvider : ICustomMetadataProvider<Photo>, IForcedProvider, IH
     {
         if (item.IsFileProtocol)
         {
+            // A declared photo is described by its __true_cache__ entry: a changed declaration is a changed file.
+            if (_trueCache.HasDeclarationChanged(item))
+            {
+                return true;
+            }
+
             var file = directoryService.GetFile(item.Path);
             return file is not null && item.HasChanged(file.LastWriteTimeUtc);
         }
@@ -59,6 +69,19 @@ public class PhotoProvider : ICustomMetadataProvider<Photo>, IForcedProvider, IH
     public Task<ItemUpdateType> FetchAsync(Photo item, MetadataRefreshOptions options, CancellationToken cancellationToken)
     {
         item.SetImagePath(ImageType.Primary, item.Path);
+
+        // A declared photo is not read: its tags and size come from its __true_cache__ entry.
+        var lookup = _trueCache.Lookup(item.Path);
+        if (lookup.IsDeclared)
+        {
+            if (!lookup.IsValid)
+            {
+                throw TrueCacheRejectedException.For(item.Path, lookup);
+            }
+
+            ApplyDeclaredTags(item, lookup.Entry.Manifest.Photo!);
+            return Task.FromResult(ItemUpdateType.ImageUpdate | ItemUpdateType.MetadataImport);
+        }
 
         // Examples: https://github.com/mono/taglib-sharp/blob/a5f6949a53d09ce63ee7495580d6802921a21f14/tests/fixtures/TagLib.Tests.Images/NullOrientationTest.cs
         if (_includeExtensions.Contains(Path.GetExtension(item.Path.AsSpan()), StringComparison.OrdinalIgnoreCase))
@@ -171,5 +194,41 @@ public class PhotoProvider : ICustomMetadataProvider<Photo>, IForcedProvider, IH
 
         const ItemUpdateType Result = ItemUpdateType.ImageUpdate | ItemUpdateType.MetadataImport;
         return Task.FromResult(Result);
+    }
+
+    // Mirrors what FetchAsync takes from the image tags.
+    private static void ApplyDeclaredTags(Photo item, TrueCachePhotoInfo photo)
+    {
+        item.Aperture = photo.Aperture;
+        item.ShutterSpeed = photo.ShutterSpeed;
+        item.CameraMake = photo.CameraMake;
+        item.CameraModel = photo.CameraModel;
+        item.Width = photo.Width;
+        item.Height = photo.Height;
+        item.CommunityRating = (float?)photo.Rating;
+        item.Overview = photo.Comment;
+
+        if (!string.IsNullOrWhiteSpace(photo.Title) && !item.LockedFields.Contains(MetadataField.Name))
+        {
+            item.Name = photo.Title;
+        }
+
+        if (photo.DateTaken.HasValue)
+        {
+            item.DateCreated = photo.DateTaken.Value.ToUniversalTime();
+            item.PremiereDate = photo.DateTaken.Value;
+            item.ProductionYear = photo.DateTaken.Value.Year;
+        }
+
+        item.Genres = photo.Genres.ToArray();
+        item.Tags = photo.Keywords.ToArray();
+        item.Software = photo.Software;
+        item.Orientation = photo.Orientation;
+        item.ExposureTime = photo.ExposureTime;
+        item.FocalLength = photo.FocalLength;
+        item.Latitude = photo.Latitude;
+        item.Longitude = photo.Longitude;
+        item.Altitude = photo.Altitude;
+        item.IsoSpeedRating = photo.IsoSpeedRating;
     }
 }

@@ -16,6 +16,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
@@ -538,7 +539,7 @@ namespace MediaBrowser.Controller.Entities
             // Clean up LocalAlternateVersions - remove paths that no longer exist
             if (LocalAlternateVersions.Length > 0)
             {
-                var validPaths = LocalAlternateVersions.Where(FileSystem.FileExists).ToArray();
+                var validPaths = LocalAlternateVersions.Where(p => FileSystem.FileExists(p) && TrueCache.Lookup(p).State != TrueCacheState.Rejected).ToArray();
                 if (validPaths.Length != LocalAlternateVersions.Length)
                 {
                     LocalAlternateVersions = validPaths;
@@ -648,7 +649,7 @@ namespace MediaBrowser.Controller.Entities
             var id = LibraryManager.GetNewItemId(path, itemType);
 
             // Check if the file still exists
-            if (!FileSystem.FileExists(path))
+            if (!FileSystem.FileExists(path) || TrueCache.Lookup(path).State == TrueCacheState.Rejected)
             {
                 // File was removed - clean up any orphaned database entry
                 if (LibraryManager.GetItemById(id) is Video orphanedVideo && orphanedVideo.OwnerId.Equals(Id))

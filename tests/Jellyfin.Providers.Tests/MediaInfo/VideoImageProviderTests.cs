@@ -7,6 +7,7 @@ using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Drawing;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -37,7 +38,7 @@ namespace Jellyfin.Providers.Tests.MediaInfo
         public async Task GetImage_UnsupportedInput_ReturnsNoImage(Video input)
         {
             var mediaSourceManager = GetMediaSourceManager(input, null, new List<MediaStream>());
-            var videoImageProvider = new VideoImageProvider(mediaSourceManager, Mock.Of<IMediaEncoder>(), new NullLogger<VideoImageProvider>());
+            var videoImageProvider = new VideoImageProvider(mediaSourceManager, Mock.Of<IMediaEncoder>(), new NullLogger<VideoImageProvider>(), NoTrueCacheService.Instance);
 
             var actual = await videoImageProvider.GetImage(input, ImageType.Primary, CancellationToken.None);
             Assert.NotNull(actual);
@@ -68,7 +69,7 @@ namespace Jellyfin.Providers.Tests.MediaInfo
             var defaultStream = defaultIndex < mediaStreams.Count ? mediaStreams[targetIndex] : null;
             var mediaSourceManager = GetMediaSourceManager(input, defaultStream, mediaStreams);
 
-            var videoImageProvider = new VideoImageProvider(mediaSourceManager, mediaEncoder.Object, new NullLogger<VideoImageProvider>());
+            var videoImageProvider = new VideoImageProvider(mediaSourceManager, mediaEncoder.Object, new NullLogger<VideoImageProvider>(), NoTrueCacheService.Instance);
 
             var actual = await videoImageProvider.GetImage(input, ImageType.Primary, CancellationToken.None);
             Assert.NotNull(actual);
@@ -99,7 +100,7 @@ namespace Jellyfin.Providers.Tests.MediaInfo
                 .Callback<string, string, MediaSourceInfo, MediaStream, Video3DFormat?, TimeSpan?, CancellationToken>((_, _, _, _, _, timeSpan, _) => actualTimeSpan = timeSpan)
                 .Returns(Task.FromResult("path"));
 
-            var videoImageProvider = new VideoImageProvider(mediaSourceManager, mediaEncoder.Object, new NullLogger<VideoImageProvider>());
+            var videoImageProvider = new VideoImageProvider(mediaSourceManager, mediaEncoder.Object, new NullLogger<VideoImageProvider>(), NoTrueCacheService.Instance);
 
             // not testing return, just verifying what gets requested for time span
             await videoImageProvider.GetImage(input, ImageType.Primary, CancellationToken.None);

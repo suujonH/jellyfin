@@ -15,6 +15,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
 
@@ -29,6 +30,7 @@ namespace MediaBrowser.Providers.MediaInfo
         private readonly IMediaEncoder _mediaEncoder;
         private readonly IServerConfigurationManager _config;
         private readonly IFileSystem _fileSystem;
+        private readonly ITrueCacheService _trueCache;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="AudioImageProvider"/> class.
@@ -37,12 +39,14 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <param name="mediaEncoder">The media encoder for extracting embedded images.</param>
         /// <param name="config">The server configuration manager for getting image paths.</param>
         /// <param name="fileSystem">The filesystem.</param>
-        public AudioImageProvider(IMediaSourceManager mediaSourceManager, IMediaEncoder mediaEncoder, IServerConfigurationManager config, IFileSystem fileSystem)
+        /// <param name="trueCache">The <c>__true_cache__</c> lookup.</param>
+        public AudioImageProvider(IMediaSourceManager mediaSourceManager, IMediaEncoder mediaEncoder, IServerConfigurationManager config, IFileSystem fileSystem, ITrueCacheService trueCache)
         {
             _mediaSourceManager = mediaSourceManager;
             _mediaEncoder = mediaEncoder;
             _config = config;
             _fileSystem = fileSystem;
+            _trueCache = trueCache;
         }
 
         private string AudioImagesPath => Path.Combine(_config.ApplicationPaths.CachePath, "extracted-audio-images");
@@ -59,6 +63,15 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <inheritdoc />
         public Task<DynamicImageResponse> GetImage(BaseItem item, ImageType type, CancellationToken cancellationToken)
         {
+            // A declared file is not read: its cover comes from its __true_cache__ entry.
+            var lookup = _trueCache.Lookup(item.Path);
+            if (lookup.IsDeclared)
+            {
+                return Task.FromResult(lookup.IsValid && lookup.Entry.TryGetEmbeddedImage(ImageType.Primary, out var cached)
+                    ? TrueCacheRules.CreateImageResponse(cached!)
+                    : new DynamicImageResponse { HasImage = false });
+            }
+
             var imageStreams = _mediaSourceManager.GetMediaStreams(new MediaStreamQuery
             {
                 ItemId = item.Id,
@@ -82,9 +95,7 @@ namespace MediaBrowser.Providers.MediaInfo
             {
                 var directoryName = Path.GetDirectoryName(path) ?? throw new InvalidOperationException($"Invalid path '{path}'");
                 Directory.CreateDirectory(directoryName);
-                var imageStream = imageStreams.FirstOrDefault(i => (i.Comment ?? string.Empty).Contains("front", StringComparison.OrdinalIgnoreCase)) ??
-                    imageStreams.FirstOrDefault(i => (i.Comment ?? string.Empty).Contains("cover", StringComparison.OrdinalIgnoreCase)) ??
-                    imageStreams.FirstOrDefault();
+                var imageStream = TrueCacheRules.FindAudioImage(imageStreams);
                 var imageStreamIndex = imageStream?.Index;
 
                 var tempFile = await _mediaEncoder.ExtractAudioImage(item.Path, imageStreamIndex, cancellationToken).ConfigureAwait(false);

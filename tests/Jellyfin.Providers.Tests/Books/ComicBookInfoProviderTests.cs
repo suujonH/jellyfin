@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Providers.Books.ComicBookInfo;
 using Microsoft.Extensions.Logging;
@@ -40,7 +41,7 @@ public sealed class ComicBookInfoProviderTests : IDisposable
     {
         var logger = new Mock<ILogger<ComicBookInfoProvider>>();
         var path = CreateArchive(comment);
-        var provider = new ComicBookInfoProvider(CreateFileSystem(path), logger.Object);
+        var provider = new ComicBookInfoProvider(CreateFileSystem(path), logger.Object, NoTrueCacheService.Instance);
 
         var result = await provider.ReadMetadata(new ItemInfo(new Book { Path = path }), Mock.Of<IDirectoryService>(), CancellationToken.None);
 
@@ -54,7 +55,7 @@ public sealed class ComicBookInfoProviderTests : IDisposable
     {
         var logger = new Mock<ILogger<ComicBookInfoProvider>>();
         var path = CreateArchive("Created by some packer");
-        var provider = new ComicBookInfoProvider(CreateFileSystem(path), logger.Object);
+        var provider = new ComicBookInfoProvider(CreateFileSystem(path), logger.Object, NoTrueCacheService.Instance);
 
         var result = await provider.ReadMetadata(new ItemInfo(new Book { Path = path }), Mock.Of<IDirectoryService>(), CancellationToken.None);
 
@@ -68,7 +69,7 @@ public sealed class ComicBookInfoProviderTests : IDisposable
     {
         var logger = new Mock<ILogger<ComicBookInfoProvider>>();
         var path = CreateArchive(ValidComment);
-        var provider = new ComicBookInfoProvider(CreateFileSystem(path), logger.Object);
+        var provider = new ComicBookInfoProvider(CreateFileSystem(path), logger.Object, NoTrueCacheService.Instance);
 
         var result = await provider.ReadMetadata(new ItemInfo(new Book { Path = path }), Mock.Of<IDirectoryService>(), CancellationToken.None);
 

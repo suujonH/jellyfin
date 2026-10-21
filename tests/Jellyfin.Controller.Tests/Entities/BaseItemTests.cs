@@ -574,6 +574,39 @@ public class BaseItemTests
     }
 
     [Fact]
+    public void GetMediaSources_Shortcut_KeepsTheItemPath()
+    {
+        var video = new Video { Id = Guid.NewGuid(), Path = "/Movies/Movie/Movie.strm", IsShortcut = true, ShortcutPath = "https://example.com/Movie.mkv" };
+
+        var mediaSourceManager = new Mock<IMediaSourceManager>();
+        mediaSourceManager.Setup(x => x.GetPathProtocol(It.IsAny<string>()))
+            .Returns((string path) => path.StartsWith("https:", StringComparison.Ordinal) ? MediaProtocol.Http : MediaProtocol.File);
+        mediaSourceManager.Setup(x => x.GetMediaStreams(It.IsAny<Guid>())).Returns(new List<MediaStream>());
+        mediaSourceManager.Setup(x => x.GetMediaAttachments(It.IsAny<Guid>())).Returns(new List<MediaAttachment>());
+
+        var segmentManager = new Mock<IMediaSegmentManager>();
+        segmentManager.Setup(x => x.IsTypeSupported(It.IsAny<BaseItem>())).Returns(false);
+
+        var libraryManager = new Mock<ILibraryManager>();
+        libraryManager.Setup(x => x.GetLinkedAlternateVersions(It.IsAny<Video>())).Returns(Array.Empty<Video>());
+        libraryManager.Setup(x => x.GetLocalAlternateVersionIds(It.IsAny<Video>())).Returns(Array.Empty<Guid>());
+
+        var recordingsManager = new Mock<IRecordingsManager>();
+        recordingsManager.Setup(x => x.GetActiveRecordingInfo(It.IsAny<string>())).Returns((ActiveRecordingInfo?)null);
+
+        BaseItem.MediaSourceManager = mediaSourceManager.Object;
+        BaseItem.MediaSegmentManager = segmentManager.Object;
+        BaseItem.LibraryManager = libraryManager.Object;
+        Video.RecordingsManager = recordingsManager.Object;
+
+        var source = Assert.Single(video.GetMediaSources(false));
+
+        // Playback reads the target, while files that belong to the item, such as its __true_cache__ entry, sit next to the .strm.
+        Assert.Equal(video.ShortcutPath, source.Path);
+        Assert.Equal(video.Path, source.ItemPath);
+    }
+
+    [Fact]
     public void GetAllItemsForMediaSources_FromAnyVersion_HasNoDuplicates()
     {
         var (primary, alt1, alt2) = SetupVersionGroup();

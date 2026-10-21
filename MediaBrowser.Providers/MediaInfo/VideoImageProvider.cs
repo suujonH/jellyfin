@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -10,6 +11,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Drawing;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -26,6 +28,7 @@ namespace MediaBrowser.Providers.MediaInfo
         private readonly IMediaSourceManager _mediaSourceManager;
         private readonly IMediaEncoder _mediaEncoder;
         private readonly ILogger<VideoImageProvider> _logger;
+        private readonly ITrueCacheService _trueCache;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="VideoImageProvider"/> class.
@@ -33,11 +36,13 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <param name="mediaSourceManager">The media source manager for fetching item streams.</param>
         /// <param name="mediaEncoder">The media encoder for capturing images.</param>
         /// <param name="logger">The logger.</param>
-        public VideoImageProvider(IMediaSourceManager mediaSourceManager, IMediaEncoder mediaEncoder, ILogger<VideoImageProvider> logger)
+        /// <param name="trueCache">The <c>__true_cache__</c> lookup.</param>
+        public VideoImageProvider(IMediaSourceManager mediaSourceManager, IMediaEncoder mediaEncoder, ILogger<VideoImageProvider> logger, ITrueCacheService trueCache)
         {
             _mediaSourceManager = mediaSourceManager;
             _mediaEncoder = mediaEncoder;
             _logger = logger;
+            _trueCache = trueCache;
         }
 
         /// <inheritdoc />
@@ -62,6 +67,15 @@ namespace MediaBrowser.Providers.MediaInfo
             if (video.IsPlaceHolder || video.VideoType == VideoType.Dvd)
             {
                 return Task.FromResult(new DynamicImageResponse { HasImage = false });
+            }
+
+            // A declared video is not read: the screen grab comes from its __true_cache__ entry.
+            var lookup = _trueCache.Lookup(video.Path);
+            if (lookup.IsDeclared)
+            {
+                return Task.FromResult(lookup.IsValid && File.Exists(lookup.Entry.ScreenGrabPath)
+                    ? TrueCacheRules.CreateImageResponse(lookup.Entry.ScreenGrabPath)
+                    : new DynamicImageResponse { HasImage = false });
             }
 
             // Can't extract if we didn't find a video stream in the file

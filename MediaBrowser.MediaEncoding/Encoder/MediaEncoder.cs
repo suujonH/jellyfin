@@ -23,6 +23,7 @@ using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Extensions;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.MediaEncoding.Probing;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Dlna;
@@ -60,6 +61,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
         private readonly IConfiguration _config;
         private readonly IServerConfigurationManager _serverConfig;
         private readonly string _startupOptionFFmpegPath;
+        private readonly ITrueCacheService _trueCache;
 
         private readonly AsyncNonKeyedLocker _thumbnailResourcePool;
 
@@ -115,7 +117,8 @@ namespace MediaBrowser.MediaEncoding.Encoder
             IBlurayExaminer blurayExaminer,
             ILocalizationManager localization,
             IConfiguration config,
-            IServerConfigurationManager serverConfig)
+            IServerConfigurationManager serverConfig,
+            ITrueCacheService trueCache)
         {
             _logger = logger;
             _configurationManager = configurationManager;
@@ -124,6 +127,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
             _localization = localization;
             _config = config;
             _serverConfig = serverConfig;
+            _trueCache = trueCache;
             _startupOptionFFmpegPath = config.GetValue<string>(Controller.Extensions.ConfigurationExtensions.FfmpegPathKey) ?? string.Empty;
 
             _jsonSerializerOptions = new JsonSerializerOptions(JsonDefaults.Options);
@@ -417,6 +421,22 @@ namespace MediaBrowser.MediaEncoding.Encoder
         /// <inheritdoc />
         public Task<MediaInfo> GetMediaInfo(MediaInfoRequest request, CancellationToken cancellationToken)
         {
+            var source = request.MediaSource;
+            if (source.Protocol == MediaProtocol.File && !string.IsNullOrEmpty(source.Path))
+            {
+                // A declared probe result replaces ffprobe; a resource with an incomplete declaration is not read at all.
+                var lookup = _trueCache.Lookup(source.Path);
+                if (lookup.IsValid && lookup.Entry.MediaInfo is not null)
+                {
+                    return Task.FromResult(lookup.Entry.CreateMediaInfo(request.ExtractChapters));
+                }
+
+                if (lookup.IsDeclared)
+                {
+                    throw TrueCacheRejectedException.For(source.Path, lookup);
+                }
+            }
+
             var extractChapters = request.ExtractChapters;
             var extraArgs = GetExtraArguments(request);
 
@@ -429,6 +449,26 @@ namespace MediaBrowser.MediaEncoding.Encoder
                 request.MediaType == DlnaProfileType.Audio,
                 request.MediaSource.VideoType,
                 cancellationToken);
+        }
+
+        /// <summary>
+        /// Refuses to extract anything from a resource with a <c>__true_cache__</c> entry: its images come from the entry.
+        /// </summary>
+        /// <param name="path">The resource.</param>
+        private void EnsureNotDeclared(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return;
+            }
+
+            var lookup = _trueCache.Lookup(path);
+            if (lookup.IsDeclared)
+            {
+                throw lookup.IsValid
+                    ? new TrueCacheRejectedException(path + " has a __true_cache__ entry; its images are not extracted from the file.")
+                    : TrueCacheRejectedException.For(path, lookup);
+            }
         }
 
         internal string GetExtraArguments(MediaInfoRequest request)
@@ -497,6 +537,60 @@ namespace MediaBrowser.MediaEncoding.Encoder
         }
 
         /// <summary>
+        /// Runs ffprobe for a request with exactly the arguments <see cref="GetMediaInfo"/> uses, and returns its raw output.
+        /// The <c>__true_cache__</c> generator stores this output, so the server reads the same result later.
+        /// </summary>
+        /// <param name="request">The probe request.</param>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        /// <returns>The JSON written by ffprobe.</returns>
+        public async Task<string> GetMediaInfoJson(MediaInfoRequest request, CancellationToken cancellationToken)
+        {
+            var args = GetProbeArguments(
+                GetInputArgument(request.MediaSource.Path, request.MediaSource),
+                request.MediaSource.Protocol,
+                request.ExtractChapters,
+                GetExtraArguments(request),
+                request.MediaType == DlnaProfileType.Audio);
+
+            var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    StandardOutputEncoding = Encoding.UTF8,
+                    RedirectStandardOutput = true,
+                    FileName = _ffprobePath,
+                    Arguments = args,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    ErrorDialog = false,
+                },
+                EnableRaisingEvents = true
+            };
+
+            using (var processWrapper = new ProcessWrapper(process, this))
+            {
+                StartProcess(processWrapper);
+                using var reader = process.StandardOutput;
+                return await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        private string GetProbeArguments(string inputPath, MediaProtocol protocol, bool extractChapters, string probeSizeArgument, bool isAudio)
+        {
+            var args = extractChapters
+                ? "{0} -i {1} -threads {2} -v warning -print_format json -show_streams -show_chapters -show_format"
+                : "{0} -i {1} -threads {2} -v warning -print_format json -show_streams -show_format";
+
+            if (protocol == MediaProtocol.File && !isAudio && _proberSupportsFirstVideoFrame)
+            {
+                args += " -show_frames -only_first_vframe";
+            }
+
+            return string.Format(CultureInfo.InvariantCulture, args, probeSizeArgument, inputPath, _threads).Trim();
+        }
+
+        /// <summary>
         /// Gets the media info internal.
         /// </summary>
         /// <returns>Task{MediaInfoResult}.</returns>
@@ -510,16 +604,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
             VideoType? videoType,
             CancellationToken cancellationToken)
         {
-            var args = extractChapters
-                ? "{0} -i {1} -threads {2} -v warning -print_format json -show_streams -show_chapters -show_format"
-                : "{0} -i {1} -threads {2} -v warning -print_format json -show_streams -show_format";
-
-            if (protocol == MediaProtocol.File && !isAudio && _proberSupportsFirstVideoFrame)
-            {
-                args += " -show_frames -only_first_vframe";
-            }
-
-            args = string.Format(CultureInfo.InvariantCulture, args, probeSizeArgument, inputPath, _threads).Trim();
+            var args = GetProbeArguments(inputPath, protocol, extractChapters, probeSizeArgument, isAudio);
 
             var process = new Process
             {
@@ -627,6 +712,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
             ImageFormat? targetFormat,
             CancellationToken cancellationToken)
         {
+            EnsureNotDeclared(inputFile);
             var inputArgument = GetInputPathArgument(inputFile, mediaSource);
 
             if (!isAudio)
@@ -847,6 +933,7 @@ namespace MediaBrowser.MediaEncoding.Encoder
             EncodingHelper encodingHelper,
             CancellationToken cancellationToken)
         {
+            EnsureNotDeclared(inputFile);
             var options = allowHwAccel ? _configurationManager.GetEncodingOptions() : new EncodingOptions();
             threads ??= _threads;
 

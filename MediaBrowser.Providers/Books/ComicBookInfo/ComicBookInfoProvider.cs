@@ -10,6 +10,7 @@ using Jellyfin.Data.Enums;
 using Jellyfin.Extensions.Json;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Providers.Books.ComicBookInfo.Models;
 using Microsoft.Extensions.Logging;
@@ -23,16 +24,19 @@ public class ComicBookInfoProvider : IComicProvider
 {
     private readonly ILogger<ComicBookInfoProvider> _logger;
     private readonly IFileSystem _fileSystem;
+    private readonly ITrueCacheService _trueCache;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="ComicBookInfoProvider"/> class.
     /// </summary>
     /// <param name="fileSystem">Instance of the <see cref="IFileSystem"/> interface.</param>
     /// <param name="logger">Instance of the <see cref="ILogger{ComicBookInfoProvider}"/> interface.</param>
-    public ComicBookInfoProvider(IFileSystem fileSystem, ILogger<ComicBookInfoProvider> logger)
+    /// <param name="trueCache">Instance of the <see cref="ITrueCacheService"/> interface.</param>
+    public ComicBookInfoProvider(IFileSystem fileSystem, ILogger<ComicBookInfoProvider> logger, ITrueCacheService trueCache)
     {
         _fileSystem = fileSystem;
         _logger = logger;
+        _trueCache = trueCache;
     }
 
     /// <inheritdoc />
@@ -44,6 +48,28 @@ public class ComicBookInfoProvider : IComicProvider
         {
             _logger.LogDebug("could not load comic: {Path}", info.Path);
             return new MetadataResult<Book> { HasMetadata = false };
+        }
+
+        // A declared archive is not opened: its archive comment comes from its __true_cache__ entry.
+        var lookup = _trueCache.Lookup(path);
+        if (lookup.IsDeclared)
+        {
+            if (!lookup.IsValid || lookup.Entry.Manifest.Book?.ComicBookInfo != true)
+            {
+                return new MetadataResult<Book> { HasMetadata = false };
+            }
+
+            try
+            {
+                var comment = await File.ReadAllTextAsync(lookup.Entry.GetBookFile(TrueCacheLayout.ComicBookInfoFile), cancellationToken).ConfigureAwait(false);
+                var declared = JsonSerializer.Deserialize<ComicBookInfoFormat>(comment, JsonDefaults.Options);
+                return declared is null ? new MetadataResult<Book> { HasMetadata = false } : SaveMetadata(declared);
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogDebug("declared archive comment is not valid ComicBookInfo metadata: {Path}: {Message}", info.Path, ex.Message);
+                return new MetadataResult<Book> { HasMetadata = false };
+            }
         }
 
         try

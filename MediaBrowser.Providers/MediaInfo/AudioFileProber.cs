@@ -15,6 +15,7 @@ using MediaBrowser.Controller.Lyrics;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -40,6 +41,7 @@ namespace MediaBrowser.Providers.MediaInfo
         private readonly ILyricManager _lyricManager;
         private readonly IMediaStreamRepository _mediaStreamRepository;
         private readonly IChapterManager _chapterManager;
+        private readonly ITrueCacheService _trueCache;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="AudioFileProber"/> class.
@@ -52,6 +54,7 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <param name="lyricManager">Instance of the <see cref="ILyricManager"/> interface.</param>
         /// <param name="mediaStreamRepository">Instance of the <see cref="IMediaStreamRepository"/>.</param>
         /// <param name="chapterManager">Instance of the <see cref="IChapterManager"/> interface.</param>
+        /// <param name="trueCache">Instance of the <see cref="ITrueCacheService"/> interface.</param>
         public AudioFileProber(
             ILogger<AudioFileProber> logger,
             IMediaSourceManager mediaSourceManager,
@@ -60,7 +63,8 @@ namespace MediaBrowser.Providers.MediaInfo
             LyricResolver lyricResolver,
             ILyricManager lyricManager,
             IMediaStreamRepository mediaStreamRepository,
-            IChapterManager chapterManager)
+            IChapterManager chapterManager,
+            ITrueCacheService trueCache)
         {
             _mediaEncoder = mediaEncoder;
             _libraryManager = libraryManager;
@@ -70,6 +74,7 @@ namespace MediaBrowser.Providers.MediaInfo
             _lyricManager = lyricManager;
             _mediaStreamRepository = mediaStreamRepository;
             _chapterManager = chapterManager;
+            _trueCache = trueCache;
             ATL.Settings.DisplayValueSeparator = InternalValueSeparator;
             ATL.Settings.UseFileNameWhenNoTitle = false;
             ATL.Settings.ID3v2_separatev2v3Values = false;
@@ -89,6 +94,20 @@ namespace MediaBrowser.Providers.MediaInfo
             CancellationToken cancellationToken)
             where T : Audio
         {
+            // A declared file is never read: its probe result, tags and lyrics come from its __true_cache__ entry.
+            var lookup = _trueCache.Lookup(item.Path);
+            if (lookup.IsDeclared)
+            {
+                if (!lookup.IsValid)
+                {
+                    throw TrueCacheRejectedException.For(item.Path, lookup);
+                }
+
+                var cached = lookup.Entry.CreateMediaInfo(item is AudioBook);
+                await FetchAsync(item, cached, options, AudioTagValues.FromTrueCache(lookup.Entry), cancellationToken).ConfigureAwait(false);
+                return ItemUpdateType.MetadataImport;
+            }
+
             var path = item.Path;
             var protocol = item.PathProtocol ?? MediaProtocol.File;
 
@@ -115,7 +134,7 @@ namespace MediaBrowser.Providers.MediaInfo
 
                 cancellationToken.ThrowIfCancellationRequested();
 
-                await FetchAsync(item, result, options, cancellationToken).ConfigureAwait(false);
+                await FetchAsync(item, result, options, null, cancellationToken).ConfigureAwait(false);
             }
 
             return ItemUpdateType.MetadataImport;
@@ -127,12 +146,14 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <param name="audio">The <see cref="Audio"/>.</param>
         /// <param name="mediaInfo">The <see cref="Model.MediaInfo.MediaInfo"/>.</param>
         /// <param name="options">The <see cref="MetadataRefreshOptions"/>.</param>
+        /// <param name="tags">The declared tags, or <c>null</c> to read them from the file.</param>
         /// <param name="cancellationToken">The <see cref="CancellationToken"/>.</param>
         /// <returns>A <see cref="Task"/> representing the asynchronous operation.</returns>
         private async Task FetchAsync(
             Audio audio,
             Model.MediaInfo.MediaInfo mediaInfo,
             MetadataRefreshOptions options,
+            AudioTagValues? tags,
             CancellationToken cancellationToken)
         {
             audio.Container = mediaInfo.Container;
@@ -147,7 +168,7 @@ namespace MediaBrowser.Providers.MediaInfo
 
             if (!audio.IsLocked)
             {
-                await FetchDataFromTags(audio, mediaInfo, options, tryExtractEmbeddedLyrics).ConfigureAwait(false);
+                await FetchDataFromTags(audio, mediaInfo, options, tryExtractEmbeddedLyrics, tags).ConfigureAwait(false);
                 if (tryExtractEmbeddedLyrics)
                 {
                     AddExternalLyrics(audio, mediaStreams, options);
@@ -171,13 +192,13 @@ namespace MediaBrowser.Providers.MediaInfo
         /// <param name="mediaInfo">The <see cref="Model.MediaInfo.MediaInfo"/>.</param>
         /// <param name="options">The <see cref="MetadataRefreshOptions"/>.</param>
         /// <param name="tryExtractEmbeddedLyrics">Whether to extract embedded lyrics to lrc file. </param>
-        private async Task FetchDataFromTags(Audio audio, Model.MediaInfo.MediaInfo mediaInfo, MetadataRefreshOptions options, bool tryExtractEmbeddedLyrics)
+        /// <param name="tags">The declared tags, or <c>null</c> to read them from the file.</param>
+        private async Task FetchDataFromTags(Audio audio, Model.MediaInfo.MediaInfo mediaInfo, MetadataRefreshOptions options, bool tryExtractEmbeddedLyrics, AudioTagValues? tags)
         {
             var libraryOptions = _libraryManager.GetLibraryOptions(audio);
-            Track track = new Track(audio.Path);
+            var track = tags ?? AudioTagValues.FromFile(audio.Path);
 
-            if (track.MetadataFormats
-                .All(mf => string.Equals(mf.ShortName, "ID3v1", StringComparison.OrdinalIgnoreCase)))
+            if (track.Id3v1Only)
             {
                 _logger.LogWarning("File {File} only has ID3v1 tags, some fields may be truncated", audio.Path);
             }
@@ -561,11 +582,7 @@ namespace MediaBrowser.Providers.MediaInfo
 
             // Save extracted lyrics if they exist,
             // and if the audio doesn't yet have lyrics.
-            // ATL supports both SRT and LRC formats as synchronized lyrics, but we only want to save LRC format.
-            var supportedLyrics = track.Lyrics.Where(l => l.Format != LyricsInfo.LyricsFormat.SRT).ToList();
-            var candidateSynchronizedLyric = supportedLyrics.FirstOrDefault(l => l.Format is not LyricsInfo.LyricsFormat.UNSYNCHRONIZED and not LyricsInfo.LyricsFormat.OTHER && l.SynchronizedLyrics is not null);
-            var candidateUnsynchronizedLyric = supportedLyrics.FirstOrDefault(l => l.Format is LyricsInfo.LyricsFormat.UNSYNCHRONIZED or LyricsInfo.LyricsFormat.OTHER && l.UnsynchronizedLyrics is not null);
-            var lyrics = candidateSynchronizedLyric is not null ? candidateSynchronizedLyric.FormatSynch() : candidateUnsynchronizedLyric?.UnsynchronizedLyrics;
+            var lyrics = track.Lyrics;
             if (!string.IsNullOrWhiteSpace(lyrics)
                 && (tryExtractEmbeddedLyrics || options.ReplaceAllMetadata))
             {
@@ -643,14 +660,14 @@ namespace MediaBrowser.Providers.MediaInfo
             return result;
         }
 
-        private bool TryGetSanitizedAdditionalFields(Track track, string field, out string? value)
+        private bool TryGetSanitizedAdditionalFields(AudioTagValues track, string field, out string? value)
         {
             var hasField = TryGetAdditionalFieldWithFallback(track, field, out value);
             value = GetSanitizedStringTag(value, track.Path);
             return hasField;
         }
 
-        private bool TryGetSanitizedUFIDFields(Track track, out string? owner, out string? identifier)
+        private bool TryGetSanitizedUFIDFields(AudioTagValues track, out string? owner, out string? identifier)
         {
             var hasField = TryGetAdditionalFieldWithFallback(track, "UFID", out string? value);
             if (hasField && !string.IsNullOrEmpty(value))
@@ -682,7 +699,7 @@ namespace MediaBrowser.Providers.MediaInfo
         }
 
         // First try the normal key exactly; if missing, try the mka-style fallback key.
-        private bool TryGetAdditionalFieldWithFallback(Track track, string key, out string? value)
+        private bool TryGetAdditionalFieldWithFallback(AudioTagValues track, string key, out string? value)
         {
             // Prefer the normal key (as-is, case-sensitive)
             if (track.AdditionalFields.TryGetValue(key, out value))

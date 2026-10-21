@@ -27,6 +27,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaSegments;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
+using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -440,6 +441,13 @@ namespace MediaBrowser.Controller.Entities
         [JsonIgnore]
         public DateTime DateLastRefreshed { get; set; }
 
+        /// <summary>
+        /// Gets or sets the hash of the <c>__true_cache__</c> entry the item was last refreshed with.
+        /// </summary>
+        /// <value>The hash, or <c>null</c> when the resource had no valid entry at that refresh.</value>
+        [JsonIgnore]
+        public string TrueCacheHash { get; set; }
+
         [JsonIgnore]
         public bool IsLocked { get; set; }
 
@@ -516,6 +524,11 @@ namespace MediaBrowser.Controller.Entities
         public static IMediaSourceManager MediaSourceManager { get; set; }
 
         public static IMediaSegmentManager MediaSegmentManager { get; set; }
+
+        /// <summary>
+        /// Gets or sets the <c>__true_cache__</c> lookup; resources with a rejected entry are treated like missing files.
+        /// </summary>
+        public static ITrueCacheService TrueCache { get; set; } = NoTrueCacheService.Instance;
 
         /// <summary>
         /// Gets or sets the name of the forced sort.
@@ -1209,6 +1222,7 @@ namespace MediaBrowser.Controller.Entities
                 MediaAttachments = MediaSourceManager.GetMediaAttachments(item.Id),
                 Name = GetMediaSourceName(item, commonPrefix),
                 Path = enablePathSubstitution ? GetMappedPath(item, itemPath, protocol) : itemPath,
+                ItemPath = itemPath,
                 RunTimeTicks = item.RunTimeTicks,
                 Container = item.Container,
                 Size = item.Size,

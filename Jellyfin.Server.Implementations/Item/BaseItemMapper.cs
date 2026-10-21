@@ -117,6 +117,7 @@ public static class BaseItemMapper
         dto.DateModified = entity.DateModified ?? DateTime.SpecifyKind(DateTime.MinValue, DateTimeKind.Utc);
         dto.ChannelId = entity.ChannelId ?? Guid.Empty;
         dto.DateLastRefreshed = entity.DateLastRefreshed ?? DateTime.SpecifyKind(DateTime.MinValue, DateTimeKind.Utc);
+        dto.TrueCacheHash = entity.TrueCacheHash;
         dto.DateLastSaved = entity.DateLastSaved ?? DateTime.SpecifyKind(DateTime.MinValue, DateTimeKind.Utc);
         dto.OwnerId = entity.OwnerId ?? Guid.Empty;
         dto.Width = entity.Width.GetValueOrDefault();
@@ -308,6 +309,7 @@ public static class BaseItemMapper
         entity.DateModified = dto.DateModified == DateTime.MinValue ? null : dto.DateModified;
         entity.ChannelId = dto.ChannelId;
         entity.DateLastRefreshed = dto.DateLastRefreshed == DateTime.MinValue ? null : dto.DateLastRefreshed;
+        entity.TrueCacheHash = dto.TrueCacheHash;
         entity.DateLastSaved = dto.DateLastSaved == DateTime.MinValue ? null : dto.DateLastSaved;
         entity.OwnerId = dto.OwnerId == Guid.Empty ? null : dto.OwnerId;
         entity.Width = dto.Width;

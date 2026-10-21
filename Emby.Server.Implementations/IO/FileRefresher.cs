@@ -8,6 +8,7 @@ using System.Threading;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.TrueCache;
 using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.IO
@@ -17,19 +18,21 @@ namespace Emby.Server.Implementations.IO
         private readonly ILogger _logger;
         private readonly ILibraryManager _libraryManager;
         private readonly IServerConfigurationManager _configurationManager;
+        private readonly ITrueCacheService _trueCache;
 
         private readonly List<string> _affectedPaths = new();
         private readonly Lock _timerLock = new();
         private Timer? _timer;
         private bool _disposed;
 
-        public FileRefresher(string path, IServerConfigurationManager configurationManager, ILibraryManager libraryManager, ILogger logger)
+        public FileRefresher(string path, IServerConfigurationManager configurationManager, ILibraryManager libraryManager, ITrueCacheService trueCache, ILogger logger)
         {
             logger.LogDebug("New file refresher created for {0}", path);
             Path = path;
 
             _configurationManager = configurationManager;
             _libraryManager = libraryManager;
+            _trueCache = trueCache;
             _logger = logger;
             AddPath(path);
         }
@@ -192,8 +195,9 @@ namespace Emby.Server.Implementations.IO
 
             if (item is not null)
             {
-                // If the item has been deleted find the first valid parent that still exists
-                while (!Directory.Exists(item.Path) && !File.Exists(item.Path))
+                // If the item has been deleted find the first valid parent that still exists. A resource whose
+                // __true_cache__ entry is rejected is handled the same way: only refreshing its parent removes it.
+                while ((!Directory.Exists(item.Path) && !File.Exists(item.Path)) || _trueCache.Lookup(item.Path).State == TrueCacheState.Rejected)
                 {
                     item = item.GetOwner() ?? item.GetParent();
 
