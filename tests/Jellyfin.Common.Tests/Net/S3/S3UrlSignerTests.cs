@@ -51,6 +51,16 @@ public class S3UrlSignerTests
     }
 
     [Fact]
+    public void GetUrl_NoEndpointInAChinaRegion_UsesTheChinaDomain()
+    {
+        var bucket = ExampleBucket(null) with { Region = "cn-north-1" };
+
+        var url = S3UrlSigner.GetUrl(bucket, new S3Address("examplebucket", "test.txt"), _signingTime, TimeSpan.FromHours(1));
+
+        Assert.StartsWith("https://examplebucket.s3.cn-north-1.amazonaws.com.cn/test.txt?", url.AbsoluteUri, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void GetUrl_KeyWithSpacesAndNonAscii_IsPercentEncodedByteWise()
     {
         var url = S3UrlSigner.GetUrl(ExampleBucket(), new S3Address("examplebucket", "电影/My Film (2020).mkv"), _signingTime, TimeSpan.FromHours(1));

@@ -59,8 +59,10 @@ public static class S3UrlSigner
         ArgumentException.ThrowIfNullOrEmpty(method);
 
         var region = string.IsNullOrEmpty(access.Region) ? "us-east-1" : access.Region;
+        // The China regions are served under their own domain.
+        var awsDomain = region.StartsWith("cn-", StringComparison.OrdinalIgnoreCase) ? ".amazonaws.com.cn" : ".amazonaws.com";
         var endpoint = new Uri(
-            string.IsNullOrEmpty(access.Endpoint) ? "https://s3." + region + ".amazonaws.com" : access.Endpoint,
+            string.IsNullOrEmpty(access.Endpoint) ? "https://s3." + region + awsDomain : access.Endpoint,
             UriKind.Absolute);
 
         var host = access.UsePathStyle ? endpoint.Authority : bucket + "." + endpoint.Authority;
