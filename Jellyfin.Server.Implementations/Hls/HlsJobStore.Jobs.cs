@@ -509,17 +509,18 @@ public sealed partial class HlsJobStore
             cancellationToken);
 
     /// <summary>
-    /// Ends a lease the worker gives up: the directories of its plan are queued for deletion and the job is retried, or fails for
-    /// good after the last attempt. A cancelled job only loses its lease.
+    /// Ends a lease the worker gives up: the directories of its plan are queued for deletion after the grace, as uploads under way
+    /// may still land in them, and the job is retried, or fails for good after the last attempt. A cancelled job only loses its lease.
     /// </summary>
     /// <param name="id">The job.</param>
     /// <param name="leaseToken">The token of the lease.</param>
     /// <param name="error">What the worker reported.</param>
     /// <param name="maxAttempts">How often a job is claimed at most.</param>
+    /// <param name="grace">How long the directories are kept.</param>
     /// <param name="now">The current time.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>Whether the worker held the lease.</returns>
-    public Task<bool> ReleaseAsync(Guid id, string leaseToken, string error, int maxAttempts, DateTime now, CancellationToken cancellationToken)
+    public Task<bool> ReleaseAsync(Guid id, string leaseToken, string error, int maxAttempts, TimeSpan grace, DateTime now, CancellationToken cancellationToken)
         => WriteAsync<bool>(
             async context =>
             {
@@ -529,7 +530,7 @@ public sealed partial class HlsJobStore
                     return false;
                 }
 
-                await EndLeaseAsync(context, job, "The worker reported a failure.", now, error, maxAttempts, now, cancellationToken).ConfigureAwait(false);
+                await EndLeaseAsync(context, job, "The worker reported a failure.", now + grace, error, maxAttempts, now, cancellationToken).ConfigureAwait(false);
                 return true;
             },
             cancellationToken);

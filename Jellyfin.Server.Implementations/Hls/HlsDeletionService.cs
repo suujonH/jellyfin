@@ -112,8 +112,8 @@ public sealed class HlsDeletionService : BackgroundService
     // Whether the directory was deleted; a failure postpones it.
     private async Task<bool> DeleteAsync(IHlsStore store, HlsDeletionRecord deletion, DateTime now, CancellationToken cancellationToken)
     {
-        // Checked again before anything is deleted: only directories of the layout are ever touched.
-        if (!HlsRenditionPaths.IsValidRelativeDirectory(deletion.RelativeDirectory))
+        // Checked again before anything is deleted: only directories of the layout, and of upload checks, are ever touched.
+        if (!HlsRenditionPaths.IsValidRelativeDirectory(deletion.RelativeDirectory) && !HlsStorePaths.IsUploadCheckDirectory(deletion.RelativeDirectory))
         {
             _logger.LogError("The HLS deletion queue holds an invalid directory, which is dropped without deleting anything: {Directory}", deletion.RelativeDirectory);
             await _store.CompleteDeletionAsync(deletion.RelativeDirectory, cancellationToken).ConfigureAwait(false);

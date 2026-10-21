@@ -196,9 +196,20 @@ public sealed class LocalHlsStoreTests : IDisposable
     [Fact]
     public async Task WriteAsync_UploadBroken_LeavesNothing()
     {
+        Directory.CreateDirectory(Root);
+
         await Assert.ThrowsAsync<IOException>(() => Store.WriteAsync(Published + "/init.mp4", new BrokenStream(), CancellationToken));
 
         Assert.Empty(Directory.EnumerateFileSystemEntries(Full(Published)));
+    }
+
+    [Fact]
+    public async Task WriteAsync_WithoutTheRoot_CreatesNothing()
+    {
+        // The root may be a mount point.
+        await Assert.ThrowsAsync<IOException>(() => Store.WriteAsync(Published + "/init.mp4", new MemoryStream([1]), CancellationToken));
+
+        Assert.False(Directory.Exists(Root));
     }
 
     [Fact]

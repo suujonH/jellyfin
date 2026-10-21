@@ -12,7 +12,7 @@ public class HlsConfigurationStore : ConfigurationStore, IValidatingConfiguratio
     /// <summary>
     /// The name of the configuration in the storage.
     /// </summary>
-    public const string StoreKey = "hls";
+    public const string StoreKey = HlsConfigurationExtensions.ConfigurationKey;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="HlsConfigurationStore"/> class.

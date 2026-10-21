@@ -552,17 +552,17 @@ public sealed class HlsJobStoreTests : IDisposable
     // ---- Ending a lease
 
     [Fact]
-    public async Task Release_QueuesThePlannedDirectories_AndRetriesTheJob()
+    public async Task Release_QueuesThePlannedDirectoriesAfterTheGrace_AndRetriesTheJob()
     {
         await AddSourceAsync();
         var (lease, plan) = await ClaimAndPlanAsync(Sha('a'));
-        Assert.False(await _store.ReleaseAsync(lease.Id, "other", "ffmpeg failed", MaxAttempts, _now, TestContext.Current.CancellationToken));
+        Assert.False(await _store.ReleaseAsync(lease.Id, "other", "ffmpeg failed", MaxAttempts, Lease, _now, TestContext.Current.CancellationToken));
 
         Assert.True(await ReleaseAsync(lease));
 
         Assert.False(await ReleaseAsync(lease));
         var deletions = await DeletionsAsync();
-        AssertQueued(deletions, Directories(plan), _now);
+        AssertQueued(deletions, Directories(plan), _now + Lease);
         Assert.All(deletions, d => Assert.Equal("The worker reported a failure.", d.Reason));
         var job = await JobAsync(lease.Id);
         Assert.Equal(((int)HlsJobStatus.Pending, 1, "ffmpeg failed"), (job.Status, job.Attempt, job.Error));
@@ -678,7 +678,7 @@ public sealed class HlsJobStoreTests : IDisposable
 
         Assert.True(await ReleaseAsync(lease));
 
-        AssertQueued(await DeletionsAsync(), Directories(plan), _now);
+        AssertQueued(await DeletionsAsync(), Directories(plan), _now + Lease);
         var job = await JobAsync(lease.Id);
         Assert.Equal((int)HlsJobStatus.Cancelled, job.Status);
         Assert.Null(job.LeaseExpires);
@@ -965,7 +965,7 @@ public sealed class HlsJobStoreTests : IDisposable
     }
 
     private Task<bool> ReleaseAsync(HlsJobLease lease)
-        => _store.ReleaseAsync(lease.Id, lease.LeaseToken, "ffmpeg failed", MaxAttempts, _now, TestContext.Current.CancellationToken);
+        => _store.ReleaseAsync(lease.Id, lease.LeaseToken, "ffmpeg failed", MaxAttempts, Lease, _now, TestContext.Current.CancellationToken);
 
     private Task<Guid?> EnsureMediaJobAsync(string sha, string profile, Guid? preferredItem = null, Func<Guid, bool>? eligible = null)
         => _store.EnsureMediaJobAsync(sha, preferredItem, profile, eligible ?? (_ => true), _now, TestContext.Current.CancellationToken);

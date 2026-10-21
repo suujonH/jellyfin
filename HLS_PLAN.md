@@ -282,6 +282,7 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
    - Worker 每编完一个档位就申请上传地址，直接上传到存储。
    - 目录名含租约令牌，Worker 无法覆盖已发布的成果。
    - 预签名地址有效期 1 小时，过期（403）后重新申请。
+   - 根目录不可信时不签发上传地址，也不接收上传（`503`）；本地存储每写一个文件都先检查根目录，挂载在上传途中失效时，文件不会写进挂载点下面的磁盘。本地存储从不创建根目录。
 5. **完成**（202）：服务器核对：
    - 档位和文件是否在计划之内；
    - 段号是否从 0 连续；
@@ -298,7 +299,7 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
    - 删除之后根目录仍然可信，才把这一批移出队列：从失去挂载的根目录「删除」的目录可能根本不在那里。
    - 路径不合法的记录记日志后移出队列，不删除任何东西。
    - 已知限制：最后一个已发布的内容成为孤儿、而它的目录删除之前挂载恰好失效时，没有样本可核对，空的挂载点会被当作新存储，这批记录移出队列，文件留在原存储上。只会遗留文件，不会误删或重新编码；要避免它，需要记住根目录曾经有过标记。
-9. **租约**：心跳续期。过期算一次失败，计划中的目录在一个租约长度之后删除。
+9. **租约**：心跳续期。过期算一次失败。过期或 Worker 报告失败时，计划中的目录在上传地址有效期（1 小时）再加一个租约长度之后删除：失去联系的 Worker 可能仍在用已签发的地址上传，早删的目录会被重新写出来，再也没人清理。Worker 的上传测试对象同样如此。
 10. **孤儿**：没有任何来源引用的内容，超过保留时间后删除它的成果。
 
 ### 5.3 任务的状态与识别
@@ -365,14 +366,21 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 | --- | --- | --- |
 | `GET /HlsWorker/Protocol` | — | `{"Version":1}` |
 | `POST /HlsWorker/Poll` | `{Worker}` | `200 {Lease, Source, InputUrl}`；没有任务时 `204` |
-| `GET /HlsWorker/Jobs/{id}/Input?leaseToken=` | — | 本地文件返回文件流，支持 Range；`.strm` 返回 302，指向服务器当场签发的存储地址 |
+| `GET /HlsWorker/Jobs/{id}/Input?leaseToken=` | — | 本地文件返回文件流，支持 Range，文件不存在时 `404`；`.strm` 返回 302，指向服务器当场签发的存储地址 |
 | `POST /HlsWorker/Jobs/{id}/Heartbeat` | `{LeaseToken}` | `204`；租约失效时 `409` |
 | `POST /HlsWorker/Jobs/{id}/Identify` | `{LeaseToken, Sha256, ProbeJson}` | `200 {Plan}` 或 `200 {Done:true}`；来源已变化或租约失效时 `409` |
-| `POST /HlsWorker/Jobs/{id}/Uploads` | `{LeaseToken, Key, Files[{Path, Length}]}` | `{Files[{Path, Method, Url, Headers}]}` |
+| `POST /HlsWorker/Jobs/{id}/Uploads` | `{LeaseToken, Key, Files[{Path, Length}]}` | `{Files[{Path, Method, Url, Headers}]}`：网络存储为一小时有效的签名地址，本地存储为下一行的服务器路由 |
 | `PUT /HlsWorker/Jobs/{id}/Files/{key}/{file}?leaseToken=` | 文件内容 | `204`（仅本地存储） |
 | `POST /HlsWorker/Jobs/{id}/Complete` | `{LeaseToken, Renditions[{Key, Summary, Files[{Path, Length}], SegmentDurations}]}` | `202` 或 `409` |
 | `POST /HlsWorker/Jobs/{id}/Failed` | `{LeaseToken, Error}` | `204` 或 `409` |
-| `POST /HlsWorker/UploadCheck` | `{Worker}` | 一个测试对象的上传地址，供 `check` 使用；服务器随后删除该对象 |
+| `POST /HlsWorker/UploadCheck` | `{Worker}` | 一个测试对象的上传地址 `{Path, Method, Url, Headers}`，供 `check` 使用；没有可用的存储时 `503` |
+| `PUT /HlsWorker/UploadCheck/{id}` | 文件内容 | `204`，写入后立即删除（仅本地存储）；未知或已过期时 `404` |
+
+- **认证**：`HlsWorkerProtocolAttribute` 在管理员策略之后检查：用户会话 `403`，协议请求头缺失或不符 `400`。
+- **错误**：请求不合理（档位或文件不在计划中、哈希或探测结果无效等）为 `400`，租约失效为 `409`，存储不可用为 `503`，都带原因。
+- **地址**：`InputUrl` 和本地存储的上传地址是相对于服务器地址的路径，反向代理的路径前缀因此保留。
+- **测试对象**：放在 `.jellyfin-hls-test-{id}/check`，地址过期后（同 5.2 第 9 条）由删除队列删除；本地存储写入后立即删除，删除队列只是兜底。
+- **存储不可用**：根目录不可信时，`Uploads`、文件上传和 `UploadCheck` 都回 `503`。Worker 把 `503` 当作暂时性错误，保持心跳并稍后重试，不报告失败。
 
 **一个任务的流程**：
 1. **领取**：得到租约和来源（ItemId、路径或目标、长度、修改时间）。
@@ -456,12 +464,12 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 ## 八、管理页与 API
 
 **管理 API**（`HlsController`，需要管理员权限）：
-- `GET`/`PUT Hls/Settings`
-- `GET Hls/Status`
-- `GET Hls/Jobs?limit=`
-- `POST Hls/Rebuild`
-- `POST Hls/Verify?itemId=`
-- `POST Hls/Store/Test`：写入、读取、删除一个测试对象，并检查根目录标记。
+- `GET`/`PUT Hls/Settings`：经命名配置 `hls` 保存，设置无效时 `400` 带原因。
+- `GET Hls/Status`：启用、设置错误、存储问题、任务计数、最近一次校验。
+- `GET Hls/Jobs?limit=`：默认 200，至多 1000。
+- `POST Hls/Rebuild`：`202`。
+- `POST Hls/Verify?itemId=`：`202`；已有校验在运行时 `409`。
+- `POST Hls/Store/Test?location=`：写入、读取、删除一个测试对象，并检查根目录标记。给出 `location` 时测试该位置，保存前即可测试；不给时测试已保存的存储。
 
 **管理页**（jellyfin-web）：新页面「HLS 预编码」，放在侧栏「播放」下，分三个标签页：
 - **状态**：任务计数、存储状态、最近一次校验、删除队列；
@@ -640,4 +648,5 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - 2026-10-22：第 3 阶段完成：`IHlsStore` 与 `IHlsStoreFactory`，本地目录与网络存储两种实现（根目录标记、写入、列出、删除、地址、存储测试）；`INetworkStorageManager` 的客户端、服务器、上传地址与列出、删除；`IObjectStorageProtocol` 与 `S3StorageProtocol` 的预签名 PUT、ListObjectsV2 分页、DeleteObjects 及其回退。S3 的应答按根元素核对（`ListBucketResult`、`DeleteResult`），代理的登录页等其他文档不会被当作空列表。Server.Implementations 中 HLS 存储与网络存储的 137 个测试全部通过（另有 2 个本地化测试因系统语言为中文而失败，与本阶段无关）。
 - 2026-10-22：第 4a 阶段完成：`MediaBrowser.Model/Hls/` 的 DTO；`Published/` 的纯逻辑（探测解析、阶梯、档位、目录布局、完成校验）；七个实体与迁移 `AddHlsTaskCenter`；`HlsJobStore`（来源、媒体、来源任务与媒体任务的领取、识别、提交、发布、失败与租约、档位、孤儿、删除队列）。与 5.3 的差别已写回：「持有租约」以 `LeaseExpires` 为准，媒体任务只在内容有启用媒体库中的来源时创建，来源被删除时媒体任务回到等待，完成时释放档位，提交时按计划校验，来源任务换了内容时释放旧内容的档位。MediaBrowser.Model 与 Server.Implementations 构建 0 警告；MediaEncoding.Hls 295 个测试通过（未配置 ffmpeg，44 个跳过），Server.Implementations 中 HLS 的 105 个测试（其中 `HlsJobStore` 41 个）全部通过。
 - 2026-10-22：第 4b 阶段完成：命名配置 `hls`（`HlsOptions`，保存时校验）、`HlsSettings`、`HlsRootMonitor`、发布索引 `HlsPublishedIndex`、任务中心循环 `HlsCoordinator`（同步、排程、租约回收、全量排程、孤儿）、`HlsVerificationService`（校验、发布、校验已发布成果）、`HlsDeletionService`，三个服务注册为托管服务。与 5.2 的差别已写回：只取 `VideoFile`、`.strm` 的大小只取 TrueCache 条目、多媒体库任选其一、失败在下次全量排程时重试、根目录只在有工作时检查、宽限期暂用播放授权有效期、索引刷新失败自动补读、删除队列的已知限制；签名密钥的生成与版本条目的排除留到第 5 阶段（见 7.2、7.4）。另有一个提交修复 Debug 构建的分析器错误（master 的网络存储代码与前几个阶段的 HLS 代码），WSL 下 Debug 构建 0 错误。Release 构建 0 警告；Server.Implementations 中 HLS 的 163 个测试全部通过（另有 2 个本地化测试因系统语言为中文而失败），MediaEncoding.Hls 300 个（44 个跳过）、Integration 129 个通过。
-- 下一步：第 4c 阶段（Worker API、管理 API）。
+- 2026-10-22：第 4c 阶段完成：`IHlsTaskCenter` 与 `HlsTaskCenter`（领取、输入、心跳、识别、上传地址、本地写入、完成、失败、上传测试、状态与任务列表），`HlsWorkerController`、`HlsController`，`HlsWorkerProtocolAttribute`。与第六、八节的差别已写回：Worker 只接受 API Key（用户会话 `403`），错误码 `400`/`409`/`503` 带原因，`InputUrl` 与本地上传地址为相对路径，本地存储的上传测试走服务器路由，测试对象经删除队列删除，存储测试可指定位置；与 5.2 的差别：根目录不可信时不签发也不接收上传，租约结束后目录等上传地址过期再删除。Release 构建 0 警告，WSL 下 Debug 构建 0 警告；Server.Implementations 中 HLS 的 182 个测试全部通过（另有 2 个本地化测试因系统语言为中文而失败），Api 173 个、MediaEncoding.Hls 300 个（44 个跳过）、Integration 132 个通过。
+- 下一步：第 5 阶段（播放与交付，签名密钥，版本条目）。

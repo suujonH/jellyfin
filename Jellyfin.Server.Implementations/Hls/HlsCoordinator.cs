@@ -124,7 +124,7 @@ public sealed class HlsCoordinator : BackgroundService
 
         await StepAsync("refresh the published index", () => _index.RefreshStaleAsync(cancellationToken), cancellationToken).ConfigureAwait(false);
 
-        await StepAsync("reap the expired leases", () => _store.ReapExpiredLeasesAsync(settings.Options.MaxAttempts, settings.Lease, now, cancellationToken), cancellationToken).ConfigureAwait(false);
+        await StepAsync("reap the expired leases", () => _store.ReapExpiredLeasesAsync(settings.Options.MaxAttempts, settings.UploadGrace, now, cancellationToken), cancellationToken).ConfigureAwait(false);
         await StepAsync("schedule", () => ScheduleQueuedAsync(settings, now, cancellationToken), cancellationToken).ConfigureAwait(false);
         if (settings.Options.Enabled && now >= _nextSweep)
         {

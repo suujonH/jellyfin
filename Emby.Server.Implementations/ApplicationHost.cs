@@ -581,6 +581,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<HlsCoordinator>();
             serviceCollection.AddSingleton<HlsVerificationService>();
             serviceCollection.AddSingleton<HlsDeletionService>();
+            serviceCollection.AddSingleton<IHlsTaskCenter, HlsTaskCenter>();
             serviceCollection.AddSingleton<IMediaEncoder, MediaBrowser.MediaEncoding.Encoder.MediaEncoder>();
             serviceCollection.AddSingleton<EncodingHelper>();
             serviceCollection.AddSingleton<IPathManager, PathManager>();

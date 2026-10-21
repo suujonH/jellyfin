@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Database.Implementations.Entities;
 using Microsoft.EntityFrameworkCore;
 
 namespace Jellyfin.Server.Implementations.Hls;
@@ -12,6 +13,30 @@ namespace Jellyfin.Server.Implementations.Hls;
 /// </content>
 public sealed partial class HlsJobStore
 {
+    /// <summary>
+    /// Queues the directory of an upload check, to be deleted once its address expires.
+    /// </summary>
+    /// <param name="directory">The directory.</param>
+    /// <param name="notBefore">When the address expires.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>A task.</returns>
+    /// <exception cref="ArgumentException">The directory is not one of an upload check.</exception>
+    public Task QueueUploadCheckDeletionAsync(string directory, DateTime notBefore, CancellationToken cancellationToken)
+    {
+        if (!HlsStorePaths.IsUploadCheckDirectory(directory))
+        {
+            throw new ArgumentException("Not the directory of an upload check: " + directory, nameof(directory));
+        }
+
+        return WriteAsync(
+            context =>
+            {
+                context.HlsDeletions.Add(new HlsDeletion { RelativeDirectory = directory, NotBefore = notBefore, Reason = "An upload check of a worker." });
+                return Task.FromResult(true);
+            },
+            cancellationToken);
+    }
+
     /// <summary>
     /// Gets the directories that are due to be deleted, the longest due first.
     /// </summary>

@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Linq;
 
 namespace Jellyfin.Server.Implementations.Hls;
@@ -27,6 +28,23 @@ internal static class HlsStorePaths
     /// The start of the names of the objects a test writes in the root.
     /// </summary>
     public const string TestNamePrefix = ".jellyfin-hls-test-";
+
+    /// <summary>
+    /// Gets the directory the file of an upload check of a worker is written in.
+    /// </summary>
+    /// <param name="id">The check.</param>
+    /// <returns>The directory.</returns>
+    public static string GetUploadCheckDirectory(Guid id) => TestNamePrefix + id.ToString("N", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Gets whether a directory is one an upload check writes in.
+    /// </summary>
+    /// <param name="directory">The directory.</param>
+    /// <returns>Whether it is.</returns>
+    public static bool IsUploadCheckDirectory(string? directory)
+        => directory is not null
+            && directory.StartsWith(TestNamePrefix, StringComparison.Ordinal)
+            && Guid.TryParseExact(directory.AsSpan(TestNamePrefix.Length), "N", out _);
 
     /// <summary>
     /// Checks that a path is relative, with forward slashes, and has no empty, <c>.</c> or <c>..</c> parts, no parts that end

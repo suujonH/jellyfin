@@ -135,6 +135,13 @@ internal sealed class LocalHlsStore : IHlsStore
     {
         ArgumentNullException.ThrowIfNull(content);
         var fullPath = GetFullPath(path);
+
+        // The root is not created: it may be a mount point.
+        if (!Directory.Exists(_root))
+        {
+            throw new IOException("The HLS store does not exist or cannot be read: " + _root);
+        }
+
         var temporaryPath = fullPath + "." + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture) + ".tmp";
         try
         {

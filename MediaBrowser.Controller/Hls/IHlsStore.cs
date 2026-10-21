@@ -57,13 +57,13 @@ public interface IHlsStore
 
     /// <summary>
     /// Writes a file a Worker uploads through the server, to a temporary file next to it that then replaces it. Only a local
-    /// store is written so.
+    /// store is written so; its root is never created.
     /// </summary>
     /// <param name="path">The file.</param>
     /// <param name="content">The content.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>A task.</returns>
-    /// <exception cref="IOException">The store cannot be written.</exception>
+    /// <exception cref="IOException">The store cannot be written, or its root does not exist.</exception>
     /// <exception cref="NotSupportedException">The store is network storage, which Workers upload to directly.</exception>
     Task WriteAsync(string path, Stream content, CancellationToken cancellationToken);
 

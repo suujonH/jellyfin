@@ -20,6 +20,17 @@ public sealed record HlsSettingsSnapshot(HlsOptions Options, IHlsStore? Store, s
     public TimeSpan Lease => TimeSpan.FromMinutes(Options.LeaseMinutes);
 
     /// <summary>
+    /// Gets how long an address a worker uploads to is valid.
+    /// </summary>
+    public static TimeSpan UploadLifetime { get; } = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Gets how long a directory a worker may still upload to is kept after the lease ended: until the addresses it was given
+    /// expired, and a lease more for the uploads under way then.
+    /// </summary>
+    public TimeSpan UploadGrace => UploadLifetime + Lease;
+
+    /// <summary>
     /// Gets whether the files of a library are pre-encoded.
     /// </summary>
     /// <param name="libraryId">The library.</param>

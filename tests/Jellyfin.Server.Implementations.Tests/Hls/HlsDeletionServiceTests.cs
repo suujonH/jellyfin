@@ -116,6 +116,24 @@ public sealed class HlsDeletionServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task TheDirectoryOfAnUploadCheck_IsDeletedToo()
+    {
+        var (environment, service) = Create(local: true);
+        Directory.CreateDirectory(environment.Root);
+        await File.WriteAllTextAsync(Path.Combine(environment.Root, ".jellyfin-hls"), "marked", CancellationToken);
+        var directory = ".jellyfin-hls-test-" + Guid.NewGuid().ToString("N");
+        Directory.CreateDirectory(environment.GetStorePath(directory));
+        await File.WriteAllTextAsync(Path.Combine(environment.GetStorePath(directory), "check"), "check", CancellationToken);
+        await environment.Store.QueueUploadCheckDeletionAsync(directory, environment.Now, CancellationToken);
+        await Assert.ThrowsAsync<ArgumentException>(() => environment.Store.QueueUploadCheckDeletionAsync(".jellyfin-hls-test-check", environment.Now, CancellationToken));
+
+        await service.ProcessAsync(environment.Now, CancellationToken);
+
+        Assert.False(Directory.Exists(environment.GetStorePath(directory)));
+        Assert.Empty(await environment.DeletionsAsync());
+    }
+
+    [Fact]
     public async Task NothingDue_LeavesTheStoreAlone()
     {
         var (environment, service) = Create(local: false);

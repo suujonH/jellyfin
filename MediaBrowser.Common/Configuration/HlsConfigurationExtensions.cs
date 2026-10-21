@@ -8,10 +8,15 @@ namespace MediaBrowser.Common.Configuration;
 public static class HlsConfigurationExtensions
 {
     /// <summary>
+    /// The key of the named configuration of pre-encoded HLS.
+    /// </summary>
+    public const string ConfigurationKey = "hls";
+
+    /// <summary>
     /// Gets the settings of pre-encoded HLS.
     /// </summary>
     /// <param name="configurationManager">The configuration manager.</param>
     /// <returns>The settings.</returns>
     public static HlsOptions GetHlsOptions(this IConfigurationManager configurationManager)
-        => configurationManager.GetConfiguration<HlsOptions>("hls");
+        => configurationManager.GetConfiguration<HlsOptions>(ConfigurationKey);
 }

@@ -201,7 +201,7 @@ public sealed class HlsCoordinatorTests : IDisposable
         var item = await _environment.AddSourceAsync();
         AddKnown(item);
         var (lease, _) = await _environment.ClaimAndPlanAsync(Sha('a'));
-        Assert.True(await _environment.Store.ReleaseAsync(lease.Id, lease.LeaseToken, "ffmpeg failed", 1, _environment.Now, CancellationToken));
+        Assert.True(await _environment.Store.ReleaseAsync(lease.Id, lease.LeaseToken, "ffmpeg failed", 1, Lease, _environment.Now, CancellationToken));
         Assert.All(await _environment.Store.GetRenditionsAsync(Sha('a'), CancellationToken), r => Assert.Equal(HlsRenditionState.Failed, r.State));
 
         _coordinator.RequestRebuild();
@@ -294,6 +294,21 @@ public sealed class HlsCoordinatorTests : IDisposable
         Assert.Equal(["a1", "preview", "s2", "v720"], (await _environment.Store.GetRenditionsAsync(Sha('a'), CancellationToken)).Select(r => r.Key));
         Assert.Equal([plan.Renditions.Single(r => r.Key == "v1080").RelativeDirectory], (await _environment.DeletionsAsync()).Select(d => d.RelativeDirectory));
         Assert.Equal(["v720"], _environment.Index.GetMediaForItem(item)!.Video.Select(r => r.Key));
+    }
+
+    [Fact]
+    public async Task AnExpiredLease_KeepsTheDirectories_UntilTheUploadAddressesExpired()
+    {
+        await TickAsync(_start);
+        await _environment.AddSourceAsync();
+        var (_, plan) = await _environment.ClaimAndPlanAsync(Sha('a'));
+        var expired = _environment.Now + Lease + TimeSpan.FromSeconds(1);
+
+        await TickAsync(expired);
+
+        var deletions = await _environment.DeletionsAsync();
+        Assert.Equal(plan.Renditions.Select(r => r.RelativeDirectory).Order(StringComparer.Ordinal), deletions.Select(d => d.RelativeDirectory).Order(StringComparer.Ordinal));
+        Assert.All(deletions, d => Assert.Equal(expired + TimeSpan.FromHours(1) + Lease, d.NotBefore));
     }
 
     [Fact]
