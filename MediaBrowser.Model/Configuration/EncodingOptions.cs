@@ -61,6 +61,7 @@ public class EncodingOptions
         EnableSubtitleExtraction = true;
         SubtitleExtractionTimeoutMinutes = 30;
         AllowOnDemandMetadataBasedKeyframeExtractionForExtensions = ["mkv"];
+        KeyframeExtractionTimeoutSeconds = 10;
         HardwareDecodingCodecs = ["h264", "vc1"];
         HlsAudioSeekStrategy = HlsAudioSeekStrategy.TrimCopiedAudio;
     }
@@ -304,6 +305,14 @@ public class EncodingOptions
     /// Gets or sets the file extensions on-demand metadata based keyframe extraction is enabled for.
     /// </summary>
     public string[] AllowOnDemandMetadataBasedKeyframeExtractionForExtensions { get; set; }
+
+    /// <summary>
+    /// Gets or sets how long, in seconds, starting to remux a local file waits for ffprobe to read its keyframes when they are
+    /// not known yet. When it takes longer the video is transcoded, and the keyframes are kept for the next playback once read.
+    /// 0 never reads keyframes with ffprobe on demand.
+    /// </summary>
+    [DefaultValue(10)]
+    public int KeyframeExtractionTimeoutSeconds { get; set; }
 
     /// <summary>
     /// Gets or sets the method used for audio seeking in HLS.

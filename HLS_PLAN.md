@@ -54,34 +54,66 @@ PlaybackInfo → 源列表：原始 ／ 预编码档位（1080p…）／ 自动
 位置：`src/Jellyfin.MediaEncoding.Hls/Plans/`
 
 ```csharp
-public sealed record HlsSegment(int Index, long StartTicks, long DurationTicks);
+public sealed record HlsSegment(int Index, long StartTicks, long DurationTicks);   // EndTicks
 
 public sealed class SegmentPlan
 {
     public SegmentPlanKind Kind { get; }            // Keyframe（remux）/ Uniform（转码、音频、预编码）
     public IReadOnlyList<HlsSegment> Segments { get; }
     public long TotalTicks { get; }
-    public int TargetDurationSeconds { get; }
+    public int TargetDurationSeconds { get; }       // 最长一段向上取整
+    public long FrameTicks { get; }                 // 帧长，未知（纯音频）时为 0
+    public long ToleranceTicks { get; }             // 半帧；没有帧率时 10 毫秒
+    public IReadOnlyList<long> Keyframes { get; }   // 关键帧计划的全部可用关键帧，边界是其中一部分
     public int IndexAt(long ticks);
 }
 ```
 
-**时间轴**：计划的时间是「源 pts − 格式 start_time」，即 ffmpeg `-copyts -start_at_zero` 的时间轴。各种关键帧来源都要换算到这条时间轴（第 1 阶段核对 TrueCache `keyframes.json`、mkv 提取器和 ffprobe 提取器各自的约定）。
+**时间轴**：计划的时间是「源 pts − 格式 start_time」，即 ffmpeg `-ss` 和 `-copyts -start_at_zero` 的时间轴。第 1 阶段核对的结果（`KeyframeTimelineTests` 用真实样本逐个比对 ffprobe）：
+- **ffprobe 提取器**原来给的是绝对 pts，TS 等容器差一个 start_time（样本 1.462 秒，`-output_ts_offset 100` 时 101 秒）。现在同一次 ffprobe 读出 `format=start_time` 并减去；TrueCache 工具生成 `keyframes.json` 用的也是它。
+- **mkv 提取器**的 cue 时间就是块时间戳，Matroska 文件从 0 开始，不需要换算（视频晚开始的样本也一致）。
+- **MP4 提取器**（新增）按 ffmpeg mov 解复用器（`mov_fix_index`）的规则，样本的显示时间 = 解码时间 + ctts 偏移：
+  - 有编辑列表的轨道从前导空编辑的结束开始（ffmpeg 直接取空编辑之和作 `start_time`），媒体编辑从那里开始呈现：音频等呈现 media_time，丢弃之前的样本（例如预滚样本：空编辑 8 秒、media_time 为 1024 个采样时，起点是 8.000）；视频则整体平移，使编辑内最早的帧落在那里，即减去「编辑内解码顺序第一个样本的解码时间」与「编辑内最早的显示时间」中较大的一个（media_time 为 0 而有 B 帧延迟时，第一个关键帧在 0 而不是 0.083）；
+  - 没有编辑列表的轨道从解码顺序第一个样本的显示时间开始，可以为负，之后的样本也可能更早；
+  - 结果减去最早的音视频轨道。时长与 ffprobe 相同，取最晚的音视频轨道结束减去格式起点；轨道结束 = 轨道起点 + min(mdhd 时长, stts 样本时长之和, 全部编辑之和)，编辑之和包括空编辑（空编辑 8 秒、媒体编辑 3 秒时，ffprobe 的时长是 11 秒）；
+  - 编辑的时长按 ffmpeg 换算到媒体时间刻度后再比较。ffprobe 不读 `mvhd` 的影片时长（改成任意值，格式时长不变）。
+
+  以下情况不给结果，交给 ffprobe：
+  - 编辑列表不是「若干前导空编辑 + 一个速率为 1 的媒体编辑」：多个媒体编辑、速率不为 1、只有空编辑、没有条目、媒体编辑之后还有空编辑（ffmpeg 可能重放样本）、media_time 为 -1 以外的负数；
+  - 视频用紧凑的 `stz2` 记录样本大小（零字节的样本 ffmpeg 不读，不算关键帧，只从 `stsz` 查）；
+  - 媒体编辑之外有关键帧（ffmpeg 丢弃编辑之外的帧，ffprobe 提取器也不收带 D 标志的关键帧）；
+  - 视频有 `stps`（QuickTime 的部分同步样本表，用于 MPEG-2 开放 GOP）或分组类型为 `rap `、`sync` 的 `sbgp`（如 HEVC 开放 GOP），ffmpeg 也把其中的样本当作关键帧；
+  - 字幕、章节、时间码等其他轨道早于音视频开始（早不到 1 秒时 ffmpeg 以它为格式起点，但要看探测时是否读到这条轨道）；
+  - 分片 MP4（有 `mvex`，样本可能一部分在 moov、其余在 moof）。
+- **数据库**：旧版本存的 ffprobe 结果是绝对时间。这些数据只来自手动运行的计划任务，只有本地文件（旧链路按需提取只用元数据提取器）。迁移 `DeleteUnalignedKeyframeData` 随第 2 阶段加入，删除所有已存的关键帧，由关键帧来源按需重新读取：容器不能说明起点（MP4 的轨道也可以都晚开始），而第 1 阶段的旧链路重建不了 ffprobe 的数据，所以那时不删。MP4 的按需提取也随第 2 阶段启用（见关键帧来源第 4 项）：旧链路经 `CacheDecorator` 先查数据库，在删除之前启用，旧链路会读到这些绝对时间的数据。
+- **TrueCache**：旧工具为 TS 等容器生成的 `keyframes.json` 是绝对时间，需要重新生成（第 8 阶段写进文档）。时间轴对不上时，第 2 阶段的检查会改为转码视频，不会播错。
 
 **`SegmentPlanner`**：
 - 是纯函数：相同输入得出相同计划。
-- 关键帧计划：边界取关键帧。因为 GOP 文件在每个关键帧都切开（见附录），任何关键帧都可以作为边界，切法不再受 muxer 规则约束。现有的 `ComputeSegments` 作为起点（它在长 GOP 之后会产生很短的段，可以顺带改进）。
-- 均匀计划（转码）：段长按帧取整，`L' = ceil(L × fps) / fps`，保留小数帧率的修正（`DynamicHlsController` 中的现有逻辑）。
-- 关键帧过密（例如全帧内编码）时 GOP 文件过多：平均间隔低于阈值就改为转码视频，阈值在第 1 阶段定。
+- 关键帧计划：边界取关键帧。因为 GOP 文件在每个关键帧都切开（见附录），任何关键帧都可以作为边界。规则：第一段从 0 开始；之后每个边界取离「上一边界 + L」最近的关键帧，但至少在上一边界 L/2 之后；流的终点也算一个候选，所以很短的余下部分并入最后一段；距离相等取后者。旧的 `ComputeSegments` 在长 GOP 之后会紧接着切出很短的段，新规则没有这个问题。
+- 不用关键帧计划（改为转码视频）的情况：没有关键帧；平均间隔低于 **0.25 秒**（全帧内编码，DVB 的 0.48 秒 GOP 仍然 remux）；最长一段超过 **max(30 秒, 3L)**（客户端要取完一整段才能播放）。
+- 平均间隔按不同的关键帧时间计算（其他来源的数据，例如 TrueCache 条目，可能有重复）。
+- 均匀计划（转码）：段长按帧取整，`L' = ceil(L × fps) / fps`（23.976 fps、6 秒时为 144 帧、6.006 秒）；余下部分短于容差时并入最后一段。纯音频不取整。
 
-**关键帧来源**，依次尝试：
-1. TrueCache 条目；
-2. 数据库（`CacheDecorator` 和 `KeyframeRepository`）；
-3. 元数据提取器：已有 mkv；**新增 MP4 提取器**，读 moov 里的 `stss`/`stts`/`ctts`，不读媒体数据；
-4. 本地文件在时限内用 ffprobe 读包。时限是新设置，默认 10 秒。超时则本次转码视频（把会话请求的 `AllowVideoStreamCopy` 设为 false），提取在后台继续并写入数据库；
-5. 远程源没有 TrueCache 时直接转码视频。
+**`HlsCuts`**（附录 A.4 的规则，纯函数）：
+- `GetRunStart(plan, n, mode)` 得出 `HlsRunStart(InputSeekTicks, OutputSeekTicks, FirstFileStartTicks)`。`FirstFileStartTicks` 是 run 首个文件在计划上的起点（列表不记录），为 null 时丢弃该文件：
+  - remux：`-ss` = 边界前那个关键帧 − 1 秒，首个文件丢弃；不大于 0 时不 seek，首个文件从 0 开始，保留；
+  - 转码：`-ss` = 边界 − 半帧，首个文件就是第 n 段；
+  - 纯音频转码：`-ss` = 边界；纯音频复制：输入 `-ss` = 边界 − 2 秒，输出 `-ss` 和 `-output_ts_offset` = 边界。
+- `GetForcedKeyframeTicks(plan, start, end)`：边界 − 半帧，从 max(start, 1) 到 end（end 那个边界也包括，不超出计划）。
+- `FormatSeconds`：秒，精确到微秒。
+- 第 0 阶段的切点测试已改为使用 `SegmentPlanner` 和 `HlsCuts`，所以实测约束的是生产代码。
 
-**`HlsPlaylistWriter.WriteMedia(...)`**：由计划或实际时长写出媒体播放列表，实时和预编码共用。
+**关键帧来源**（`IKeyframeSource`），依次尝试：
+1. TrueCache 条目（有声明就只用声明，不读文件）；
+2. 数据库（`KeyframeRepository`）；
+3. 远程源到此为止，返回 null（转码视频）；
+4. 元数据提取器（mkv、新增的 MP4），只对 `AllowOnDemandMetadataBasedKeyframeExtractionForExtensions` 中的扩展名。第 2 阶段与 `DeleteUnalignedKeyframeData` 一起，在默认值中加入 mp4、m4v、mov，并加入迁移 `AddMp4KeyframeExtraction`，把仍是旧默认值（只有 mkv）的配置补上。第 1 阶段只注册 MP4 提取器，旧链路对 MP4 的行为不变；
+5. 本地文件用 ffprobe 读包，等待 `EncodingOptions.KeyframeExtractionTimeoutSeconds`（默认 10，0 表示不按需读取）。超时返回 null，本次转码视频，提取在后台继续，由 `CacheDecorator` 写入数据库。同一条目只读一次（后来的请求加入正在进行的读取），同时最多读两个文件；读不出关键帧的条目在服务器重启前不再重读。
+
+关键帧数据按条目保存，是第一条视频流的（mkv、MP4 提取器取第一条视频轨，ffprobe 用 `-select_streams V:0`，即第一条不是封面的视频流）。播放选了其他视频流时不用关键帧数据：旧链路改用等长切片，新链路转码视频。
+
+**`HlsPlaylistWriter.WriteMedia(...)`**：由计划或实际时长写出媒体播放列表，实时和预编码共用。格式沿用现有生成器：TS 为版本 3，fMP4 为版本 7 并带 `EXT-X-MAP`；`TARGETDURATION` 取最长一段向上取整。
 
 ## 三、实时 HLS（服务器本机）
 
@@ -412,8 +444,8 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 | 阶段 | 内容 | 仓库 |
 | --- | --- | --- |
 | 0 | **切点原型**：比较 hls muxer 与 segment muxer 在 TS 和 fMP4 下、`-copyts` 加 `-ss` 重新开始后的实际切点；验证预编码的均匀切片和一次解码多路输出。结论见附录，测试保留作回归，没有配置 ffmpeg 时跳过 | jellyfin |
-| 1 | 切片计划、Planner、关键帧来源（含 MP4 提取器和有时限的按需提取）、播放列表、ffmpeg 切点与 seek、新的切片 URL | jellyfin |
-| 2 | 会话与编码运行：会话管理、`list.csv` 读取与切片就绪事件、重新开始的策略、节流和清理改用段序号、每次 run 重新解析源地址 | jellyfin |
+| 1 | 切片计划、Planner、关键帧来源（含 MP4 提取器和有时限的按需提取）、播放列表写法、ffmpeg 切点与 seek 的规则（`HlsCuts`）。这一阶段只有独立的组件，控制器仍走旧链路 | jellyfin |
+| 2 | 会话与编码运行：会话管理、`list.csv` 读取与切片就绪事件、重新开始的策略、节流和清理改用段序号、每次 run 重新解析源地址；控制器改用新链路：新的切片 URL、由计划写出的 `main.m3u8`、segment muxer 命令行（`EncodingHelper` 的关键帧参数改用时间列表）；迁移 `DeleteUnalignedKeyframeData`，启用 MP4 的按需提取（默认值与迁移 `AddMp4KeyframeExtraction`） | jellyfin |
 | 3 | HLS 存储与网络存储扩展：存储抽象，S3 的 PUT 预签名、List、Delete，根目录标记，存储测试 | jellyfin |
 | 4 | 任务中心：实体与迁移、`HlsJobStore`（连同测试）、同步与排程、识别、校验、删除、发布索引、Worker API、管理 API | jellyfin |
 | 5 | 播放与交付：源列表、原始资源策略与路由检查、授权与交付路由、服务器生成播放列表、直连与转发、版本条目 | jellyfin |
@@ -538,5 +570,6 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 ## 进度
 
 - 2026-10-21：计划获批。第 0 阶段完成：切点测试在 `tests/Jellyfin.MediaEncoding.Hls.Tests/Ffmpeg/`，结论见附录。构建 0 警告；配置 ffmpeg 时 47 个测试全部通过，未配置时 23 个跳过。`feature/hls` 推送到 origin，以便在其他电脑上继续。
-- 待办：第 0 阶段提交前的 Codex review 中途停止，没有结果。继续之前先对这个提交跑一次 review（`codex review --commit HEAD` 或同等方式），处理发现的问题。
-- 下一步：第 1 阶段（切片计划）。
+- 2026-10-21：第 0 阶段提交的 Codex review 补跑完成，没有问题。
+- 2026-10-21：第 1 阶段完成：`Plans/`（`SegmentPlan`、`SegmentPlanner`、`HlsCuts`、`KeyframeSource`）、`Playlist/HlsPlaylistWriter`、MP4 提取器（只注册，旧链路的 MP4 默认值与迁移随第 2 阶段）、ffprobe 提取器减去 start_time 并只读第一条非封面视频流、设置 `KeyframeExtractionTimeoutSeconds`、旧链路只在复制第一条视频流时用关键帧。核对结论写在第二节。配置 ffmpeg 时 MediaEncoding.Hls 109 个、Keyframes 38 个测试全部通过。
+- 下一步：第 2 阶段（会话与编码运行，控制器改用新链路）。

@@ -13,7 +13,8 @@ namespace Jellyfin.MediaEncoding.Keyframes.FfProbe;
 public static class FfProbeKeyframeExtractor
 {
     /// <summary>
-    /// Extracts the keyframes using the ffprobe executable at the specified path.
+    /// Extracts the keyframes of the first video stream that is no cover art using the ffprobe executable at the specified path.
+    /// The keyframes are relative to the format start time, the timeline of ffmpeg <c>-copyts -start_at_zero</c>.
     /// </summary>
     /// <param name="ffProbePath">The path to the ffprobe executable.</param>
     /// <param name="filePath">The file path.</param>
@@ -27,7 +28,7 @@ public static class FfProbeKeyframeExtractor
                 FileName = ffProbePath,
                 Arguments = string.Format(
                     CultureInfo.InvariantCulture,
-                    "-fflags +genpts -v error -skip_frame nokey -show_entries format=duration -show_entries stream=duration -show_entries packet=pts_time,flags -select_streams v -of csv \"{0}\"",
+                    "-fflags +genpts -v error -skip_frame nokey -show_entries format=start_time,duration -show_entries stream=duration -show_entries packet=pts_time,flags -select_streams V:0 -of csv \"{0}\"",
                     filePath),
 
                 CreateNoWindow = true,
@@ -79,6 +80,7 @@ public static class FfProbeKeyframeExtractor
         var keyframes = new List<long>();
         double streamDuration = 0;
         double formatDuration = 0;
+        double formatStart = 0;
 
         using (reader)
         {
@@ -117,11 +119,27 @@ public static class FfProbeKeyframeExtractor
                 }
                 else if (lineType.Equals("format", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (double.TryParse(rest, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var formatDurationResult))
+                    // format,start_time,duration; a line with the duration alone has no start time to remove.
+                    var comma = rest.IndexOf(',');
+                    if (comma >= 0
+                        && double.TryParse(rest[..comma], NumberStyles.AllowDecimalPoint | NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var formatStartResult))
+                    {
+                        formatStart = formatStartResult;
+                    }
+
+                    if (double.TryParse(rest[(comma + 1)..], NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var formatDurationResult))
                     {
                         formatDuration = formatDurationResult;
                     }
                 }
+            }
+
+            // ffprobe prints the format section after the packets. MPEG-TS and similar containers start at an arbitrary
+            // timestamp, which ffmpeg removes when it seeks and with -start_at_zero.
+            var startTicks = Convert.ToInt64(formatStart * TimeSpan.TicksPerSecond);
+            for (var i = 0; i < keyframes.Count; i++)
+            {
+                keyframes[i] -= startTicks;
             }
 
             // Prefer the stream duration as it should be more accurate

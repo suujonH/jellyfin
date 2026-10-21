@@ -544,7 +544,8 @@ internal sealed class EntryGenerator
 
     private KeyframeData ExtractKeyframes(string path)
     {
-        // The playlist generator reads Matroska cues; everything else, and Matroska without cues, is read with ffprobe.
+        // The server reads the index of Matroska and MP4 files; everything else, and an index without keyframes, is read with ffprobe.
+        // All three give times relative to the format start time.
         if (path.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase))
         {
             try
@@ -558,6 +559,23 @@ internal sealed class EntryGenerator
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogWarning(ex, "Reading the Matroska cues of {Path} failed; using ffprobe", path);
+            }
+        }
+        else if (path.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".m4v", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".mov", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var samples = MediaEncoding.Keyframes.Mp4.Mp4KeyframeExtractor.GetKeyframeData(path);
+                if (samples.KeyframeTicks.Count > 0)
+                {
+                    return samples;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Reading the MP4 sample tables of {Path} failed; using ffprobe", path);
             }
         }
 

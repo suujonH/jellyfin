@@ -1,6 +1,7 @@
 using System;
 using Jellyfin.MediaEncoding.Hls.Cache;
 using Jellyfin.MediaEncoding.Hls.Extractors;
+using Jellyfin.MediaEncoding.Hls.Plans;
 using Jellyfin.MediaEncoding.Hls.Playlist;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -20,7 +21,9 @@ public static class MediaEncodingHlsServiceCollectionExtensions
     {
         serviceCollection.AddSingletonWithDecorator(typeof(FfProbeKeyframeExtractor));
         serviceCollection.AddSingletonWithDecorator(typeof(MatroskaKeyframeExtractor));
+        serviceCollection.AddSingletonWithDecorator(typeof(Mp4KeyframeExtractor));
         serviceCollection.AddSingleton<IDynamicHlsPlaylistGenerator, DynamicHlsPlaylistGenerator>();
+        serviceCollection.AddSingleton<IKeyframeSource, KeyframeSource>();
         return serviceCollection;
     }
 

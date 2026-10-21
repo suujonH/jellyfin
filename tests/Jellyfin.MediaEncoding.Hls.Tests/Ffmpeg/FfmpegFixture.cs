@@ -161,6 +161,14 @@ public sealed class FfmpegFixture : IAsyncLifetime
         return packets.Where(p => p.IsKeyframe).Select(p => ParseSeconds(p.Pts) - start).Order().ToList();
     }
 
+    /// <summary>Gets the duration ffprobe reports for the whole file.</summary>
+    public async Task<double> GetFormatDurationAsync(string path, CancellationToken cancellationToken)
+    {
+        var output = await RunAsync(FfprobePath, ["-v", "error", "-show_entries", "format=duration", "-of", "json", path], WorkDirectory, cancellationToken).ConfigureAwait(false);
+        using var json = JsonDocument.Parse(output);
+        return ParseSeconds(json.RootElement.GetProperty("format").GetProperty("duration").GetString());
+    }
+
     public async Task<IReadOnlyList<ProbePacket>> GetPacketsAsync(string path, string? stream, CancellationToken cancellationToken)
     {
         List<string> arguments = ["-v", "error"];

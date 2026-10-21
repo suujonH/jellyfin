@@ -1418,7 +1418,7 @@ public class DynamicHlsController : BaseJellyfinApiController
             state.Request.SegmentContainer ?? string.Empty,
             "hls1/main/",
             Request.QueryString.ToString(),
-            EncodingHelper.IsCopyCodec(state.OutputVideoCodec));
+            EncodingHelper.IsCopyCodec(state.OutputVideoCodec) && IsFirstVideoStream(state));
         var playlist = _dynamicHlsPlaylistGenerator.CreateMainPlaylist(request);
 
         return new FileContentResult(Encoding.UTF8.GetBytes(playlist), MimeTypes.GetMimeType("playlist.m3u8"));
@@ -1542,6 +1542,11 @@ public class DynamicHlsController : BaseJellyfinApiController
             return await GetSegmentResult(state, playlistPath, segmentPath, segmentExtension, segmentId, job, cancellationToken).ConfigureAwait(false);
         }
     }
+
+    // The keyframe data of a video is that of its first video stream.
+    private static bool IsFirstVideoStream(StreamState state)
+        => state.VideoStream is not null
+           && state.VideoStream.Index == state.MediaSource.MediaStreams.Where(s => s.Type == MediaStreamType.Video).Min(s => (int?)s.Index);
 
     internal static async Task WaitForActiveTranscodingRequests(TranscodingJob? job, CancellationToken cancellationToken)
     {
