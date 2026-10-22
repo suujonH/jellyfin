@@ -126,10 +126,13 @@ dotnet run --project src/Jellyfin.TrueCache.Tool -c Release -- generate --ffmpeg
 dotnet run --project src/Jellyfin.TrueCache.Tool -c Release -- generate --ffmpeg /usr/lib/jellyfin-ffmpeg/ffmpeg --server-config /etc/jellyfin --server-data /var/lib/jellyfin/data Movies/Film/Film.strm
 dotnet run --project src/Jellyfin.TrueCache.Tool -c Release -- album  --ffmpeg ... Music/Album
 dotnet run --project src/Jellyfin.TrueCache.Tool -c Release -- validate --server-config /etc/jellyfin Movies/Film/Film.mkv
+dotnet run --project src/Jellyfin.TrueCache.Tool -c Release -- strm --ffmpeg ... --server-url https://jellyfin.example --api-key KEY --name Film.mkv.strm --output out /tmp/Film.mkv
 ```
 
 - `--server-config` 读取服务器的 `system.xml` 和 `encoding.xml`，保证 trickplay、章节和编码设置与服务器一致；也可以用 `--trickplay-widths`、`--trickplay-interval`、`--trickplay-tile`、`--dummy-chapters` 单独指定。
 - `--server-data` 指向服务器的数据目录（含 `jellyfin.db`），为 `s3://` 目标提供访问权限，例如 `--server-data /var/lib/jellyfin/data`。生成 `s3://` 的 `.strm` 时必须提供。
+- `--server-url` 加 `--api-key` 从运行中的服务器读取设置（`GET /System/Configuration` 和编码配置），代替 `--server-config`，二者不能同时使用。
+- `strm` 为一个还没上传的本地文件生成它将来的 `.strm` 的条目：读取本地文件，内容与对那个 `.strm` 运行 `generate` 一致，只是 `source.size` 取本地文件的大小、不写 `source.modified`（`.strm` 之后才写）。条目写到 `<output>/<name>`，之后放进 `.strm` 旁边的 `__true_cache__/`。HLS Worker 上传媒体时这样调用（见 [HLS_PLAN.md](HLS_PLAN.md)）。`--kind` 只能是 `video` 或 `audio`。
 - 生成后会用服务器同一套规则校验。全部完整时退出码为 0，有不完整的为 1，命令行错误为 2。
 - 已有缓存的资源默认跳过，`--force` 重新生成。
 - 条目先写入 `__true_cache__` 中以 `.` 开头的临时目录（服务器忽略它），校验完整后才替换正式条目。生成失败、校验不通过或被中断时，原有条目（或没有条目的状态）保持不变，服务器不会看到写了一半的条目。
