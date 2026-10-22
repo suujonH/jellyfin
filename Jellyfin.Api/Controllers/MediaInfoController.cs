@@ -10,6 +10,7 @@ using Jellyfin.Api.Extensions;
 using Jellyfin.Api.Helpers;
 using Jellyfin.Api.Models.MediaInfoDtos;
 using Jellyfin.Data;
+using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Extensions;
 using MediaBrowser.Common.Extensions;
@@ -88,13 +89,14 @@ public class MediaInfoController : BaseJellyfinApiController
         var user = userId.IsNullOrEmpty()
             ? null
             : _userManager.GetUserById(userId.Value);
-        var item = _libraryManager.GetItemById<BaseItem>(itemId, user);
+        string? mediaSourceId = null;
+        var item = GetPlayedItem(itemId, user, ref mediaSourceId);
         if (item is null)
         {
             return NotFound();
         }
 
-        return await _mediaInfoHelper.GetPlaybackInfo(item, user, Request).ConfigureAwait(false);
+        return await _mediaInfoHelper.GetPlaybackInfo(item, user, Request, mediaSourceId).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -178,7 +180,7 @@ public class MediaInfoController : BaseJellyfinApiController
         var user = userId.IsNullOrEmpty()
             ? null
             : _userManager.GetUserById(userId.Value);
-        var item = _libraryManager.GetItemById<BaseItem>(itemId, user);
+        var item = GetPlayedItem(itemId, user, ref mediaSourceId);
         if (item is null)
         {
             return NotFound();
@@ -395,5 +397,22 @@ public class MediaInfoController : BaseJellyfinApiController
         {
             ArrayPool<byte>.Shared.Return(buffer);
         }
+    }
+
+    // A version item is played as its original, and seen as the original is: its own source is the one asked for, unless another is.
+    // Without a user, as with an API key, the sources are those of the files only.
+    private BaseItem? GetPlayedItem(Guid itemId, User? user, ref string? mediaSourceId)
+    {
+        if (_libraryManager.GetItemById(itemId) is not { } item || _hlsPlayback.GetOriginalId(item) is not { } originalId)
+        {
+            return _libraryManager.GetItemById<BaseItem>(itemId, user);
+        }
+
+        if (user is not null && string.IsNullOrWhiteSpace(mediaSourceId))
+        {
+            mediaSourceId = item.Id.ToString("N", CultureInfo.InvariantCulture);
+        }
+
+        return _libraryManager.GetItemById<BaseItem>(originalId, user);
     }
 }

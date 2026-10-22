@@ -163,6 +163,7 @@ public class DynamicHlsController : BaseJellyfinApiController
     /// <response code="200">Hls live stream retrieved.</response>
     /// <returns>A <see cref="FileResult"/> containing the hls file.</returns>
     [HttpGet("Videos/{itemId}/live.m3u8")]
+    [HlsPlaybackRedirect]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesPlaylistFile]
     public async Task<ActionResult> GetLiveHlsStream(
@@ -404,6 +405,7 @@ public class DynamicHlsController : BaseJellyfinApiController
     /// <returns>A <see cref="FileResult"/> containing the playlist file.</returns>
     [HttpGet("Videos/{itemId}/master.m3u8")]
     [HttpHead("Videos/{itemId}/master.m3u8", Name = "HeadMasterHlsVideoPlaylist")]
+    [HlsPlaybackRedirect]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesPlaylistFile]
     public async Task<ActionResult> GetMasterHlsVideoPlaylist(

@@ -159,6 +159,7 @@ namespace Jellyfin.Server
             services.AddHostedService<RecordingNotifier>();
             services.AddHostedService<DeviceAccessHost>();
             services.AddHostedService(provider => provider.GetRequiredService<HlsCoordinator>());
+            services.AddHostedService(provider => provider.GetRequiredService<HlsVersionCatalog>());
             services.AddHostedService(provider => provider.GetRequiredService<HlsVerificationService>());
             services.AddHostedService(provider => provider.GetRequiredService<HlsDeletionService>());
         }

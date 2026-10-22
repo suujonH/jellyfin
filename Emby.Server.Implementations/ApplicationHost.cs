@@ -579,6 +579,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<HlsRootMonitor>();
             serviceCollection.AddSingleton<HlsPublishedIndex>();
             serviceCollection.AddSingleton<HlsCoordinator>();
+            serviceCollection.AddSingleton<HlsVersionCatalog>();
             serviceCollection.AddSingleton<HlsVerificationService>();
             serviceCollection.AddSingleton<HlsDeletionService>();
             serviceCollection.AddSingleton<IHlsTaskCenter, HlsTaskCenter>();

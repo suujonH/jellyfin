@@ -176,6 +176,34 @@ public sealed class HlsPlaybackService : IHlsPlaybackService
     }
 
     /// <inheritdoc />
+    public Guid? GetOriginalId(BaseItem item) => HlsVersionCatalog.Identify(item)?.ItemId;
+
+    /// <inheritdoc />
+    public string? GetPlaylistUrl(BaseItem item, string? mediaSourceId, int? audioStreamIndex, User? user)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        var itemId = item.Id;
+        var quality = GetQuality(itemId, mediaSourceId);
+        // A version item stands for its own source of its original, unless the request names another one.
+        if (quality is null && GetOriginalId(item) is { } originalId)
+        {
+            itemId = originalId;
+            quality = GetQuality(originalId, string.IsNullOrEmpty(mediaSourceId) ? item.Id.ToString("N", CultureInfo.InvariantCulture) : mediaSourceId);
+        }
+
+        // A version item is only as visible as its original.
+        if (quality is not { } found
+            || GetMedia(itemId) is not { } media
+            || (user is not null && (!user.HasPermission(PermissionKind.EnableMediaPlayback) || _libraryManager.GetItemById<BaseItem>(itemId, user) is null))
+            || IssueGrant(itemId) is not { } grant)
+        {
+            return null;
+        }
+
+        return GetPlaylistUrl(grant, media, found, audioStreamIndex);
+    }
+
+    /// <inheritdoc />
     public bool PrepareForPlayback(Guid itemId, MediaSourceInfo source, string playSessionId, int? audioStreamIndex, int? subtitleStreamIndex, string serverUrl)
     {
         ArgumentNullException.ThrowIfNull(source);
@@ -201,10 +229,8 @@ public sealed class HlsPlaybackService : IHlsPlaybackService
             source.DefaultSubtitleStreamIndex = subtitleIndex;
         }
 
-        var name = HlsMasterPlaylistWriter.GetPlaylistName(media, quality, audioStreamIndex ?? source.DefaultAudioStreamIndex);
-        source.TranscodingUrl = string.Create(
-            CultureInfo.InvariantCulture,
-            $"{PlaybackRoute}/{grant}/{name}.m3u8?PlaySessionId={Uri.EscapeDataString(playSessionId)}&MediaSourceId={source.Id}");
+        source.TranscodingUrl = GetPlaylistUrl(grant, media, quality, audioStreamIndex ?? source.DefaultAudioStreamIndex)
+            + "?PlaySessionId=" + Uri.EscapeDataString(playSessionId) + "&MediaSourceId=" + source.Id;
         source.Path = serverUrl.TrimEnd('/') + source.TranscodingUrl;
 
         foreach (var stream in source.MediaStreams.Where(s => s.Type == MediaStreamType.Subtitle))
@@ -326,64 +352,33 @@ public sealed class HlsPlaybackService : IHlsPlaybackService
         return new HlsDeliveredFile(location, store.IsLocal, contentType);
     }
 
-    // The directory of the published attempt of a rendition.
-    private static string GetAttempt(HlsPublishedRendition rendition)
-        => rendition.RelativeDirectory[(rendition.RelativeDirectory.LastIndexOf('/') + 1)..];
-
-    // What an original source plays, such as "1080p 24fps", from its video stream.
-    private static string? GetDescription(MediaSourceInfo source)
-    {
-        if (source.VideoStream is not { Width: > 0, Height: > 0 } video)
-        {
-            return null;
-        }
-
-        var (width, height) = Math.Abs((video.Rotation ?? 0) % 180) == 90
-            ? (video.Height.Value, video.Width.Value)
-            : (video.Width.Value, video.Height.Value);
-        var description = string.Create(CultureInfo.InvariantCulture, $"{HlsEncodingLadder.GetName(width, height)}p");
-        return (video.RealFrameRate ?? video.AverageFrameRate) is > 0 and { } fps
-            ? string.Create(CultureInfo.InvariantCulture, $"{description} {Math.Round(fps)}fps")
-            : description;
-    }
-
-    // What can be played of an item: pre-encoded HLS is on, its library is chosen and its content is playable.
-    private HlsMediaView? GetMedia(Guid itemId)
-        => _index.GetSource(itemId) is { } source
-            && _settings.Current.IsLibraryEligible(source.LibraryId)
-            && _index.GetMediaForItem(itemId) is { Playable: true } media
+    /// <summary>
+    /// Gets what can be played of an item: pre-encoded HLS is on, the library of the item is chosen and its content is playable.
+    /// </summary>
+    /// <param name="index">The published index.</param>
+    /// <param name="settings">The settings.</param>
+    /// <param name="itemId">The item.</param>
+    /// <returns>The published renditions, or <c>null</c> when the item cannot be played.</returns>
+    internal static HlsMediaView? GetPlayableMedia(HlsPublishedIndex index, HlsSettingsSnapshot settings, Guid itemId)
+        => index.GetSource(itemId) is { } source
+            && settings.IsLibraryEligible(source.LibraryId)
+            && index.GetMediaForItem(itemId) is { Playable: true } media
                 ? media
                 : null;
 
-    // The original may be played next to pre-encoded HLS: with an API key, or as the settings and the user allow.
-    private bool IsOriginalPermitted(User? user)
-    {
-        if (bool.TryParse(_httpContextAccessor.HttpContext?.User.FindFirst(IsApiKeyClaim)?.Value, out var isApiKey) && isApiKey)
-        {
-            return true;
-        }
-
-        var options = _settings.Current.Options;
-        return options.AllowOriginal
-            && ((options.AllowLocalOriginal && IsLocalRequest()) || user?.HasPermission(PermissionKind.EnableOriginalPlayback) == true);
-    }
-
-    private bool IsLocalRequest()
-        => _httpContextAccessor.HttpContext is { } context && _networkManager.IsInLocalNetwork(context.GetNormalizedRemoteIP());
-
-    // The id of a source is that of the version item of its quality, the id the DistributedHls plugin gave it.
-    private string GetSourceId(Guid itemId, int quality)
-        => _libraryManager.GetNewItemId(
-            string.Create(CultureInfo.InvariantCulture, $"https://distributed-hls.invalid/{itemId:N}/{quality}/master.m3u8"),
-            typeof(Video)).ToString("N", CultureInfo.InvariantCulture);
-
-    // The source of a quality, or of every quality for 0. Its stream indexes are the ffprobe indexes of the original, so they match
-    // the tracks of the original, whose dispositions they keep.
-    private MediaSourceInfo BuildSource(Guid itemId, HlsMediaView media, int quality, IReadOnlyList<MediaStream> originalStreams)
+    /// <summary>
+    /// Builds the streams of a source of pre-encoded HLS. Their indexes are the ffprobe indexes of the original, so they match the
+    /// tracks of the original, whose dispositions they keep.
+    /// </summary>
+    /// <param name="media">What is published.</param>
+    /// <param name="quality">The quality, or 0 for every quality.</param>
+    /// <param name="originalStreams">The streams of the original.</param>
+    /// <returns>The streams.</returns>
+    internal static List<MediaStream> BuildStreams(HlsMediaView media, int quality, IReadOnlyList<MediaStream> originalStreams)
     {
         MediaStream? Original(int index, MediaStreamType type) => originalStreams.FirstOrDefault(s => s.Index == index && s.Type == type);
 
-        var video = (quality == 0 ? media.Video.MaxBy(v => v.Summary.Bandwidth) : media.Find(HlsRenditionKind.Video, quality))!.Summary;
+        var video = GetVideo(media, quality);
         var streams = new List<MediaStream>
         {
             new()
@@ -430,6 +425,69 @@ public sealed class HlsPlaybackService : IHlsPlaybackService
             SupportsExternalStream = true,
             DeliveryMethod = SubtitleDeliveryMethod.External
         }));
+        return streams;
+    }
+
+    /// <summary>
+    /// Gets the video a quality plays: "auto" has the size of the highest.
+    /// </summary>
+    /// <param name="media">What is published.</param>
+    /// <param name="quality">The quality, or 0 for every quality.</param>
+    /// <returns>The summary of the video.</returns>
+    internal static HlsRenditionSummary GetVideo(HlsMediaView media, int quality)
+        => (quality == 0 ? media.Video.MaxBy(v => v.Summary.Bandwidth) : media.Find(HlsRenditionKind.Video, quality))!.Summary;
+
+    private static string GetPlaylistUrl(string grant, HlsMediaView media, int quality, int? audioStreamIndex)
+        => string.Create(CultureInfo.InvariantCulture, $"{PlaybackRoute}/{grant}/{HlsMasterPlaylistWriter.GetPlaylistName(media, quality, audioStreamIndex)}.m3u8");
+
+    // The directory of the published attempt of a rendition.
+    private static string GetAttempt(HlsPublishedRendition rendition)
+        => rendition.RelativeDirectory[(rendition.RelativeDirectory.LastIndexOf('/') + 1)..];
+
+    // What an original source plays, such as "1080p 24fps", from its video stream.
+    private static string? GetDescription(MediaSourceInfo source)
+    {
+        if (source.VideoStream is not { Width: > 0, Height: > 0 } video)
+        {
+            return null;
+        }
+
+        var (width, height) = Math.Abs((video.Rotation ?? 0) % 180) == 90
+            ? (video.Height.Value, video.Width.Value)
+            : (video.Width.Value, video.Height.Value);
+        var description = string.Create(CultureInfo.InvariantCulture, $"{HlsEncodingLadder.GetName(width, height)}p");
+        return (video.RealFrameRate ?? video.AverageFrameRate) is > 0 and { } fps
+            ? string.Create(CultureInfo.InvariantCulture, $"{description} {Math.Round(fps)}fps")
+            : description;
+    }
+
+    private HlsMediaView? GetMedia(Guid itemId) => GetPlayableMedia(_index, _settings.Current, itemId);
+
+    // The original may be played next to pre-encoded HLS: with an API key, or as the settings and the user allow.
+    private bool IsOriginalPermitted(User? user)
+    {
+        if (bool.TryParse(_httpContextAccessor.HttpContext?.User.FindFirst(IsApiKeyClaim)?.Value, out var isApiKey) && isApiKey)
+        {
+            return true;
+        }
+
+        var options = _settings.Current.Options;
+        return options.AllowOriginal
+            && ((options.AllowLocalOriginal && IsLocalRequest()) || user?.HasPermission(PermissionKind.EnableOriginalPlayback) == true);
+    }
+
+    private bool IsLocalRequest()
+        => _httpContextAccessor.HttpContext is { } context && _networkManager.IsInLocalNetwork(context.GetNormalizedRemoteIP());
+
+    // The id of a source is that of the version item of its quality.
+    private string GetSourceId(Guid itemId, int quality)
+        => HlsVersionCatalog.GetVersionId(_libraryManager, itemId, quality).ToString("N", CultureInfo.InvariantCulture);
+
+    // The source of a quality, or of every quality for 0.
+    private MediaSourceInfo BuildSource(Guid itemId, HlsMediaView media, int quality, IReadOnlyList<MediaStream> originalStreams)
+    {
+        var video = GetVideo(media, quality);
+        var streams = BuildStreams(media, quality, originalStreams);
 
         var id = GetSourceId(itemId, quality);
         return new MediaSourceInfo

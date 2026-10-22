@@ -110,6 +110,34 @@ public sealed class HlsPublishedIndexTests : IDisposable
         Assert.True(_environment.Index.GetMediaForItem(item)!.Playable);
     }
 
+    [Fact]
+    public async Task EveryRefresh_RaisesChangedWithTheItemsItMayHaveChanged()
+    {
+        var (item, plan) = await _environment.PublishAsync(Sha('a'));
+        var copy = await AddCopyAsync(Sha('a'));
+        var changes = new List<Guid[]>();
+        _environment.Index.Changed += (_, items) => changes.Add([.. items.Order()]);
+        Assert.False(_environment.Index.IsLoaded);
+
+        await _environment.Index.LoadAsync(CancellationToken);
+        Assert.True(_environment.Index.IsLoaded);
+        Assert.Equal(new[] { item, copy }.Order(), Assert.Single(changes));
+        Assert.Equal(new[] { item, copy }.Order(), _environment.Index.GetPublishedItems().Order());
+
+        // A removed file is part of the next load too.
+        await _environment.Store.RemoveSourceAsync(copy, _environment.Now, CancellationToken);
+        await _environment.Index.RefreshItemsAsync([copy], CancellationToken);
+        Assert.Equal([copy], changes[^1]);
+
+        await RetireAsync(plan.Renditions.ToDictionary(r => r.Key, r => r.RelativeDirectory), "v720");
+        await _environment.Index.RefreshMediaAsync([Sha('a')], CancellationToken);
+        Assert.Equal([item], changes[^1]);
+
+        // Nothing to report raises nothing.
+        await _environment.Index.RefreshMediaAsync([Sha('b')], CancellationToken);
+        Assert.Equal(3, changes.Count);
+    }
+
     // Another library file of the content, recorded with its hash as a worker would have identified it.
     private async Task<Guid> AddCopyAsync(string sha)
     {

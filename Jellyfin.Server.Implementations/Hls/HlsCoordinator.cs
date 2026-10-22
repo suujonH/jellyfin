@@ -171,9 +171,10 @@ public sealed class HlsCoordinator : BackgroundService
 
     private void OnItemRemoved(object? sender, ItemChangeEventArgs e) => Track(e.Item, false);
 
+    // A version item is no library file.
     private void Track(BaseItem? item, bool exists)
     {
-        if (item is Video)
+        if (item is Video && !HlsVersionCatalog.IsVersionItem(item))
         {
             _changes[item.Id] = exists;
         }

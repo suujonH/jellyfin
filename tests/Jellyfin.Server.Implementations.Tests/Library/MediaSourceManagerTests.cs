@@ -32,6 +32,7 @@ namespace Jellyfin.Server.Implementations.Tests.Library
         private readonly Mock<IUserDataManager> _mockUserDataManager;
         private readonly Mock<ILocalizationManager> _mockLocalizationManager;
         private readonly Mock<IHlsPlaybackService> _mockHlsPlayback = new();
+        private readonly Mock<ILibraryManager> _mockLibraryManager;
         private Video _item;
         private User _user;
 
@@ -51,6 +52,7 @@ namespace Jellyfin.Server.Implementations.Tests.Library
             _mockHlsPlayback.Setup(h => h.ArrangeMediaSources(It.IsAny<BaseItem>(), It.IsAny<IReadOnlyList<MediaSourceInfo>>(), It.IsAny<User>()))
                 .Returns<BaseItem, IReadOnlyList<MediaSourceInfo>, User>((_, sources, _) => sources);
             fixture.Inject(_mockHlsPlayback.Object);
+            _mockLibraryManager = fixture.Freeze<Mock<ILibraryManager>>();
 
             _mediaSourceManager = fixture.Create<MediaSourceManager>();
 
@@ -311,6 +313,36 @@ namespace Jellyfin.Server.Implementations.Tests.Library
 
             Assert.Equal(["hls", primary.Id.ToString("N")], sources.Take(2).Select(s => s.Id));
             Assert.Equal(4, sources.Count);
+        }
+
+        [Fact]
+        public async Task GetMediaSources_VersionItem_AreThoseOfItsOriginal_ItsOwnFirst()
+        {
+            var (primary, _, _) = SetupVersionGroup();
+            SetupUserDataBatch([]);
+            var version = new Video { Id = Guid.NewGuid(), Path = "https://distributed-hls.invalid/version/master.m3u8" };
+            var hls = new MediaSourceInfo { Id = "auto", Protocol = MediaProtocol.Http };
+            var own = new MediaSourceInfo { Id = version.Id.ToString("N"), Protocol = MediaProtocol.Http };
+            _mockHlsPlayback.Setup(h => h.GetOriginalId(version)).Returns(primary.Id);
+            _mockHlsPlayback.Setup(h => h.ArrangeMediaSources(primary, It.IsAny<IReadOnlyList<MediaSourceInfo>>(), _user))
+                .Returns<BaseItem, IReadOnlyList<MediaSourceInfo>, User>((_, sources, _) => [hls, .. sources, own]);
+            _mockLibraryManager.Setup(l => l.GetItemById(primary.Id)).Returns(primary);
+            _mockLibraryManager.Setup(l => l.GetItemById<BaseItem>(It.IsAny<Guid>(), _user)).Returns((BaseItem?)null);
+            Assert.Empty(_mediaSourceManager.GetStaticMediaSources(version, false, _user));
+
+            _mockLibraryManager.Setup(l => l.GetItemById<BaseItem>(It.IsAny<Guid>(), _user))
+                .Returns((Guid id, User _) => BaseItem.LibraryManager.GetItemById(id));
+            var sources = _mediaSourceManager.GetStaticMediaSources(version, false, _user);
+            Assert.Equal([own.Id, "auto", primary.Id.ToString("N")], sources.Take(3).Select(s => s.Id));
+            Assert.Equal(5, sources.Count);
+
+            // The file of the original is never probed for a version item, with or without a user.
+            Assert.Equal(sources.Select(s => s.Id), (await _mediaSourceManager.GetPlaybackMediaSources(version, _user, true, false, CancellationToken.None)).Select(s => s.Id));
+            Assert.Equal(primary.Id.ToString("N"), (await _mediaSourceManager.GetPlaybackMediaSources(version, null!, true, false, CancellationToken.None))[0].Id);
+
+            // Without its original it keeps its own source until it is deleted.
+            _mockLibraryManager.Setup(l => l.GetItemById(primary.Id)).Returns((BaseItem?)null);
+            Assert.Equal(version.Id.ToString("N"), Assert.Single(_mediaSourceManager.GetStaticMediaSources(version, false)).Id);
         }
 
         [Fact]

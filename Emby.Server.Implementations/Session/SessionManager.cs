@@ -27,6 +27,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Events;
 using MediaBrowser.Controller.Events.Authentication;
 using MediaBrowser.Controller.Events.Session;
+using MediaBrowser.Controller.Hls;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Controller.Session;
@@ -58,6 +59,7 @@ namespace Emby.Server.Implementations.Session
         private readonly IDtoService _dtoService;
         private readonly IImageProcessor _imageProcessor;
         private readonly IMediaSourceManager _mediaSourceManager;
+        private readonly IHlsPlaybackService _hlsPlayback;
         private readonly IServerApplicationHost _appHost;
         private readonly IDeviceManager _deviceManager;
         private readonly CancellationTokenRegistration _shutdownCallback;
@@ -89,6 +91,7 @@ namespace Emby.Server.Implementations.Session
         /// <param name="deviceManager">Instance of <see cref="IDeviceManager"/> interface.</param>
         /// <param name="mediaSourceManager">Instance of <see cref="IMediaSourceManager"/> interface.</param>
         /// <param name="hostApplicationLifetime">Instance of <see cref="IHostApplicationLifetime"/> interface.</param>
+        /// <param name="hlsPlayback">Instance of <see cref="IHlsPlaybackService"/> interface.</param>
         public SessionManager(
             ILogger<SessionManager> logger,
             IEventManager eventManager,
@@ -102,7 +105,8 @@ namespace Emby.Server.Implementations.Session
             IServerApplicationHost appHost,
             IDeviceManager deviceManager,
             IMediaSourceManager mediaSourceManager,
-            IHostApplicationLifetime hostApplicationLifetime)
+            IHostApplicationLifetime hostApplicationLifetime,
+            IHlsPlaybackService hlsPlayback)
         {
             _logger = logger;
             _eventManager = eventManager;
@@ -116,6 +120,7 @@ namespace Emby.Server.Implementations.Session
             _appHost = appHost;
             _deviceManager = deviceManager;
             _mediaSourceManager = mediaSourceManager;
+            _hlsPlayback = hlsPlayback;
             _shutdownCallback = hostApplicationLifetime.ApplicationStopping.Register(OnApplicationStopping);
 
             _deviceManager.DeviceOptionsUpdated += OnDeviceManagerDeviceOptionsUpdated;
@@ -741,6 +746,12 @@ namespace Emby.Server.Implementations.Session
         /// <returns>The item to track progress against.</returns>
         private BaseItem GetProgressItem(BaseItem libraryItem, string mediaSourceId)
         {
+            // A version item of pre-encoded HLS keeps no progress of its own: it is that of its original.
+            if (_hlsPlayback.GetOriginalId(libraryItem) is { } originalId && _libraryManager.GetItemById(originalId) is { } original)
+            {
+                return original;
+            }
+
             if (libraryItem is Video libraryVideo
                 && !string.IsNullOrEmpty(mediaSourceId)
                 && Guid.TryParse(mediaSourceId, out var mediaSourceItemId)

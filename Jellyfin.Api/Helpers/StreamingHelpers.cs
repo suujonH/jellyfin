@@ -115,8 +115,16 @@ public static class StreamingHelpers
         var item = libraryManager.GetItemById<BaseItem>(streamingRequest.Id)
             ?? throw new ResourceNotFoundException();
 
-        // Pre-encoded HLS is played from its own playlists.
+        // Pre-encoded HLS is played from its own playlists. A version item has no file of its own: another source it names is one
+        // of its original.
         var hlsPlayback = httpContext.RequestServices?.GetService<IHlsPlaybackService>();
+        if (hlsPlayback?.GetOriginalId(item) is { } originalId)
+        {
+            item = string.IsNullOrWhiteSpace(streamingRequest.MediaSourceId)
+                ? throw new ResourceNotFoundException("A version item is played from its playlists.")
+                : libraryManager.GetItemById<BaseItem>(originalId) ?? throw new ResourceNotFoundException();
+        }
+
         if (hlsPlayback?.GetQuality(item.Id, streamingRequest.MediaSourceId) is not null)
         {
             throw new ResourceNotFoundException("A source of pre-encoded HLS is played from its playlists.");
@@ -147,7 +155,7 @@ public static class StreamingHelpers
 
             if (mediaSource is null)
             {
-                var mediaSources = await mediaSourceManager.GetPlaybackMediaSources(libraryManager.GetItemById<BaseItem>(streamingRequest.Id), null, false, false, cancellationToken).ConfigureAwait(false);
+                var mediaSources = await mediaSourceManager.GetPlaybackMediaSources(item, null, false, false, cancellationToken).ConfigureAwait(false);
 
                 mediaSource = string.IsNullOrEmpty(streamingRequest.MediaSourceId)
                     ? mediaSources[0]
