@@ -132,7 +132,7 @@ dotnet run --project src/Jellyfin.TrueCache.Tool -c Release -- strm --ffmpeg ...
 - `--server-config` 读取服务器的 `system.xml` 和 `encoding.xml`，保证 trickplay、章节和编码设置与服务器一致；也可以用 `--trickplay-widths`、`--trickplay-interval`、`--trickplay-tile`、`--dummy-chapters` 单独指定。
 - `--server-data` 指向服务器的数据目录（含 `jellyfin.db`），为 `s3://` 目标提供访问权限，例如 `--server-data /var/lib/jellyfin/data`。生成 `s3://` 的 `.strm` 时必须提供。
 - `--server-url` 加 `--api-key` 从运行中的服务器读取设置（`GET /System/Configuration` 和编码配置），代替 `--server-config`，二者不能同时使用。
-- `strm` 为一个还没上传的本地文件生成它将来的 `.strm` 的条目：读取本地文件，内容与对那个 `.strm` 运行 `generate` 一致，只是 `source.size` 取本地文件的大小、不写 `source.modified`（`.strm` 之后才写）。条目写到 `<output>/<name>`，之后放进 `.strm` 旁边的 `__true_cache__/`。HLS Worker 上传媒体时这样调用（见 [HLS_PLAN.md](HLS_PLAN.md)）。`--kind` 只能是 `video` 或 `audio`。
+- `strm` 为一个还没上传的本地文件生成它将来的 `.strm` 的条目：读取本地文件，内容与对那个 `.strm` 运行 `generate` 一致，只是 `source.size` 取本地文件的大小、不写 `source.modified`（`.strm` 之后才写）。条目写到 `<output>/<name>`，之后放进 `.strm` 旁边的 `__true_cache__/`。HLS Worker 添加媒体到 S3 时这样调用（见 [HLS.md](HLS.md)）。`--kind` 只能是 `video` 或 `audio`。
 - 生成后会用服务器同一套规则校验。全部完整时退出码为 0，有不完整的为 1，命令行错误为 2。
 - 已有缓存的资源默认跳过，`--force` 重新生成。
 - 条目先写入 `__true_cache__` 中以 `.` 开头的临时目录（服务器忽略它），校验完整后才替换正式条目。生成失败、校验不通过或被中断时，原有条目（或没有条目的状态）保持不变，服务器不会看到写了一半的条目。
@@ -146,6 +146,8 @@ dotnet run --project src/Jellyfin.TrueCache.Tool -c Release -- strm --ffmpeg ...
 - **删除条目**：删除一个有效条目后，下一次刷新会重新从文件读取：章节图改为从文件提取，未开启扫描时提取则先清空、由计划任务提取；trickplay 在开启扫描时提取时重新生成，否则等“生成 trickplay”计划任务。
 - **服务方式**：截图、内嵌图片、封面以流的形式交给服务器保存（服务器保存后会删除按路径交给它的文件，以流交付可以保护缓存文件）。章节图和 trickplay 拼图直接从缓存目录提供，服务器不会移动或清理它们；删除条目时，服务器只删除它自己目录里的数据。字幕、附件和关键帧直接从缓存读取，关键帧不写入数据库，替换条目后立即生效；附件会复制一份到服务器的附件目录，供烧录字幕时的 ffmpeg 使用，条目被替换后下一次转码会重新复制。
 - **大小**：有有效条目的资源，媒体库记录的大小取自条目（`probe.json` 的 `format.size`，没有探测结果时为 `source.size`）。`.strm` 的大小是它的 `source.size`，即它指向的数据的大小，而不是这个文本文件的大小；`.strm` 的 `source.modified` 仍是文本文件的修改时间。
+- **关键帧与 HLS**：`keyframes.json` 是 HLS remux 切片的唯一依据，有条目时服务器不读文件找关键帧（见 [HLS.md](HLS.md)）。时间是第一条非封面视频流的显示时间减去格式的 `start_time`，即播放时间轴，工具用同一次 ffprobe 读出两者。旧版工具为 ts、m2ts 等起点不为 0 的容器生成的是绝对时间，需要用 `--force` 重新生成；否则切片仍能连续播放，但段长与播放列表不符。
+- **预编码 HLS**：有条目的 `.strm` 才会预编码，服务器从条目得知它指向的数据的大小（见 [HLS.md](HLS.md)）。
 - **远程资源**：`.strm` 的媒体源仍是远程源（`IsRemote`），有有效条目时另带 `HasTrueCache` 标记。远程源因为媒体信息未知而跳过的处理，对带标记的源照常进行：按客户端的码率上限判断是否转码，trickplay 照常提供给客户端。管理员的“强制远程源转码”权限和音频直连重定向只看 `IsRemote`，不受影响。
 
 ## 仍会读取的情况
