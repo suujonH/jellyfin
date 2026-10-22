@@ -410,13 +410,13 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 1. 选文件或文件夹、媒体库和连接，保留相对于所选媒体库路径的目录结构；`GET /HlsWorker/Libraries` 取得该库的生效档位；
 2. 可选择不编、编一部分或全编，编的部分经 `Jobs/Eager` 提交，按普通任务的编码、上传、完成流程走；
 3. 媒体对象上 S3 时，对象上传到 `{前缀}/{相对路径}/{文件名}`，上传时顺便算 SHA-256；`.strm`、`__true_cache__` 条目和外挂文件经 SFTP 写进媒体库目录，顺序是外挂文件、条目目录、最后 `.strm`（`.strm` 出现时扫描即可读到条目）；
-   `.strm` 写在 `{库路径}/{相对路径}/{文件名}.strm`，条目在旁边的 `__true_cache__/{文件名}.strm/`，经 SFTP 先写 `.` 开头的临时目录再改名，与工具的做法相同；
+   `.strm` 写在 `{库路径}/{相对路径}/{文件名去掉扩展名}.strm`（与视频同名的外挂字幕和图片因此归属于它），条目在旁边的 `__true_cache__/{文件名去掉扩展名}.strm/`，经 SFTP 先写 `.` 开头的临时目录再改名，与工具的做法相同；两个文件会得到同一个名字时，在写入任何东西之前拒绝；
 4. 媒体直传 SFTP 时只能进媒体库目录，以临时名传入再改名，不生成 TrueCache；
 5. TrueCache 条目由 Worker 调用 `Jellyfin.TrueCache.Tool` 子进程生成，不在 Worker 里重写提取逻辑（产物必须与服务器逐项一致）；工具随 Worker 发布为自包含程序。工具新增一个模式：按本地文件生成、条目名为 `.strm`、`source.size` 取本地文件大小、不写 `source.modified`（在 jellyfin 仓库实现）；trickplay、章节等设置取自 `GET /System/Configuration`。`--server-data` 读库签名下载 `.strm` 目标的能力保留，供迁移已有 S3 内容。
 6. 生成到本地临时目录与经连接落地分成两步，落地走连接抽象，为今后把 `__true_cache__` 移到 S3 预留；
 7. 一批结束后调 `POST /Items/{媒体库 ItemId}/Refresh` 触发扫描。
 
-**本地数据库**（SQLite）：记本地路径、目标、大小、SHA-256。目标对 S3 媒体是 `s3://` 地址，对 SFTP 媒体是服务器路径。领到任务时按来源的目标加大小命中（不看修改时间：`.strm` 的修改时间是文本文件的），命中就直接读本地文件并沿用记下的 SHA-256；没命中才经 `Input` 下载，并记下新路径。
+**本地数据库**（SQLite）：只记「添加媒体」添加过的媒体：本地路径、目标、大小、SHA-256。目标对 S3 媒体是 `s3://` 地址，对 SFTP 媒体是服务器路径。领到任务时按来源的目标加大小命中（不看修改时间：`.strm` 的修改时间是文本文件的），命中就直接读本地文件（本地文件已移动或修改时改为下载）并沿用记下的 SHA-256；没命中才经 `Input` 下载到输入缓存，下载的输入不记入数据库。
 
 **调度**：处理列表（上传、TrueCache、随添加的预编码）优先；列表为空且有空闲名额时才 Poll。这是 Worker 侧规则，服务器不改。
 
@@ -729,4 +729,6 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - 2026-10-22：第 5b 阶段完成：`IHlsPlaybackService` 增加 `IsPublished`、`IsOriginalAllowed`、`PrefersOriginal`、`ArrangeMediaSources`、`GetQuality`、`PrepareForPlayback`（原片规则读当前请求：API Key、内网、用户权限）；`MediaSourceManager` 对有用户的调用整理源列表（「自动」、源文件、各档位从高到低；没有播放权限时为空），已发布条目不探测、不加动态源、不排序；`MediaInfoHelper` 为 HLS 源签发授权并设置字段，跳过设备协商与排序；`MediaInfoController` 中「自动」按 7.1 解析为原片或 HLS；`StreamingHelpers` 对 HLS 源 id 返回 `404`（第 5c 阶段改为 302），按实际播放的源（含转码任务复用的源）检查原片，不允许时 `403`；HLS 源的音轨、字幕保留原片的强制、听障、原声标记；条目 DTO 的 `MediaStreams` 在源列表不含原片时取原片的流；`/Items/{id}/File`、`/Items/{id}/Download` 不允许时 `403`；`HlsEncodingLadder.GetName` 给原片命名（如「源文件 (1080p 24fps)」），本地化键 `HlsSourceAuto`、`HlsSourceOriginal`。Release 构建 0 警告；Server.Implementations 1381 个测试通过（2 个本地化测试因系统语言为中文而失败），Api 173 个、MediaEncoding.Hls 421 个（44 个跳过）、Integration 136 个通过。
 - 2026-10-22：第 5c 阶段完成：版本条目 `HlsVersionCatalog`（见 7.4），发布索引增加 `Changed`、`IsLoaded`、`GetPublishedItems`；`IHlsPlaybackService` 增加 `GetOriginalId`、`GetPlaylistUrl`；视频流入口对 HLS 源 id 和版本条目 302 到授权地址（`HlsPlaybackRedirect`），`HlsPlayback/Versions/{id}/master.m3u8` 302；`MediaSourceManager`、`MediaInfoController` 按原条目处理版本条目；任务中心不再把版本条目当作库文件。Release 构建 0 警告；Server.Implementations 1399 个测试通过（2 个本地化测试因系统语言为中文而失败），Api 173 个、Integration 136 个通过。
 - 2026-10-22：第 6a 阶段完成：`Jellyfin.TrueCache.Tool` 增加 `strm` 命令（按本地文件生成将来 `.strm` 的条目，写到 `--output`，`source.size` 取本地文件大小，不写 `source.modified`），以及 `--server-url`/`--api-key` 从服务器 API 读取系统与编码设置。用 ffmpeg 生成的样片验证：条目放进媒体库目录后 `validate` 通过；导入的设置不带服务器本机的路径（缓存、元数据、转码临时目录、ffmpeg），`--server-config` 同样处理。Release 构建 0 警告。
-- 下一步：第 6b 阶段（Worker）。
+- 2026-10-22：第 6b 阶段完成（`Jellyfin.HLS.Worker` 的 `main`，分四个功能分支）：6b1 引擎库与无头 `run`、`check`（服务器客户端、任务执行与心跳、输入缓存、识别、编码、上传、本地数据库）；6b2 添加媒体（S3 与直接放入媒体库、`.strm` 与 TrueCache 条目、随添加的预编码）；6b3 Avalonia 桌面程序；6b4 发布包（win-x64、linux-x64、linux-arm64，TrueCache 工具随包发布）与 systemd 部署脚本，README 重写。与第六节的差别已写回：`.strm` 以去掉扩展名的文件名命名，本地数据库只记添加过的媒体。
+- 2026-10-22：第 7 阶段完成（jellyfin-web 的 `feature/hls`）：7a 播放器的版本菜单（切换源时保留音轨、字幕，SyncPlay 中不提供，多段视频切换后排入其余部分）；7b「HLS 预编码」管理页（状态、设置、任务三个标签页）；7c 用户编辑页的「允许播放原片」。文案只加 en-us 和 zh-cn。
+- 2026-10-22：第 8 阶段完成：迁移 `MigrateDistributedHlsPlugin`（设置、原片用户、数据，根按 S3Storage 的映射转换）；迁移来的档位在第一次生成播放列表时从 `index.m3u8` 读取并记下各段时长；`PluginManager` 不再加载 DistributedHls。Release 构建 0 警告；Server 46 个、Api 173 个测试通过，Server.Implementations 除 2 个本地化测试（系统语言为中文）外全部通过。文档写入 `HLS.md`，补充 `S3.md`、`TRUE_CACHE.md`，本文件随之删除。
