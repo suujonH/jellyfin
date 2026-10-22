@@ -1,14 +1,32 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Data;
+using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.MediaEncoding.Hls.Published;
 using Jellyfin.Server.Implementations.Hls;
+using MediaBrowser.Common.Net;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Hls;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Model.Configuration;
+using MediaBrowser.Model.Dlna;
+using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.Hls;
+using MediaBrowser.Model.MediaInfo;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Xunit;
@@ -18,6 +36,9 @@ namespace Jellyfin.Server.Implementations.Tests.Hls;
 
 public sealed class HlsPlaybackServiceTests : IDisposable
 {
+    private const string ArchivedTarget = "s3://archive/Film.mkv";
+
+    private readonly DefaultHttpContext _httpContext = new();
     private HlsTestEnvironment? _environment;
 
     private static CancellationToken CancellationToken => TestContext.Current.CancellationToken;
@@ -244,7 +265,264 @@ public sealed class HlsPlaybackServiceTests : IDisposable
         Assert.Null(service.GetFile(item, HlsRenditionKind.Video, 1080, Attempt(plan, "v1080"), "init.mp4"));
     }
 
-    private (HlsTestEnvironment Environment, HlsPlaybackService Service) Create(bool isPublic = false)
+    [Fact]
+    public async Task ArrangeMediaSources_Published_ListsAutoTheOriginalAndTheQualitiesFromTheHighestDown()
+    {
+        var (environment, service) = Create();
+        var (item, _) = await PublishAsync(environment);
+        environment.Save(new HlsOptions { Enabled = true, Qualities = Qualities, AllowOriginal = true });
+
+        var sources = service.ArrangeMediaSources(new Movie { Id = item }, [Original(item)], CreateUser(originals: true));
+
+        Assert.Equal(["HlsSourceAuto", "HlsSourceOriginal (1080p 24fps)", "1080p", "720p"], sources.Select(s => s.Name));
+        Assert.Equal([0, null, 1080, 720], sources.Select(s => service.GetQuality(item, s.Id)));
+        var auto = sources[0];
+        Assert.Equal(MediaProtocol.Http, auto.Protocol);
+        Assert.False(auto.SupportsDirectPlay);
+        Assert.True(auto.SupportsTranscoding);
+        Assert.Equal(MediaStreamProtocol.hls, auto.TranscodingSubProtocol);
+        Assert.Equal("/HlsPlayback/Versions/" + auto.Id + "/master.m3u8", auto.Path);
+        Assert.Equal(1, auto.DefaultAudioStreamIndex);
+        Assert.Equal(1080, auto.VideoStream.Height);
+        var subtitle = Assert.Single(auto.MediaStreams, s => s.Type == MediaStreamType.Subtitle);
+        Assert.Equal(2, subtitle.Index);
+        Assert.False(subtitle.IsExternal);
+        Assert.Equal(SubtitleDeliveryMethod.External, subtitle.DeliveryMethod);
+    }
+
+    [Fact]
+    public async Task ArrangeMediaSources_OriginalNotAllowed_ListsOnlyTheHls()
+    {
+        var (environment, service) = Create();
+        var (item, _) = await PublishAsync(environment);
+
+        // The original is not allowed at all, whatever the user may do.
+        Assert.Equal(
+            ["HlsSourceAuto", "1080p", "720p"],
+            service.ArrangeMediaSources(new Movie { Id = item }, [Original(item)], CreateUser(originals: true)).Select(s => s.Name));
+
+        // Allowed, but the user may not and the request is not from the local network.
+        environment.Save(new HlsOptions { Enabled = true, Qualities = Qualities, AllowOriginal = true, AllowLocalOriginal = true });
+        Assert.Equal(3, service.ArrangeMediaSources(new Movie { Id = item }, [Original(item)], CreateUser()).Count);
+        Assert.False(service.IsOriginalAllowed(item, CreateUser()));
+    }
+
+    [Fact]
+    public async Task ArrangeMediaSources_LocalRequest_HasTheOriginalWhenLocalOriginalsAreAllowed()
+    {
+        var (environment, service) = Create(isLocal: true);
+        var (item, _) = await PublishAsync(environment);
+        environment.Save(new HlsOptions { Enabled = true, Qualities = Qualities, AllowOriginal = true });
+        Assert.Equal(3, service.ArrangeMediaSources(new Movie { Id = item }, [Original(item)], CreateUser()).Count);
+
+        environment.Save(new HlsOptions { Enabled = true, Qualities = Qualities, AllowOriginal = true, AllowLocalOriginal = true });
+        Assert.Equal(4, service.ArrangeMediaSources(new Movie { Id = item }, [Original(item)], CreateUser()).Count);
+        Assert.True(service.IsOriginalAllowed(item, null));
+    }
+
+    [Fact]
+    public async Task ArrangeMediaSources_ApiKey_AlwaysHasTheOriginal()
+    {
+        var (environment, service) = Create();
+        var (item, _) = await PublishAsync(environment);
+        _httpContext.User = new ClaimsPrincipal(new ClaimsIdentity([new Claim("Jellyfin-IsApiKey", "True")], "Custom"));
+
+        Assert.Equal(4, service.ArrangeMediaSources(new Movie { Id = item }, [Original(item)], CreateUser()).Count);
+        Assert.True(service.IsOriginalAllowed(item, null));
+    }
+
+    [Fact]
+    public async Task ArrangeMediaSources_SeveralOriginals_AreNamedApartAndAnArchivedOneIsLeftOut()
+    {
+        var (environment, service) = Create();
+        var (item, _) = await PublishAsync(environment);
+        environment.Save(new HlsOptions { Enabled = true, Qualities = Qualities, AllowOriginal = true });
+        var archived = Original(Guid.NewGuid(), "Archived");
+        archived.ShortcutTarget = ArchivedTarget;
+
+        var sources = service.ArrangeMediaSources(
+            new Movie { Id = item },
+            [Original(item, "Director's Cut"), Original(Guid.NewGuid(), "Theatrical", 1280, 720), archived],
+            CreateUser(originals: true));
+
+        Assert.Equal(
+            ["HlsSourceAuto", "HlsSourceOriginal (1080p 24fps) · Director's Cut", "HlsSourceOriginal (720p 24fps) · Theatrical", "1080p", "720p"],
+            sources.Select(s => s.Name));
+    }
+
+    [Fact]
+    public async Task ArrangeMediaSources_OriginalNotAllowed_KeepsAnUnpublishedAlternateVersion()
+    {
+        var (environment, service) = Create();
+        var (item, _) = await PublishAsync(environment);
+        var alternate = Guid.NewGuid();
+
+        var sources = service.ArrangeMediaSources(new Movie { Id = item }, [Original(item), Original(alternate, "Theatrical")], CreateUser());
+
+        Assert.Equal([null, alternate.ToString("N"), null, null], sources.Select(s => service.GetQuality(item, s.Id) is null ? s.Id : null));
+        Assert.Equal("HlsSourceOriginal (1080p 24fps)", sources[1].Name);
+        Assert.True(service.IsOriginalAllowed(alternate, CreateUser()));
+    }
+
+    [Fact]
+    public async Task ArrangeMediaSources_Tracks_KeepTheDispositionsOfTheOriginal()
+    {
+        var (environment, service) = Create();
+        var (item, _) = await PublishAsync(environment);
+        var original = Original(item);
+        original.MediaStreams =
+        [
+            .. original.MediaStreams,
+            new MediaStream { Index = 1, Type = MediaStreamType.Audio, IsOriginal = true },
+            new MediaStream { Index = 2, Type = MediaStreamType.Subtitle, IsForced = true }
+        ];
+
+        var sources = service.ArrangeMediaSources(new Movie { Id = item }, [original], CreateUser());
+
+        Assert.All(sources, s => Assert.True(Assert.Single(s.MediaStreams, m => m.Type == MediaStreamType.Subtitle).IsForced));
+        Assert.All(sources, s => Assert.True(Assert.Single(s.MediaStreams, m => m.Type == MediaStreamType.Audio).IsOriginal));
+        Assert.False(Assert.Single(service.ArrangeMediaSources(new Movie { Id = item }, [], CreateUser())[0].MediaStreams, m => m.Type == MediaStreamType.Subtitle).IsForced);
+    }
+
+    [Fact]
+    public async Task ArrangeMediaSources_ResumedAlternateVersion_StaysFirst()
+    {
+        var (environment, service) = Create();
+        var (item, _) = await PublishAsync(environment);
+        var alternate = Guid.NewGuid();
+
+        var sources = service.ArrangeMediaSources(new Movie { Id = item }, [Original(alternate), Original(item)], CreateUser());
+
+        Assert.Equal(alternate.ToString("N"), sources[0].Id);
+        Assert.Equal(0, service.GetQuality(item, sources[1].Id));
+        Assert.Equal(4, sources.Count);
+    }
+
+    [Fact]
+    public async Task ArrangeMediaSources_UserMayNotPlayMedia_IsEmpty()
+    {
+        var (environment, service) = Create();
+        var (item, _) = await PublishAsync(environment);
+        var user = CreateUser(originals: true);
+        user.SetPermission(PermissionKind.EnableMediaPlayback, false);
+
+        Assert.Empty(service.ArrangeMediaSources(new Movie { Id = item }, [Original(item)], user));
+    }
+
+    [Fact]
+    public async Task ArrangeMediaSources_NotPublished_KeepsTheOriginalsButPublishedAlternateVersions()
+    {
+        var (environment, service) = Create();
+        var (published, _) = await PublishAsync(environment);
+        var item = Guid.NewGuid();
+        var other = Guid.NewGuid();
+        var archived = Original(other);
+        archived.ShortcutTarget = ArchivedTarget;
+        var sources = new[] { Original(item), Original(published), archived };
+
+        // An archive is left to the existing checks; only the published alternate version follows the rules of pre-encoded HLS.
+        Assert.Equal(
+            [item.ToString("N"), other.ToString("N")],
+            service.ArrangeMediaSources(new Movie { Id = item }, sources, CreateUser()).Select(s => s.Id));
+        Assert.True(service.IsOriginalAllowed(item, null));
+        Assert.False(service.IsPublished(item));
+    }
+
+    [Fact]
+    public async Task GetQuality_KnowsOnlyThePublishedSourcesOfTheItem()
+    {
+        var (environment, service) = Create();
+        var (item, _) = await PublishAsync(environment);
+        var sources = service.ArrangeMediaSources(new Movie { Id = item }, [], CreateUser());
+
+        Assert.Equal(0, service.GetQuality(item, sources[0].Id.ToUpperInvariant()));
+        Assert.Null(service.GetQuality(item, item.ToString("N")));
+        Assert.Null(service.GetQuality(item, null));
+        Assert.Null(service.GetQuality(Guid.NewGuid(), sources[0].Id));
+
+        environment.Save(new HlsOptions { Qualities = Qualities });
+        Assert.Null(service.GetQuality(item, sources[0].Id));
+    }
+
+    [Fact]
+    public async Task PrepareForPlayback_PlaysThePlaylistOfANewGrant()
+    {
+        var (environment, service) = Create();
+        var (item, plan) = await PublishAsync(environment);
+        var source = service.ArrangeMediaSources(new Movie { Id = item }, [], CreateUser())[2];
+
+        Assert.True(service.PrepareForPlayback(item, source, "session", null, null, "http://server/jellyfin/"));
+
+        Assert.False(source.SupportsDirectPlay);
+        Assert.False(source.SupportsDirectStream);
+        Assert.True(source.SupportsTranscoding);
+        var url = source.TranscodingUrl.Split('?');
+        Assert.Equal("PlaySessionId=session&MediaSourceId=" + source.Id, url[1]);
+        var path = url[0].Split('/');
+        Assert.Equal([string.Empty, "HlsPlayback"], path[..2]);
+        Assert.Equal(item, service.VerifyGrant(path[2]));
+        Assert.Equal("720p-a1.m3u8", path[3]);
+        Assert.Equal("http://server/jellyfin" + source.TranscodingUrl, source.Path);
+        var subtitle = Assert.Single(source.MediaStreams, s => s.Type == MediaStreamType.Subtitle);
+        Assert.Equal("/HlsPlayback/" + path[2] + "/r/subtitles/2/" + Attempt(plan, "s2") + "/subtitle.vtt", subtitle.DeliveryUrl);
+        Assert.Equal(SubtitleDeliveryMethod.External, subtitle.DeliveryMethod);
+        Assert.False(subtitle.IsExternalUrl);
+
+        // A track that is not published plays every track and selects nothing.
+        Assert.True(service.PrepareForPlayback(item, source, "session", 5, 3, "http://server"));
+        Assert.Contains("/720p.m3u8?", source.TranscodingUrl, StringComparison.Ordinal);
+        Assert.Equal(1, source.DefaultAudioStreamIndex);
+        Assert.Equal(-1, source.DefaultSubtitleStreamIndex);
+
+        // The requested tracks are selected.
+        Assert.True(service.PrepareForPlayback(item, source, "session", 1, 2, "http://server"));
+        Assert.Equal(2, source.DefaultSubtitleStreamIndex);
+        Assert.Contains("/720p-a1.m3u8?", source.TranscodingUrl, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PrepareForPlayback_SourceThatCannotBePlayed_IsRefused()
+    {
+        var (environment, service) = Create();
+        var (item, _) = await PublishAsync(environment);
+        var source = service.ArrangeMediaSources(new Movie { Id = item }, [], CreateUser())[0];
+
+        Assert.False(service.PrepareForPlayback(item, Original(item), "session", null, null, "http://server"));
+        environment.Save(new HlsOptions { Qualities = Qualities });
+        Assert.False(service.PrepareForPlayback(item, source, "session", null, null, "http://server"));
+        Assert.Null(source.TranscodingUrl);
+    }
+
+    [Fact]
+    public async Task PrefersOriginal_OnlyForALocalRequestThatMayPlayIt()
+    {
+        var (environment, service) = Create();
+        var (item, _) = await PublishAsync(environment);
+        environment.Save(new HlsOptions { Enabled = true, Qualities = Qualities, AllowOriginal = true, AllowLocalOriginal = true });
+
+        Assert.False(service.PrefersOriginal(new Movie { Id = item, Path = "/media/Film.mkv" }, CreateUser(originals: true)));
+        Assert.False(service.PrefersOriginal(new Movie { Id = Guid.NewGuid(), Path = "/media/Film.mkv" }, CreateUser(originals: true)));
+    }
+
+    private static User CreateUser(bool originals = false)
+    {
+        var user = new User("user", "default", "default");
+        user.AddDefaultPermissions();
+        user.SetPermission(PermissionKind.EnableOriginalPlayback, originals);
+        return user;
+    }
+
+    // An original source of an item, with a 24 fps video stream.
+    private static MediaSourceInfo Original(Guid item, string name = "", int width = 1920, int height = 1080)
+        => new()
+        {
+            Id = item.ToString("N"),
+            Name = name,
+            Protocol = MediaProtocol.File,
+            MediaStreams = [new MediaStream { Index = 0, Type = MediaStreamType.Video, Width = width, Height = height, RealFrameRate = 23.976f }]
+        };
+
+    private (HlsTestEnvironment Environment, HlsPlaybackService Service) Create(bool isPublic = false, bool isLocal = false)
     {
         IHlsStoreFactory? factory = null;
         if (isPublic)
@@ -255,6 +533,18 @@ public sealed class HlsPlaybackServiceTests : IDisposable
             factory = mock.Object;
         }
 
+        // The ids of the sources stand for those of the library, which hashes the path the same way every time.
+        var libraryManager = new Mock<ILibraryManager>();
+        libraryManager.Setup(l => l.GetNewItemId(It.IsAny<string>(), It.IsAny<Type>()))
+            .Returns<string, Type>((key, _) => new Guid(MD5.HashData(Encoding.UTF8.GetBytes(key))));
+        var localization = new Mock<ILocalizationManager>();
+        localization.Setup(l => l.GetLocalizedString(It.IsAny<string>())).Returns<string>(phrase => phrase);
+        var networkManager = new Mock<INetworkManager>();
+        networkManager.Setup(n => n.IsInLocalNetwork(It.IsAny<IPAddress>())).Returns(isLocal);
+        var networkStorage = new Mock<INetworkStorageManager>();
+        networkStorage.Setup(n => n.IsArchived(ArchivedTarget)).Returns(true);
+        _httpContext.Connection.RemoteIpAddress = IPAddress.Parse("203.0.113.1");
+
         _environment = new HlsTestEnvironment(factory);
         var service = new HlsPlaybackService(
             _environment.Settings,
@@ -262,6 +552,11 @@ public sealed class HlsPlaybackServiceTests : IDisposable
             _environment.Store,
             _environment.StoreFactory,
             _environment.ConfigurationManager,
+            libraryManager.Object,
+            localization.Object,
+            networkManager.Object,
+            networkStorage.Object,
+            new HttpContextAccessor { HttpContext = _httpContext },
             NullLogger<HlsPlaybackService>.Instance);
         return (_environment, service);
     }

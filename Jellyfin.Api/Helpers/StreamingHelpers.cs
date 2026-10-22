@@ -12,6 +12,7 @@ using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Hls;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Net;
@@ -114,6 +115,13 @@ public static class StreamingHelpers
         var item = libraryManager.GetItemById<BaseItem>(streamingRequest.Id)
             ?? throw new ResourceNotFoundException();
 
+        // Pre-encoded HLS is played from its own playlists.
+        var hlsPlayback = httpContext.RequestServices?.GetService<IHlsPlaybackService>();
+        if (hlsPlayback?.GetQuality(item.Id, streamingRequest.MediaSourceId) is not null)
+        {
+            throw new ResourceNotFoundException("A source of pre-encoded HLS is played from its playlists.");
+        }
+
         state.IsInputVideo = item.MediaType == MediaType.Video;
 
         MediaSourceInfo? mediaSource = null;
@@ -171,6 +179,14 @@ public static class StreamingHelpers
             {
                 streamingRequest.VideoBitRate = Math.Min(streamingRequest.VideoBitRate.Value, mediaSource.FallbackMaxStreamingBitrate.Value);
             }
+        }
+
+        // An original, the item or an alternate version, is played only as the rules of pre-encoded HLS for its own item allow: the source
+        // that is played, which a running transcoding job decides whatever the request names.
+        var playedId = Guid.TryParse(mediaSource?.Id, out var playedSourceId) && !playedSourceId.IsEmpty() ? playedSourceId : item.Id;
+        if (hlsPlayback?.IsOriginalAllowed(playedId, state.User) == false)
+        {
+            throw new SecurityException("The original of pre-encoded HLS may not be played.");
         }
 
         // An archive is only kept: the server neither streams nor transcodes it for clients.

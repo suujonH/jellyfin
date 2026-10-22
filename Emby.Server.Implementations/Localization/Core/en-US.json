@@ -18,6 +18,8 @@
     "HeaderLiveTV": "Live TV",
     "HeaderNextUp": "Next Up",
     "HearingImpaired": "Hearing Impaired",
+    "HlsSourceAuto": "Auto",
+    "HlsSourceOriginal": "Original",
     "HomeVideos": "Home Videos",
     "Inherit": "Inherit",
     "LabelIpAddressValue": "IP address: {0}",

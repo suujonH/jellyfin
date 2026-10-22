@@ -24,6 +24,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
+using MediaBrowser.Controller.Hls;
 using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
@@ -58,6 +59,7 @@ public class LibraryController : BaseJellyfinApiController
     private readonly ILibraryMonitor _libraryMonitor;
     private readonly ILogger<LibraryController> _logger;
     private readonly IServerConfigurationManager _serverConfigurationManager;
+    private readonly IHlsPlaybackService _hlsPlayback;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="LibraryController"/> class.
@@ -73,6 +75,7 @@ public class LibraryController : BaseJellyfinApiController
     /// <param name="libraryMonitor">Instance of the <see cref="ILibraryMonitor"/> interface.</param>
     /// <param name="logger">Instance of the <see cref="ILogger{LibraryController}"/> interface.</param>
     /// <param name="serverConfigurationManager">Instance of the <see cref="IServerConfigurationManager"/> interface.</param>
+    /// <param name="hlsPlayback">Instance of the <see cref="IHlsPlaybackService"/> interface.</param>
     public LibraryController(
         IProviderManager providerManager,
         ISimilarItemsManager similarItemsManager,
@@ -84,7 +87,8 @@ public class LibraryController : BaseJellyfinApiController
         ILocalizationManager localization,
         ILibraryMonitor libraryMonitor,
         ILogger<LibraryController> logger,
-        IServerConfigurationManager serverConfigurationManager)
+        IServerConfigurationManager serverConfigurationManager,
+        IHlsPlaybackService hlsPlayback)
     {
         _providerManager = providerManager;
         _similarItemsManager = similarItemsManager;
@@ -97,6 +101,7 @@ public class LibraryController : BaseJellyfinApiController
         _libraryMonitor = libraryMonitor;
         _logger = logger;
         _serverConfigurationManager = serverConfigurationManager;
+        _hlsPlayback = hlsPlayback;
     }
 
     /// <summary>
@@ -109,14 +114,22 @@ public class LibraryController : BaseJellyfinApiController
     [HttpGet("Items/{itemId}/File")]
     [Authorize]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesFile("video/*", "audio/*")]
     public ActionResult GetFile([FromRoute, Required] Guid itemId)
     {
-        var item = _libraryManager.GetItemById<BaseItem>(itemId, User.GetUserId());
+        var userId = User.GetUserId();
+        var item = _libraryManager.GetItemById<BaseItem>(itemId, userId);
         if (item is null)
         {
             return NotFound();
+        }
+
+        // The original of pre-encoded HLS is sent only as its rules allow.
+        if (!_hlsPlayback.IsOriginalAllowed(item.Id, userId.IsEmpty() ? null : _userManager.GetUserById(userId)))
+        {
+            return Forbid();
         }
 
         var filePath = item.Path;
@@ -669,6 +682,7 @@ public class LibraryController : BaseJellyfinApiController
     [HttpGet("Items/{itemId}/Download")]
     [Authorize(Policy = Policies.Download)]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesFile("video/*", "audio/*")]
     public async Task<ActionResult> GetDownload([FromRoute, Required] Guid itemId)
@@ -681,6 +695,12 @@ public class LibraryController : BaseJellyfinApiController
         if (item is null)
         {
             return NotFound();
+        }
+
+        // The original of pre-encoded HLS is sent only as its rules allow.
+        if (!_hlsPlayback.IsOriginalAllowed(item.Id, user))
+        {
+            return Forbid();
         }
 
         if (user is not null)

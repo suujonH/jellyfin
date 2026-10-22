@@ -24,6 +24,7 @@ using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
+using MediaBrowser.Controller.Hls;
 using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
@@ -60,6 +61,7 @@ namespace Emby.Server.Implementations.Library
         private readonly IMediaStreamRepository _mediaStreamRepository;
         private readonly IMediaAttachmentRepository _mediaAttachmentRepository;
         private readonly ITrueCacheService _trueCache;
+        private readonly IHlsPlaybackService _hlsPlayback;
         private readonly ConcurrentDictionary<string, ILiveStream> _openStreams = new ConcurrentDictionary<string, ILiveStream>(StringComparer.OrdinalIgnoreCase);
         private readonly AsyncNonKeyedLocker _liveStreamLocker = new(1);
         private readonly JsonSerializerOptions _jsonOptions = JsonDefaults.Options;
@@ -80,7 +82,8 @@ namespace Emby.Server.Implementations.Library
             IDirectoryService directoryService,
             IMediaStreamRepository mediaStreamRepository,
             IMediaAttachmentRepository mediaAttachmentRepository,
-            ITrueCacheService trueCache)
+            ITrueCacheService trueCache,
+            IHlsPlaybackService hlsPlayback)
         {
             _appHost = appHost;
             _itemRepo = itemRepo;
@@ -96,6 +99,7 @@ namespace Emby.Server.Implementations.Library
             _mediaStreamRepository = mediaStreamRepository;
             _mediaAttachmentRepository = mediaAttachmentRepository;
             _trueCache = trueCache;
+            _hlsPlayback = hlsPlayback;
         }
 
         public void AddParts(IEnumerable<IMediaSourceProvider> providers)
@@ -182,6 +186,12 @@ namespace Emby.Server.Implementations.Library
         {
             var mediaSources = GetStaticMediaSources(item, enablePathSubstitution, user);
             ResolveSymlinkPaths(mediaSources, enablePathSubstitution);
+
+            // The sources of pre-encoded HLS are complete as they are: nothing is probed or added, and their order is kept.
+            if (user is not null && item is Video && _hlsPlayback.IsPublished(item.Id))
+            {
+                return mediaSources;
+            }
 
             // If file is strm or main media stream is missing, force a metadata refresh with remote probing.
             // A declared resource already carries everything its __true_cache__ entry holds; probing again changes nothing.
@@ -424,6 +434,13 @@ namespace Emby.Server.Implementations.Library
                 }
 
                 sources = SetAlternateVersionResumeStates(item, sources, user);
+
+                // Pre-encoded HLS adds its sources, and the originals follow its rules.
+                sources = _hlsPlayback.ArrangeMediaSources(item, sources, user);
+                foreach (var source in sources.Where(s => _hlsPlayback.GetQuality(item.Id, s.Id) is not null))
+                {
+                    SetDefaultAudioAndSubtitleStreamIndices(item, source, user);
+                }
             }
 
             return sources;
@@ -566,13 +583,13 @@ namespace Emby.Server.Implementations.Library
                     var mediaLanguageOriginal = source.MediaStreams[originalIndex].Language;
                     if (NormalizeLanguage(mediaLanguageOriginal).Contains(NormalizeLanguage(originalLanguage).FirstOrDefault()))
                     {
-                        source.DefaultAudioStreamIndex = originalIndex;
+                        source.DefaultAudioStreamIndex = source.MediaStreams[originalIndex].Index;
                         return;
                     }
                 }
                 else if (originalIndex != -1)
                 {
-                    source.DefaultAudioStreamIndex = originalIndex;
+                    source.DefaultAudioStreamIndex = source.MediaStreams[originalIndex].Index;
                     return;
                 }
             }

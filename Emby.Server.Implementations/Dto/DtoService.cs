@@ -1491,6 +1491,12 @@ namespace Emby.Server.Implementations.Dto
                             mediaStreams = dto.MediaSources.Where(i => string.Equals(i.Id, id, StringComparison.OrdinalIgnoreCase))
                                 .SelectMany(i => i.MediaStreams)
                                 .ToArray();
+
+                            // The sources of pre-encoded HLS may leave out the original of the item; its streams still describe it.
+                            if (!dto.MediaSources.Any(i => string.Equals(i.Id, id, StringComparison.OrdinalIgnoreCase)))
+                            {
+                                mediaStreams = _mediaSourceManager.GetStaticMediaSources(item, true)[0].MediaStreams.ToArray();
+                            }
                         }
                     }
                     else

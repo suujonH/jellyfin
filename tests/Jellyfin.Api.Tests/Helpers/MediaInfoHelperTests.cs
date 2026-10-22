@@ -11,6 +11,7 @@ using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Devices;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
+using MediaBrowser.Controller.Hls;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.NetworkStorage;
@@ -48,7 +49,8 @@ namespace Jellyfin.Api.Tests.Helpers
                 Mock.Of<INetworkManager>(),
                 Mock.Of<IDeviceManager>(),
                 appHost ?? Mock.Of<IServerApplicationHost>(),
-                networkStorage ?? Mock.Of<INetworkStorageManager>());
+                networkStorage ?? Mock.Of<INetworkStorageManager>(),
+                Mock.Of<IHlsPlaybackService>());
         }
 
         [Fact]
