@@ -14,6 +14,8 @@
     "HeaderFavoriteShows": "收藏的节目",
     "HeaderLiveTV": "电视直播",
     "HeaderNextUp": "接下来播放",
+    "HlsSourceAuto": "自动",
+    "HlsSourceOriginal": "源文件",
     "HomeVideos": "家庭视频",
     "Inherit": "继承",
     "LabelIpAddressValue": "IP 地址：{0}",

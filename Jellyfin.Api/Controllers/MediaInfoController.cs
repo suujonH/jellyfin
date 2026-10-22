@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.ComponentModel.DataAnnotations;
+using System.Globalization;
 using System.Linq;
 using System.Net.Mime;
 using System.Threading.Tasks;
@@ -8,11 +9,16 @@ using Jellyfin.Api.Attributes;
 using Jellyfin.Api.Extensions;
 using Jellyfin.Api.Helpers;
 using Jellyfin.Api.Models.MediaInfoDtos;
+using Jellyfin.Data;
+using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Extensions;
 using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller.Devices;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Hls;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Dlna;
+using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.MediaInfo;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -35,6 +41,7 @@ public class MediaInfoController : BaseJellyfinApiController
     private readonly ILogger<MediaInfoController> _logger;
     private readonly MediaInfoHelper _mediaInfoHelper;
     private readonly IUserManager _userManager;
+    private readonly IHlsPlaybackService _hlsPlayback;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MediaInfoController"/> class.
@@ -45,13 +52,15 @@ public class MediaInfoController : BaseJellyfinApiController
     /// <param name="logger">Instance of the <see cref="ILogger{MediaInfoController}"/> interface.</param>
     /// <param name="mediaInfoHelper">Instance of the <see cref="MediaInfoHelper"/>.</param>
     /// <param name="userManager">Instance of the <see cref="IUserManager"/> interface..</param>
+    /// <param name="hlsPlayback">Instance of the <see cref="IHlsPlaybackService"/> interface.</param>
     public MediaInfoController(
         IMediaSourceManager mediaSourceManager,
         IDeviceManager deviceManager,
         ILibraryManager libraryManager,
         ILogger<MediaInfoController> logger,
         MediaInfoHelper mediaInfoHelper,
-        IUserManager userManager)
+        IUserManager userManager,
+        IHlsPlaybackService hlsPlayback)
     {
         _mediaSourceManager = mediaSourceManager;
         _deviceManager = deviceManager;
@@ -59,6 +68,7 @@ public class MediaInfoController : BaseJellyfinApiController
         _logger = logger;
         _mediaInfoHelper = mediaInfoHelper;
         _userManager = userManager;
+        _hlsPlayback = hlsPlayback;
     }
 
     /// <summary>
@@ -174,47 +184,28 @@ public class MediaInfoController : BaseJellyfinApiController
             return NotFound();
         }
 
-        var info = await _mediaInfoHelper.GetPlaybackInfo(
-                item,
-                user,
-                Request,
-                mediaSourceId,
-                liveStreamId)
-            .ConfigureAwait(false);
+        // "Auto" of pre-encoded HLS plays the original, with the requested tracks, when it is preferred and this device can play it.
+        var prefersOriginal = _hlsPlayback.PrefersOriginal(item, user);
+        var autoOriginal = prefersOriginal && _hlsPlayback.GetQuality(item.Id, mediaSourceId) == 0;
+        var info = await GetDevicePlaybackInfo(autoOriginal ? item.Id.ToString("N", CultureInfo.InvariantCulture) : mediaSourceId).ConfigureAwait(false);
+        if (autoOriginal && (info.MediaSources.Count == 0 || !CanAutoPlayOriginal(info.MediaSources[0])))
+        {
+            info = await GetDevicePlaybackInfo(mediaSourceId).ConfigureAwait(false);
+        }
+        else if (prefersOriginal
+            && string.IsNullOrWhiteSpace(mediaSourceId)
+            && info.MediaSources.Count > 0
+            && _hlsPlayback.GetQuality(item.Id, info.MediaSources[0].Id) == 0
+            && info.MediaSources.FirstOrDefault(s => string.Equals(s.Id, item.Id.ToString("N", CultureInfo.InvariantCulture), StringComparison.OrdinalIgnoreCase))
+                is { } original
+            && CanAutoPlayOriginal(original))
+        {
+            info.MediaSources = [original, .. info.MediaSources.Where(s => s != original)];
+        }
 
         if (info.ErrorCode is not null)
         {
             return info;
-        }
-
-        if (profile is not null)
-        {
-            // set device specific data
-            foreach (var mediaSource in info.MediaSources)
-            {
-                _mediaInfoHelper.SetDeviceSpecificData(
-                    item,
-                    mediaSource,
-                    profile,
-                    User,
-                    maxStreamingBitrate ?? profile.MaxStreamingBitrate,
-                    startTimeTicks ?? 0,
-                    mediaSourceId ?? string.Empty,
-                    audioStreamIndex,
-                    subtitleStreamIndex,
-                    maxAudioChannels,
-                    info.PlaySessionId!,
-                    userId ?? Guid.Empty,
-                    enableDirectPlay.Value,
-                    enableDirectStream.Value,
-                    enableTranscoding.Value,
-                    allowVideoStreamCopy.Value,
-                    allowAudioStreamCopy.Value,
-                    playbackInfoDto?.AlwaysBurnInSubtitleWhenTranscoding ?? false,
-                    Request.HttpContext.GetNormalizedRemoteIP());
-            }
-
-            _mediaInfoHelper.SortMediaSources(info, maxStreamingBitrate, item.Id);
         }
 
         if (autoOpenLiveStream.Value)
@@ -247,6 +238,69 @@ public class MediaInfoController : BaseJellyfinApiController
         }
 
         return info;
+
+        // "Auto" never relies on a conversion the user may not have done: the original is played directly or the user may transcode
+        // video; otherwise the HLS plays.
+        bool CanAutoPlayOriginal(MediaSourceInfo source)
+            => source.SupportsDirectPlay || user?.HasPermission(PermissionKind.EnableVideoPlaybackTranscoding) != false;
+
+        async Task<PlaybackInfoResponse> GetDevicePlaybackInfo(string? sourceId)
+        {
+            var info = await _mediaInfoHelper.GetPlaybackInfo(
+                    item,
+                    user,
+                    Request,
+                    sourceId,
+                    liveStreamId,
+                    audioStreamIndex,
+                    subtitleStreamIndex)
+                .ConfigureAwait(false);
+
+            if (info.ErrorCode is not null || profile is null)
+            {
+                return info;
+            }
+
+            // set device specific data
+            foreach (var mediaSource in info.MediaSources)
+            {
+                _mediaInfoHelper.SetDeviceSpecificData(
+                    item,
+                    mediaSource,
+                    profile,
+                    User,
+                    maxStreamingBitrate ?? profile.MaxStreamingBitrate,
+                    startTimeTicks ?? 0,
+                    sourceId ?? string.Empty,
+                    audioStreamIndex,
+                    subtitleStreamIndex,
+                    maxAudioChannels,
+                    info.PlaySessionId!,
+                    userId ?? Guid.Empty,
+                    enableDirectPlay.Value,
+                    enableDirectStream.Value,
+                    enableTranscoding.Value,
+                    allowVideoStreamCopy.Value,
+                    allowAudioStreamCopy.Value,
+                    playbackInfoDto?.AlwaysBurnInSubtitleWhenTranscoding ?? false,
+                    Request.HttpContext.GetNormalizedRemoteIP());
+            }
+
+            // Next to pre-encoded HLS, an original this device can neither play directly nor have transcoded is not offered.
+            if (_hlsPlayback.IsPublished(item.Id))
+            {
+                info.MediaSources = info.MediaSources
+                    .Where(s => _hlsPlayback.GetQuality(item.Id, s.Id) is not null || s.SupportsDirectPlay || !string.IsNullOrEmpty(s.TranscodingUrl))
+                    .ToArray();
+                if (info.MediaSources.Count == 0)
+                {
+                    info.ErrorCode = PlaybackErrorCode.NoCompatibleStream;
+                }
+            }
+
+            _mediaInfoHelper.SortMediaSources(info, maxStreamingBitrate, item.Id);
+            return info;
+        }
     }
 
     /// <summary>

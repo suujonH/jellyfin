@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using AutoFixture;
 using AutoFixture.AutoMoq;
 using Castle.Components.DictionaryAdapter;
@@ -10,6 +12,7 @@ using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
+using MediaBrowser.Controller.Hls;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Controller.MediaSegments;
@@ -28,6 +31,7 @@ namespace Jellyfin.Server.Implementations.Tests.Library
         private readonly MediaSourceManager _mediaSourceManager;
         private readonly Mock<IUserDataManager> _mockUserDataManager;
         private readonly Mock<ILocalizationManager> _mockLocalizationManager;
+        private readonly Mock<IHlsPlaybackService> _mockHlsPlayback = new();
         private Video _item;
         private User _user;
 
@@ -42,6 +46,11 @@ namespace Jellyfin.Server.Implementations.Tests.Library
             _mockLocalizationManager = fixture.Create<Mock<ILocalizationManager>>();
             _mockLocalizationManager.Setup(m => m.FindLanguageInfo(It.IsAny<string>())).Returns((string s) => string.IsNullOrEmpty(s) ? null : new CultureDto(s, s, s, new EditableList<string> { s }));
             fixture.Inject(_mockLocalizationManager.Object);
+
+            // No pre-encoded HLS: the sources are those of the items.
+            _mockHlsPlayback.Setup(h => h.ArrangeMediaSources(It.IsAny<BaseItem>(), It.IsAny<IReadOnlyList<MediaSourceInfo>>(), It.IsAny<User>()))
+                .Returns<BaseItem, IReadOnlyList<MediaSourceInfo>, User>((_, sources, _) => sources);
+            fixture.Inject(_mockHlsPlayback.Object);
 
             _mediaSourceManager = fixture.Create<MediaSourceManager>();
 
@@ -219,6 +228,29 @@ namespace Jellyfin.Server.Implementations.Tests.Library
         }
 
         [Fact]
+        public void SetDefaultAudioStreamIndex_OriginalLanguage_SelectsTheStreamIndexOfTheOriginalTrack()
+        {
+            // The streams are not in index order, as in a source of pre-encoded HLS.
+            var mediaInfo = new MediaSourceInfo
+            {
+                MediaStreams = new MediaStream[]
+                {
+                    new() { Index = 1, Type = MediaStreamType.Video },
+                    new() { Index = 0, Type = MediaStreamType.Audio, Language = "jpn", IsOriginal = true },
+                    new() { Index = 2, Type = MediaStreamType.Audio, Language = "eng", IsDefault = true }
+                }
+            };
+
+            _user.AudioLanguagePreference = "OriginalLanguage";
+            _user.PlayDefaultAudioTrack = false;
+            _user.RememberAudioSelections = false;
+
+            _mediaSourceManager.SetDefaultAudioAndSubtitleStreamIndices(_item, mediaInfo, _user);
+
+            Assert.Equal(0, mediaInfo.DefaultAudioStreamIndex);
+        }
+
+        [Fact]
         public void GetStaticMediaSources_PrimaryQueried_DefaultsToMostRecentlyPlayedVersion()
         {
             var (primary, alt1, alt2) = SetupVersionGroup();
@@ -261,6 +293,24 @@ namespace Jellyfin.Server.Implementations.Tests.Library
             var sources = _mediaSourceManager.GetStaticMediaSources(primary, false, _user);
 
             Assert.Equal(primary.Id.ToString("N"), sources[0].Id);
+        }
+
+        [Fact]
+        public async Task GetPlaybackMediaSources_PublishedHls_KeepsTheArrangedSourcesAsTheyAre()
+        {
+            var (primary, _, _) = SetupVersionGroup();
+            SetupUserDataBatch([]);
+            var hls = new MediaSourceInfo { Id = "hls", Protocol = MediaProtocol.Http };
+            _mockHlsPlayback.Setup(h => h.IsPublished(primary.Id)).Returns(true);
+            _mockHlsPlayback.Setup(h => h.GetQuality(primary.Id, "hls")).Returns(0);
+            _mockHlsPlayback.Setup(h => h.ArrangeMediaSources(primary, It.IsAny<IReadOnlyList<MediaSourceInfo>>(), _user))
+                .Returns<BaseItem, IReadOnlyList<MediaSourceInfo>, User>((_, sources, _) => [hls, .. sources]);
+
+            // Neither probed (the versions have no video stream) nor sorted, which would put the files first.
+            var sources = await _mediaSourceManager.GetPlaybackMediaSources(primary, _user, true, false, CancellationToken.None);
+
+            Assert.Equal(["hls", primary.Id.ToString("N")], sources.Take(2).Select(s => s.Id));
+            Assert.Equal(4, sources.Count);
         }
 
         [Fact]

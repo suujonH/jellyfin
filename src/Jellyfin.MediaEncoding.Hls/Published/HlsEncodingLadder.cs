@@ -73,5 +73,26 @@ public static class HlsEncodingLadder
         return ladder;
     }
 
+    /// <summary>
+    /// Gets the quality a picture is named by, such as the 1080 of "1080p".
+    /// </summary>
+    /// <param name="width">The display width of the picture.</param>
+    /// <param name="height">The display height of the picture.</param>
+    /// <returns>The lowest quality whose box holds the picture, with 5% to spare as in <see cref="Select"/>; the highest for a larger picture.</returns>
+    public static int GetName(int width, int height)
+    {
+        // A portrait box is the landscape one turned.
+        var (longSide, shortSide) = width >= height ? (width, height) : (height, width);
+        foreach (var name in Heights.Reverse())
+        {
+            if (Even(name * 16.0 / 9) * 1.05 >= longSide && name * 1.05 >= shortSide)
+            {
+                return name;
+            }
+        }
+
+        return Heights[0];
+    }
+
     private static int Even(double x) => Math.Max(2, (int)Math.Round(x / 2, MidpointRounding.AwayFromZero) * 2);
 }

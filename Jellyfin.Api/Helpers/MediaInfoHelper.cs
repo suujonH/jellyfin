@@ -19,6 +19,7 @@ using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Devices;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
+using MediaBrowser.Controller.Hls;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.NetworkStorage;
@@ -48,6 +49,7 @@ public class MediaInfoHelper
     private readonly IDeviceManager _deviceManager;
     private readonly IServerApplicationHost _appHost;
     private readonly INetworkStorageManager _networkStorage;
+    private readonly IHlsPlaybackService _hlsPlayback;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MediaInfoHelper"/> class.
@@ -62,6 +64,7 @@ public class MediaInfoHelper
     /// <param name="deviceManager">Instance of the <see cref="IDeviceManager"/> interface.</param>
     /// <param name="appHost">Instance of the <see cref="IServerApplicationHost"/> interface.</param>
     /// <param name="networkStorage">Instance of the <see cref="INetworkStorageManager"/> interface.</param>
+    /// <param name="hlsPlayback">Instance of the <see cref="IHlsPlaybackService"/> interface.</param>
     public MediaInfoHelper(
         IUserManager userManager,
         ILibraryManager libraryManager,
@@ -72,7 +75,8 @@ public class MediaInfoHelper
         INetworkManager networkManager,
         IDeviceManager deviceManager,
         IServerApplicationHost appHost,
-        INetworkStorageManager networkStorage)
+        INetworkStorageManager networkStorage,
+        IHlsPlaybackService hlsPlayback)
     {
         _userManager = userManager;
         _libraryManager = libraryManager;
@@ -84,6 +88,7 @@ public class MediaInfoHelper
         _deviceManager = deviceManager;
         _appHost = appHost;
         _networkStorage = networkStorage;
+        _hlsPlayback = hlsPlayback;
     }
 
     /// <summary>
@@ -94,13 +99,17 @@ public class MediaInfoHelper
     /// <param name="request">The current <see cref="HttpRequest"/>.</param>
     /// <param name="mediaSourceId">Media source id.</param>
     /// <param name="liveStreamId">Live stream id.</param>
+    /// <param name="audioStreamIndex">The audio stream index, which a source of pre-encoded HLS plays.</param>
+    /// <param name="subtitleStreamIndex">The subtitle stream index, which a source of pre-encoded HLS selects.</param>
     /// <returns>A <see cref="Task"/> containing the <see cref="PlaybackInfoResponse"/>.</returns>
     public async Task<PlaybackInfoResponse> GetPlaybackInfo(
         BaseItem item,
         User? user,
         HttpRequest request,
         string? mediaSourceId = null,
-        string? liveStreamId = null)
+        string? liveStreamId = null,
+        int? audioStreamIndex = null,
+        int? subtitleStreamIndex = null)
     {
         var result = new PlaybackInfoResponse();
 
@@ -144,7 +153,19 @@ public class MediaInfoHelper
                 }
             }
 
-            result.PlaySessionId = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
+            var playSessionId = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
+            result.PlaySessionId = playSessionId;
+
+            // A source of pre-encoded HLS is played from its own playlists, under a grant for this playback.
+            var serverUrl = _appHost.GetSmartApiUrl(request);
+            result.MediaSources = result.MediaSources
+                .Where(s => _hlsPlayback.GetQuality(item.Id, s.Id) is null
+                    || _hlsPlayback.PrepareForPlayback(item.Id, s, playSessionId, audioStreamIndex, subtitleStreamIndex, serverUrl))
+                .ToArray();
+            if (result.MediaSources.Count == 0)
+            {
+                result.ErrorCode ??= PlaybackErrorCode.NoCompatibleStream;
+            }
         }
 
         return result;
@@ -215,6 +236,12 @@ public class MediaInfoHelper
         bool alwaysBurnInSubtitleWhenTranscoding,
         IPAddress ipAddress)
     {
+        // A source of pre-encoded HLS is played as GetPlaybackInfo prepared it, whatever the device supports.
+        if (_hlsPlayback.GetQuality(item.Id, mediaSource.Id) is not null)
+        {
+            return;
+        }
+
         // An archive stays unplayable whatever the device supports: no stream is negotiated for it.
         if (_networkStorage.IsArchived(mediaSource.ShortcutTarget))
         {
@@ -391,6 +418,12 @@ public class MediaInfoHelper
     /// <param name="preferredItemId">The id of the queried item, whose own media source must stay the default.</param>
     public void SortMediaSources(PlaybackInfoResponse result, long? maxBitrate, Guid preferredItemId = default)
     {
+        // The sources of pre-encoded HLS keep the order of the server.
+        if (!preferredItemId.IsEmpty() && _hlsPlayback.IsPublished(preferredItemId))
+        {
+            return;
+        }
+
         var originalList = result.MediaSources.ToList();
 
         // The queried item's source carries the user's resume state for that version, so it must stay the

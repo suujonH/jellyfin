@@ -66,6 +66,19 @@ public class HlsEncodingLadderTests
     public void Select_RotatedPortrait_KeepsTheNameApartFromTheHeight()
         => Assert.Equal(new HlsVideoQuality(720, 1280, 720, 25), Assert.Single(HlsEncodingLadder.Select(Probe(1920, 1080, rotation: 90), [720])));
 
+    [Theory]
+    [InlineData(1920, 1080, 1080)]
+    [InlineData(1920, 800, 1080)]
+    [InlineData(1440, 1080, 1080)]
+    [InlineData(1920, 1088, 1080)]
+    [InlineData(1280, 720, 720)]
+    [InlineData(1080, 1920, 1080)]
+    [InlineData(3840, 1600, 2160)]
+    [InlineData(7680, 4320, 2160)]
+    [InlineData(100, 60, 144)]
+    public void GetName_IsTheLowestQualityThatHoldsThePicture(int width, int height, int name)
+        => Assert.Equal(name, HlsEncodingLadder.GetName(width, height));
+
     private static HlsProbe Probe(int width, int height, int sarNumerator = 1, int sarDenominator = 1, int rotation = 0, double fps = 25)
         => new(width, height, fps, 60, "h264", "yuv420p", "bt709", "progressive", rotation, [], [], 0, sarNumerator, sarDenominator);
 
