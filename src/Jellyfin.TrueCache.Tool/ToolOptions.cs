@@ -19,6 +19,11 @@ internal sealed class ToolOptions
           Jellyfin.TrueCache.Tool generate [options] <media file or disc folder>...
           Jellyfin.TrueCache.Tool album [options] <album folder>...
           Jellyfin.TrueCache.Tool validate [options] <media file or disc folder>...
+          Jellyfin.TrueCache.Tool strm [options] --name <name>.strm --output <folder> <local media file>
+
+        The strm command writes the entry of a .strm that will name the media file once it is uploaded: the entry is
+        written to <folder>/<name>.strm, to be put in the __true_cache__ folder next to the .strm. Its source.size is the
+        size of the local file and it has no source.modified.
 
         Options:
           --ffmpeg <path>              ffmpeg executable; ffprobe must be next to it (default: ffmpeg)
@@ -26,11 +31,17 @@ internal sealed class ToolOptions
                                        decide the trickplay, chapter and encoding settings
           --server-data <folder>       the server's data folder; the network storage accesses of its jellyfin.db
                                        are used to read s3:// targets of .strm files
+          --server-url <url>           the server, whose GET /System/Configuration and the encoding configuration
+                                       decide the settings instead of --server-config; needs --api-key
+          --api-key <key>              an API key of the server
+          --name <name>.strm           strm: the file name of the .strm
+          --output <folder>            strm: the folder the entry is written to
           --trickplay-widths <w,...>   trickplay widths (default: the server's, 320)
           --trickplay-interval <ms>    trickplay interval in milliseconds (default: the server's, 10000)
           --trickplay-tile <WxH>       thumbnails per tile (default: the server's, 10x10)
           --dummy-chapters <seconds>   length of generated chapters for videos without chapters (default: the server's, 0)
-          --kind <kind>                video, audio, dvd, bluray, book or photo instead of guessing from the path
+          --kind <kind>                video, audio, dvd, bluray, book or photo instead of guessing from the path;
+                                       video or audio for strm
           --force                      replace existing entries
         """;
 
@@ -43,6 +54,14 @@ internal sealed class ToolOptions
     public string? ServerConfigDirectory { get; private init; }
 
     public string? ServerDataDirectory { get; private init; }
+
+    public Uri? ServerUrl { get; private init; }
+
+    public string? ApiKey { get; private init; }
+
+    public string? EntryName { get; private init; }
+
+    public string? OutputDirectory { get; private init; }
 
     public int[]? TrickplayWidths { get; private init; }
 
@@ -64,7 +83,7 @@ internal sealed class ToolOptions
     /// <exception cref="ArgumentException">The command line is invalid.</exception>
     public static ToolOptions Parse(string[] args)
     {
-        if (args.Length == 0 || args[0] is not ("generate" or "album" or "validate"))
+        if (args.Length == 0 || args[0] is not ("generate" or "album" or "validate" or "strm"))
         {
             throw new ArgumentException("A command is required.");
         }
@@ -73,6 +92,10 @@ internal sealed class ToolOptions
         string ffmpeg = "ffmpeg";
         string? config = null;
         string? data = null;
+        Uri? url = null;
+        string? apiKey = null;
+        string? name = null;
+        string? output = null;
         int[]? widths = null;
         int? interval = null;
         (int, int)? tile = null;
@@ -94,6 +117,20 @@ internal sealed class ToolOptions
                     break;
                 case "--server-data":
                     data = Next();
+                    break;
+                case "--server-url":
+                    url = Uri.TryCreate(Next(), UriKind.Absolute, out var parsed) && (parsed.Scheme == Uri.UriSchemeHttp || parsed.Scheme == Uri.UriSchemeHttps)
+                        ? parsed
+                        : throw new ArgumentException("--server-url needs an http or https address.");
+                    break;
+                case "--api-key":
+                    apiKey = Next();
+                    break;
+                case "--name":
+                    name = Next();
+                    break;
+                case "--output":
+                    output = Next();
                     break;
                 case "--trickplay-widths":
                     widths = Next().Split(',').Select(w => ParsePositive(w, "--trickplay-widths")).ToArray();
@@ -142,6 +179,49 @@ internal sealed class ToolOptions
             throw new ArgumentException("At least one path is required.");
         }
 
+        if (url is not null && config is not null)
+        {
+            throw new ArgumentException("--server-url and --server-config are exclusive.");
+        }
+
+        if ((url is null) != (apiKey is null))
+        {
+            throw new ArgumentException("--server-url and --api-key go together.");
+        }
+
+        if (args[0] == "strm")
+        {
+            if (paths.Count != 1)
+            {
+                throw new ArgumentException("strm takes one media file.");
+            }
+
+            // The name becomes a folder of the output: a file name, as the .strm next to its __true_cache__ folder has.
+            if (name is null
+                || !TrueCacheLayout.IsShortcut(name)
+                || name.Length == ".strm".Length
+                || name.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0
+                || name.IndexOfAny(['/', '\\']) >= 0
+                || name.StartsWith('.'))
+            {
+                throw new ArgumentException("strm needs --name with the file name of the .strm.");
+            }
+
+            if (output is null)
+            {
+                throw new ArgumentException("strm needs --output.");
+            }
+
+            if (kind is not (null or TrueCacheKind.Video or TrueCacheKind.Audio))
+            {
+                throw new ArgumentException("A .strm names a video or an audio file.");
+            }
+        }
+        else if (name is not null || output is not null)
+        {
+            throw new ArgumentException("--name and --output are options of strm.");
+        }
+
         return new ToolOptions
         {
             Command = args[0],
@@ -149,6 +229,10 @@ internal sealed class ToolOptions
             FfmpegPath = ffmpeg,
             ServerConfigDirectory = config,
             ServerDataDirectory = data,
+            ServerUrl = url,
+            ApiKey = apiKey,
+            EntryName = name,
+            OutputDirectory = output,
             TrickplayWidths = widths,
             TrickplayInterval = interval,
             TrickplayTile = tile,

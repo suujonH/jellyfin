@@ -19,6 +19,7 @@ using MediaBrowser.MediaEncoding.Configuration;
 using MediaBrowser.MediaEncoding.Encoder;
 using MediaBrowser.MediaEncoding.Subtitles;
 using MediaBrowser.MediaEncoding.TrueCache;
+using MediaBrowser.Model.Configuration;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
@@ -30,23 +31,31 @@ namespace Jellyfin.TrueCache.Tool;
 /// </summary>
 internal sealed class ToolServices : IDisposable
 {
-    private ToolServices(ToolOptions options, ILoggerFactory loggerFactory)
+    private ToolServices(ToolOptions options, ILoggerFactory loggerFactory, ServerSettings? serverSettings)
     {
         WorkDirectory = Path.Combine(Path.GetTempPath(), "jellyfin-truecache-" + Guid.NewGuid().ToString("N"));
         var configDirectory = Path.Combine(WorkDirectory, "config");
         Directory.CreateDirectory(configDirectory);
+        var xmlSerializer = new MyXmlSerializer();
 
-        // The server's own settings decide what an entry must hold; the copy keeps its folder untouched.
-        if (options.ServerConfigDirectory is not null)
+        // The server's own settings decide what an entry must hold: those it reports, or a copy of its files, which keeps its folder
+        // untouched. Its paths are those of the server's machine and stay out: the tool works in its own folder and its own ffmpeg.
+        var (system, encoding) = serverSettings is not null
+            ? (serverSettings.System, serverSettings.Encoding)
+            : (ReadServerFile<ServerConfiguration>(xmlSerializer, options.ServerConfigDirectory, "system.xml"),
+                ReadServerFile<EncodingOptions>(xmlSerializer, options.ServerConfigDirectory, "encoding.xml"));
+        if (system is not null)
         {
-            foreach (var name in new[] { "system.xml", "encoding.xml" })
-            {
-                var source = Path.Combine(options.ServerConfigDirectory, name);
-                if (File.Exists(source))
-                {
-                    File.Copy(source, Path.Combine(configDirectory, name));
-                }
-            }
+            system.CachePath = null;
+            system.MetadataPath = string.Empty;
+            xmlSerializer.SerializeToFile(system, Path.Combine(configDirectory, "system.xml"));
+        }
+
+        if (encoding is not null)
+        {
+            encoding.TranscodingTempPath = null!;
+            encoding.EncoderAppPath = null!;
+            xmlSerializer.SerializeToFile(encoding, Path.Combine(configDirectory, "encoding.xml"));
         }
 
         LoggerFactory = loggerFactory;
@@ -56,7 +65,7 @@ internal sealed class ToolServices : IDisposable
             configDirectory,
             Path.Combine(WorkDirectory, "cache"),
             Path.Combine(WorkDirectory, "web"));
-        Config = new ServerConfigurationManager(AppPaths, loggerFactory, new MyXmlSerializer());
+        Config = new ServerConfigurationManager(AppPaths, loggerFactory, xmlSerializer);
         Config.AddParts([new EncodingConfigurationFactory()]);
         NetworkStorage = ToolNetworkStorage.Load(options.ServerDataDirectory);
         ApplyOverrides(Config.Configuration, options);
@@ -163,10 +172,11 @@ internal sealed class ToolServices : IDisposable
     /// <param name="options">The command line.</param>
     /// <param name="loggerFactory">The logger factory.</param>
     /// <returns>The components.</returns>
-    /// <exception cref="InvalidOperationException">ffmpeg is missing or unsupported.</exception>
+    /// <exception cref="InvalidOperationException">ffmpeg is missing or unsupported, or the settings of the server cannot be read.</exception>
     public static async Task<ToolServices> CreateAsync(ToolOptions options, ILoggerFactory loggerFactory)
     {
-        var services = new ToolServices(options, loggerFactory);
+        var serverSettings = options.ServerUrl is null ? null : await ServerSettings.FetchAsync(options.ServerUrl, options.ApiKey!).ConfigureAwait(false);
+        var services = new ToolServices(options, loggerFactory, serverSettings);
         try
         {
             await services.Localization.LoadAll().ConfigureAwait(false);
@@ -196,7 +206,14 @@ internal sealed class ToolServices : IDisposable
         }
     }
 
-    private static void ApplyOverrides(MediaBrowser.Model.Configuration.ServerConfiguration configuration, ToolOptions options)
+    private static T? ReadServerFile<T>(MyXmlSerializer xmlSerializer, string? directory, string name)
+        where T : class
+    {
+        var path = directory is null ? null : Path.Combine(directory, name);
+        return path is not null && File.Exists(path) ? xmlSerializer.DeserializeFromFile(typeof(T), path) as T : null;
+    }
+
+    private static void ApplyOverrides(ServerConfiguration configuration, ToolOptions options)
     {
         var trickplay = configuration.TrickplayOptions;
         if (options.TrickplayWidths is not null)

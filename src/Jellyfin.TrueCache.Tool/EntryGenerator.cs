@@ -66,6 +66,36 @@ internal sealed class EntryGenerator
     }
 
     /// <summary>
+    /// Writes the entry of a .strm that will name a media file once it is uploaded, from the local file. The entry is the one
+    /// the generate command writes for that .strm, except that its source has the size of the local file and no modification
+    /// time, the .strm being written later. It is put in place, in the output folder, only when it is complete.
+    /// </summary>
+    /// <param name="mediaPath">The local media file.</param>
+    /// <param name="entryName">The file name of the .strm, which is the name of the entry folder.</param>
+    /// <param name="outputDirectory">The folder the entry folder is written to.</param>
+    /// <param name="kind">Video or audio.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The validation result of the written entry.</returns>
+    public async Task<TrueCacheLookup> GenerateForShortcutAsync(string mediaPath, string entryName, string outputDirectory, TrueCacheKind kind, CancellationToken cancellationToken)
+    {
+        if (!File.Exists(mediaPath))
+        {
+            throw new InvalidOperationException("The media file does not exist.");
+        }
+
+        // The entry is validated against a stand-in .strm: only its name and existence matter to the server's rules.
+        var shortcutDirectory = Path.Combine(_services.WorkDirectory, Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(shortcutDirectory);
+        var shortcut = Path.Combine(shortcutDirectory, entryName);
+        await File.WriteAllTextAsync(shortcut, string.Empty, cancellationToken).ConfigureAwait(false);
+
+        Directory.CreateDirectory(outputDirectory);
+        var directory = Path.Combine(outputDirectory, entryName);
+        var staged = await StageAsync(directory, staging => WriteEntryAsync(shortcut, staging, kind, cancellationToken, mediaPath)).ConfigureAwait(false);
+        return staged.IsValid ? _services.Loader.Load(shortcut, directory, _services.Requirements) : staged;
+    }
+
+    /// <summary>
     /// Writes the album-wide entry of an album folder: the loudness of all its tracks played in a row.
     /// </summary>
     /// <param name="albumPath">The album folder.</param>
@@ -163,7 +193,8 @@ internal sealed class EntryGenerator
         Directory.Delete(previous, true);
     }
 
-    private async Task<TrueCacheLookup> WriteEntryAsync(string resourcePath, string directory, TrueCacheKind kind, CancellationToken cancellationToken)
+    // localMediaPath is the local media file a .strm will name, which is read instead of its target.
+    private async Task<TrueCacheLookup> WriteEntryAsync(string resourcePath, string directory, TrueCacheKind kind, CancellationToken cancellationToken, string? localMediaPath = null)
     {
         var root = new TomlTable
         {
@@ -175,13 +206,21 @@ internal sealed class EntryGenerator
         // Everything is read from a local copy of the target, with the same code as for a local file.
         var isShortcut = (kind is TrueCacheKind.Video or TrueCacheKind.Audio) && TrueCacheLayout.IsShortcut(resourcePath);
 
-        // The modification time is read before the target: a .strm changed during the download names another target.
-        var info = File.Exists(resourcePath) ? new FileInfo(resourcePath) : null;
+        // The modification time is read before the target: a .strm changed during the download names another target. A local
+        // media file must not change while it is read either.
+        var info = localMediaPath is not null ? new FileInfo(localMediaPath) : File.Exists(resourcePath) ? new FileInfo(resourcePath) : null;
         var modified = info?.LastWriteTimeUtc;
-        var mediaPath = isShortcut ? await DownloadShortcutTargetAsync(resourcePath, cancellationToken).ConfigureAwait(false) : resourcePath;
+        var length = info?.Length;
+        var download = isShortcut && localMediaPath is null;
+        var mediaPath = localMediaPath ?? (download ? await DownloadShortcutTargetAsync(resourcePath, cancellationToken).ConfigureAwait(false) : resourcePath);
         try
         {
-            if (info is not null)
+            if (localMediaPath is not null)
+            {
+                // The .strm does not exist yet, so its entry has no modification time.
+                root["source"] = new TomlTable { ["size"] = length!.Value };
+            }
+            else if (info is not null)
             {
                 info.Refresh();
                 if (info.LastWriteTimeUtc != modified)
@@ -219,9 +258,18 @@ internal sealed class EntryGenerator
         }
         finally
         {
-            if (isShortcut)
+            if (download)
             {
                 File.Delete(mediaPath);
+            }
+        }
+
+        if (localMediaPath is not null)
+        {
+            info!.Refresh();
+            if (info.LastWriteTimeUtc != modified || info.Length != length)
+            {
+                throw new InvalidOperationException(localMediaPath + " changed while its entry was written.");
             }
         }
 

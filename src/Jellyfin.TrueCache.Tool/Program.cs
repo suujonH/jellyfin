@@ -87,6 +87,18 @@ public static class Program
                 {
                     result = services.Loader.Load(path, services.Requirements);
                 }
+                else if (options.Command == "strm")
+                {
+                    var kind = options.Kind ?? DetectShortcutKind(path, naming);
+                    var output = Path.GetFullPath(options.OutputDirectory!);
+                    if (!ShouldGenerate(Path.Combine(output, options.EntryName!), options.Force))
+                    {
+                        Console.WriteLine($"skipped  {path}: an entry exists in {output} (use --force)");
+                        continue;
+                    }
+
+                    result = await generator.GenerateForShortcutAsync(path, options.EntryName!, output, kind, cancellationToken).ConfigureAwait(false);
+                }
                 else
                 {
                     var kind = options.Kind ?? DetectKind(path, naming, services);
@@ -126,6 +138,24 @@ public static class Program
 
     // An existing entry is not removed here: the generator replaces it only once the new entry is complete.
     private static bool ShouldGenerate(string entry, bool force) => force || !Directory.Exists(entry);
+
+    private static TrueCacheKind DetectShortcutKind(string path, NamingOptions naming)
+    {
+        if (!File.Exists(path))
+        {
+            throw new InvalidOperationException("The media file does not exist.");
+        }
+
+        var extension = Path.GetExtension(path);
+        if (naming.VideoFileExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
+        {
+            return TrueCacheKind.Video;
+        }
+
+        return naming.AudioFileExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase)
+            ? TrueCacheKind.Audio
+            : throw new InvalidOperationException("A .strm names a video or an audio file; pass --kind for " + extension + " files.");
+    }
 
     private static TrueCacheKind DetectKind(string path, NamingOptions naming, ToolServices services)
     {
