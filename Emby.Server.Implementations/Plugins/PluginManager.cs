@@ -33,6 +33,11 @@ namespace Emby.Server.Implementations.Plugins
     {
         private const string MetafileName = "meta.json";
 
+        /// <summary>
+        /// The id of the DistributedHls plugin, whose pre-encoded HLS is part of the server now; it is never loaded.
+        /// </summary>
+        internal static readonly Guid DistributedHlsPluginId = Guid.Parse("1d46b74f-6daf-4c2c-a28f-52f202679c16");
+
         private readonly string _pluginsPath;
         private readonly Version _appVersion;
         private readonly List<AssemblyLoadContext> _assemblyLoadContexts;
@@ -750,6 +755,27 @@ namespace Emby.Server.Implementations.Plugins
                     if (!Version.TryParse(manifest.Version, out version))
                     {
                         manifest.Version = _minimumVersion.ToString();
+                    }
+
+                    // It would answer the same requests as the server, from its own database; a plugin being deleted keeps its status.
+                    if (manifest.Id.Equals(DistributedHlsPluginId))
+                    {
+                        _logger.LogWarning("Plugin {Name} is not loaded: pre-encoded HLS is part of the server now, which migrated its data and settings. The plugin can be removed", manifest.Name);
+                        if (manifest.Status >= PluginStatus.Disabled)
+                        {
+                            manifest.Status = PluginStatus.NotSupported;
+                            try
+                            {
+                                SaveManifest(manifest, dir);
+                            }
+                            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                            {
+                                // It is not loaded anyway; the status is written again on the next start.
+                                _logger.LogWarning(ex, "Unable to save the status of plugin {Name} in {Path}", manifest.Name, dir);
+                            }
+                        }
+
+                        return new LocalPlugin(dir, false, manifest);
                     }
 
                     return new LocalPlugin(dir, _appVersion >= targetAbi, manifest);
