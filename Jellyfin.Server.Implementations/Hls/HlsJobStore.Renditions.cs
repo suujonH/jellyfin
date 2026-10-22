@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Database.Implementations;
@@ -103,6 +104,40 @@ public sealed partial class HlsJobStore
                 return output is null || !string.Equals(output.RelativeDirectory, rendition.RelativeDirectory, StringComparison.Ordinal)
                     ? null
                     : new HlsPublishedSegments(output.RelativeDirectory, Deserialize<double[]>(output.Segments));
+            },
+            cancellationToken);
+
+    /// <summary>
+    /// Records the segments of a published rendition that has none, as one migrated from the DistributedHls plugin, which did not
+    /// keep them. Only the directory that was read is given them, and segments already recorded are kept.
+    /// </summary>
+    /// <param name="sha256">The hash of the content.</param>
+    /// <param name="key">The key of the rendition.</param>
+    /// <param name="relativeDirectory">The directory the segments were read from.</param>
+    /// <param name="durations">The duration of every segment in seconds, in order.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>Whether the segments were recorded.</returns>
+    public Task<bool> SetMissingSegmentsAsync(string sha256, string key, string relativeDirectory, IReadOnlyList<double> durations, CancellationToken cancellationToken)
+        => WriteAsync<bool>(
+            async context =>
+            {
+                var jobId = await context.HlsRenditions
+                    .Where(r => r.Sha256 == sha256 && r.Key == key && r.State == (int)HlsRenditionState.Published && r.RelativeDirectory == relativeDirectory)
+                    .Select(r => r.PublishedJobId)
+                    .FirstOrDefaultAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                var output = jobId is null
+                    ? null
+                    : await context.HlsJobOutputs
+                        .FirstOrDefaultAsync(o => o.JobId.Equals(jobId.Value) && o.Key == key && o.RelativeDirectory == relativeDirectory, cancellationToken)
+                        .ConfigureAwait(false);
+                if (output is null || Deserialize<double[]>(output.Segments).Length > 0)
+                {
+                    return false;
+                }
+
+                output.Segments = JsonSerializer.Serialize(durations);
+                return true;
             },
             cancellationToken);
 

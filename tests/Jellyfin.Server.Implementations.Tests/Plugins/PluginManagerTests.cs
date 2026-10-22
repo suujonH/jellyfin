@@ -371,6 +371,31 @@ namespace Jellyfin.Server.Implementations.Tests.Plugins
             Assert.Equal(PluginStatus.Disabled, pluginManager.LoadManifest(newDir).Manifest.Status);
         }
 
+        [Fact]
+        public void LoadAssemblies_DistributedHls_IsNotLoadedAndNotSupported()
+        {
+            var pluginRoot = Path.Combine(_tempPath, "plugins");
+            var dir = CreateTestPlugin(pluginRoot, "Distributed HLS", PluginStatus.Active, id: PluginManager.DistributedHlsPluginId);
+
+            var pluginManager = new PluginManager(new NullLogger<PluginManager>(), null!, null!, pluginRoot, new Version(1, 0));
+
+            Assert.Empty(pluginManager.LoadAssemblies());
+            var plugin = Assert.Single(pluginManager.Plugins);
+            Assert.False(plugin.IsEnabledAndSupported);
+            Assert.Equal(PluginStatus.NotSupported, pluginManager.LoadManifest(dir).Manifest.Status);
+        }
+
+        [Fact]
+        public void LoadManifest_DistributedHlsBeingDeleted_KeepsItsStatus()
+        {
+            var pluginRoot = Path.Combine(_tempPath, "plugins");
+            var dir = CreateTestPlugin(pluginRoot, "Distributed HLS", PluginStatus.Deleted, id: PluginManager.DistributedHlsPluginId);
+
+            var pluginManager = new PluginManager(new NullLogger<PluginManager>(), null!, null!, null!, new Version(1, 0));
+
+            Assert.Equal(PluginStatus.Deleted, pluginManager.LoadManifest(dir).Manifest.Status);
+        }
+
         private string CreateTestPlugin(string root, string folderName, PluginStatus status, Version? version = null, Guid? id = null, string? name = null)
         {
             var dir = Path.Combine(root, folderName);

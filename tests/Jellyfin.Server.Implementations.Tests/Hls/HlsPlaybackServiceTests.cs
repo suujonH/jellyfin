@@ -1,7 +1,9 @@
 using System;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
@@ -182,6 +184,64 @@ public sealed class HlsPlaybackServiceTests : IDisposable
         Assert.Null(await service.GetMediaPlaylistAsync(item, HlsRenditionKind.Subtitle, 3, CancellationToken));
         Assert.Null(await service.GetMediaPlaylistAsync(item, HlsRenditionKind.Preview, 0, CancellationToken));
         Assert.Null(await service.GetMediaPlaylistAsync(Guid.NewGuid(), HlsRenditionKind.Video, 1080, CancellationToken));
+    }
+
+    [Fact]
+    public async Task GetMediaPlaylist_MigratedRendition_ReadsItsSegmentsFromThePlaylistOnceAndRecordsThem()
+    {
+        var (environment, service) = Create();
+        var (item, plan) = await PublishAsync(environment);
+        await ClearSegmentsAsync(environment, "v1080");
+        var playlist = Path.Combine(environment.GetStorePath(plan.Renditions.Single(r => r.Key == "v1080").RelativeDirectory), "index.m3u8");
+        await File.WriteAllTextAsync(playlist, LegacyPlaylist(4.5, 6, 2.25), CancellationToken);
+
+        var lines = (await service.GetMediaPlaylistAsync(item, HlsRenditionKind.Video, 1080, CancellationToken))!.ReplaceLineEndings("\n").Split('\n');
+        Assert.Equal(["#EXTINF:4.500000, nodesc", "#EXTINF:6.000000, nodesc", "#EXTINF:2.250000, nodesc"], lines.Where(l => l.StartsWith("#EXTINF:", StringComparison.Ordinal)));
+
+        // Recorded: the playlist is not read again.
+        File.Delete(playlist);
+        Assert.NotNull(await service.GetMediaPlaylistAsync(item, HlsRenditionKind.Video, 1080, CancellationToken));
+        Assert.Equal([4.5, 6, 2.25], (await environment.Store.GetPublishedSegmentsAsync(Sha('a'), "v1080", CancellationToken))!.Durations);
+    }
+
+    [Fact]
+    public async Task GetMediaPlaylist_MigratedRenditionWithoutPlaylist_IsNotFound()
+    {
+        var (environment, service) = Create();
+        var (item, _) = await PublishAsync(environment);
+        await ClearSegmentsAsync(environment, "a1");
+
+        Assert.Null(await service.GetMediaPlaylistAsync(item, HlsRenditionKind.Audio, 1, CancellationToken));
+        Assert.Empty((await environment.Store.GetPublishedSegmentsAsync(Sha('a'), "a1", CancellationToken))!.Durations);
+    }
+
+    [Fact]
+    public void ParseSegmentDurations_PlaylistOfFfmpeg_GivesTheDurationsInOrder()
+    {
+        Assert.Equal([6, 6, 1.5], HlsPlaybackService.ParseSegmentDurations(LegacyPlaylist(6, 6, 1.5).ReplaceLineEndings("\r\n"), 3)!);
+
+        // One segment more than expected is allowed, as for the files of a rendition.
+        Assert.NotNull(HlsPlaybackService.ParseSegmentDurations(LegacyPlaylist(6, 6, 6, 1), 3));
+    }
+
+    [Theory]
+    [InlineData("#EXTM3U\n#EXT-X-ENDLIST\n")]
+    [InlineData("#EXTM3U\n#EXTINF:6.0,\nsegment-000001.m4s\n")]
+    [InlineData("#EXTM3U\n#EXTINF:6.0,\nother.m4s\n")]
+    [InlineData("#EXTM3U\nsegment-000000.m4s\n")]
+    [InlineData("#EXTM3U\n#EXTINF:6.0,\n#EXTINF:6.0,\nsegment-000000.m4s\n")]
+    [InlineData("#EXTM3U\n#EXTINF:0,\nsegment-000000.m4s\n")]
+    [InlineData("#EXTM3U\n#EXTINF:NaN,\nsegment-000000.m4s\n")]
+    [InlineData("#EXTM3U\n#EXTINF:6.0,\nsegment-000000.m4s\n#EXTINF:6.0,\n")]
+    public void ParseSegmentDurations_OtherPlaylist_IsRefused(string playlist)
+    {
+        Assert.Null(HlsPlaybackService.ParseSegmentDurations(playlist, 3));
+    }
+
+    [Fact]
+    public void ParseSegmentDurations_MoreSegmentsThanTheContentHas_IsRefused()
+    {
+        Assert.Null(HlsPlaybackService.ParseSegmentDurations(LegacyPlaylist(6, 6, 6, 6, 6), 3));
     }
 
     [Fact]
@@ -609,8 +669,27 @@ public sealed class HlsPlaybackServiceTests : IDisposable
             networkManager.Object,
             networkStorage.Object,
             new HttpContextAccessor { HttpContext = _httpContext },
+            Mock.Of<IHttpClientFactory>(),
             NullLogger<HlsPlaybackService>.Instance);
         return (_environment, service);
+    }
+
+    // A media playlist as ffmpeg wrote it for the DistributedHls plugin.
+    private static string LegacyPlaylist(params double[] durations)
+        => "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"init.mp4\"\n"
+            + string.Concat(durations.Select((d, i) => "#EXTINF:" + d.ToString("0.000000", CultureInfo.InvariantCulture) + ",\n" + HlsRenditionPaths.GetSegmentFile(i) + "\n"))
+            + "#EXT-X-ENDLIST\n";
+
+    // What a rendition migrated from the DistributedHls plugin has: the outputs of its job without segments.
+    private static async Task ClearSegmentsAsync(HlsTestEnvironment environment, string key)
+    {
+        await using var context = environment.CreateDbContext();
+        foreach (var output in context.HlsJobOutputs.Where(o => o.Key == key))
+        {
+            output.Segments = "[]";
+        }
+
+        await context.SaveChangesAsync(CancellationToken);
     }
 
     // The attempt directory of a rendition of a plan.

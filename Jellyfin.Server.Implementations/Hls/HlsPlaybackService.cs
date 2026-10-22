@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading;
@@ -45,6 +48,9 @@ public sealed class HlsPlaybackService : IHlsPlaybackService
     // The claim the authentication of the server gives a request with an API key (InternalClaimTypes.IsApiKey of Jellyfin.Api).
     private const string IsApiKeyClaim = "Jellyfin-IsApiKey";
 
+    // The media playlist the workers of the DistributedHls plugin wrote next to the segments.
+    private const string MigratedPlaylistFile = "index.m3u8";
+
     private readonly HlsSettings _settings;
     private readonly HlsPublishedIndex _index;
     private readonly HlsJobStore _store;
@@ -55,6 +61,7 @@ public sealed class HlsPlaybackService : IHlsPlaybackService
     private readonly INetworkManager _networkManager;
     private readonly INetworkStorageManager _networkStorage;
     private readonly IHttpContextAccessor _httpContextAccessor;
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<HlsPlaybackService> _logger;
     private readonly Lock _keyLock = new();
 
@@ -71,6 +78,7 @@ public sealed class HlsPlaybackService : IHlsPlaybackService
     /// <param name="networkManager">The network manager, which tells the local network.</param>
     /// <param name="networkStorage">The network storage manager, which tells the archived originals.</param>
     /// <param name="httpContextAccessor">The accessor of the current request.</param>
+    /// <param name="httpClientFactory">The HTTP client factory, which reads the playlists of migrated renditions from network storage.</param>
     /// <param name="logger">The logger.</param>
     public HlsPlaybackService(
         HlsSettings settings,
@@ -83,6 +91,7 @@ public sealed class HlsPlaybackService : IHlsPlaybackService
         INetworkManager networkManager,
         INetworkStorageManager networkStorage,
         IHttpContextAccessor httpContextAccessor,
+        IHttpClientFactory httpClientFactory,
         ILogger<HlsPlaybackService> logger)
     {
         _settings = settings;
@@ -95,6 +104,7 @@ public sealed class HlsPlaybackService : IHlsPlaybackService
         _networkManager = networkManager;
         _networkStorage = networkStorage;
         _httpContextAccessor = httpContextAccessor;
+        _httpClientFactory = httpClientFactory;
         _logger = logger;
     }
 
@@ -311,6 +321,11 @@ public sealed class HlsPlaybackService : IHlsPlaybackService
 
         // The rendition may have been published again since the index was read: its segments are those of the directory it names.
         var segments = await _store.GetPublishedSegmentsAsync(media.Sha256, rendition.Key, cancellationToken).ConfigureAwait(false);
+        if (segments is { Durations.Count: 0 } && string.Equals(segments.RelativeDirectory, rendition.RelativeDirectory, StringComparison.Ordinal))
+        {
+            segments = await ReadMigratedSegmentsAsync(store, media.Sha256, rendition, HlsEncodingProfile.GetExpectedSegments(media.DurationSeconds), cancellationToken).ConfigureAwait(false);
+        }
+
         if (segments is null || segments.Durations.Count == 0 || !string.Equals(segments.RelativeDirectory, rendition.RelativeDirectory, StringComparison.Ordinal))
         {
             return null;
@@ -437,6 +452,49 @@ public sealed class HlsPlaybackService : IHlsPlaybackService
     internal static HlsRenditionSummary GetVideo(HlsMediaView media, int quality)
         => (quality == 0 ? media.Video.MaxBy(v => v.Summary.Bandwidth) : media.Find(HlsRenditionKind.Video, quality))!.Summary;
 
+    /// <summary>
+    /// Reads the durations of the segments from a media playlist that ffmpeg wrote, whose segments are named as the layout names
+    /// them, in order.
+    /// </summary>
+    /// <param name="playlist">The playlist.</param>
+    /// <param name="expectedSegments">How many segments the content should have; one more is allowed.</param>
+    /// <returns>The durations in seconds, or <c>null</c> when the playlist is not such a playlist.</returns>
+    internal static double[]? ParseSegmentDurations(string playlist, int expectedSegments)
+    {
+        const string ExtInf = "#EXTINF:";
+        var durations = new List<double>();
+        double? pending = null;
+        foreach (var line in playlist.Split('\n').Select(l => l.Trim()))
+        {
+            if (line.StartsWith(ExtInf, StringComparison.Ordinal))
+            {
+                var value = line[ExtInf.Length..];
+                var comma = value.IndexOf(',', StringComparison.Ordinal);
+                if (pending is not null
+                    || !double.TryParse(comma < 0 ? value : value[..comma], NumberStyles.Float, CultureInfo.InvariantCulture, out var duration)
+                    || !double.IsFinite(duration)
+                    || duration <= 0)
+                {
+                    return null;
+                }
+
+                pending = duration;
+            }
+            else if (line.Length > 0 && line[0] != '#')
+            {
+                if (pending is not { } segment || !string.Equals(line, HlsRenditionPaths.GetSegmentFile(durations.Count), StringComparison.Ordinal))
+                {
+                    return null;
+                }
+
+                durations.Add(segment);
+                pending = null;
+            }
+        }
+
+        return pending is null && durations.Count > 0 && durations.Count <= expectedSegments + 1 ? [.. durations] : null;
+    }
+
     private static string GetPlaylistUrl(string grant, HlsMediaView media, int quality, int? audioStreamIndex)
         => string.Create(CultureInfo.InvariantCulture, $"{PlaybackRoute}/{grant}/{HlsMasterPlaylistWriter.GetPlaylistName(media, quality, audioStreamIndex)}.m3u8");
 
@@ -511,6 +569,56 @@ public sealed class HlsPlaybackService : IHlsPlaybackService
             DefaultSubtitleStreamIndex = -1,
             ETag = media.Sha256[..16]
         };
+    }
+
+    // A rendition migrated from the DistributedHls plugin has no segments recorded: they are read from the playlist next to them
+    // and recorded on the first request. One whose playlist cannot be read is not played; a later request reads it again.
+    private async Task<HlsPublishedSegments?> ReadMigratedSegmentsAsync(IHlsStore store, string sha256, HlsPublishedRendition rendition, int expectedSegments, CancellationToken cancellationToken)
+    {
+        var path = rendition.RelativeDirectory + "/" + MigratedPlaylistFile;
+        string? playlist;
+        try
+        {
+            playlist = await ReadTextAsync(store, path, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HttpRequestException
+            || (ex is TaskCanceledException && !cancellationToken.IsCancellationRequested))
+        {
+            _logger.LogWarning("The playlist {Path} of a migrated rendition in {Root} cannot be read: {Error}", path, store.Location, ex.Message);
+            return null;
+        }
+
+        if ((playlist is null ? null : ParseSegmentDurations(playlist, expectedSegments)) is not { } durations)
+        {
+            _logger.LogWarning("The playlist {Path} of a migrated rendition in {Root} is missing or not valid", path, store.Location);
+            return null;
+        }
+
+        await _store.SetMissingSegmentsAsync(sha256, rendition.Key, rendition.RelativeDirectory, durations, cancellationToken).ConfigureAwait(false);
+        return new HlsPublishedSegments(rendition.RelativeDirectory, durations);
+    }
+
+    // The text of a file in a store, or null when it is not there.
+    private async Task<string?> ReadTextAsync(IHlsStore store, string path, CancellationToken cancellationToken)
+    {
+        if (store.GetServerPath(path) is not { } location)
+        {
+            return null;
+        }
+
+        if (store.IsLocal)
+        {
+            return File.Exists(location) ? await File.ReadAllTextAsync(location, cancellationToken).ConfigureAwait(false) : null;
+        }
+
+        using var response = await _httpClientFactory.CreateClient(NamedClient.Default).GetAsync(new Uri(location), cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private IHlsStore? OpenStore(string root)
