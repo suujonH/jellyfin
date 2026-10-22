@@ -39,6 +39,7 @@ public sealed class HlsPlaybackServiceTests : IDisposable
     private const string ArchivedTarget = "s3://archive/Film.mkv";
 
     private readonly DefaultHttpContext _httpContext = new();
+    private readonly Mock<ILibraryManager> _libraryManager = new();
     private HlsTestEnvironment? _environment;
 
     private static CancellationToken CancellationToken => TestContext.Current.CancellationToken;
@@ -504,6 +505,57 @@ public sealed class HlsPlaybackServiceTests : IDisposable
         Assert.False(service.PrefersOriginal(new Movie { Id = Guid.NewGuid(), Path = "/media/Film.mkv" }, CreateUser(originals: true)));
     }
 
+    [Fact]
+    public async Task GetPlaylistUrl_SourceOrVersionItem_LeadsToItsPlaylistUnderANewGrant()
+    {
+        var (_, service) = Create();
+        var (item, _) = await PublishAsync(_environment!);
+        var user = CreateUser();
+        var original = new Movie { Id = item };
+        _libraryManager.Setup(l => l.GetItemById<BaseItem>(item, user)).Returns(original);
+        var sourceId = HlsVersionCatalog.GetVersionId(_libraryManager.Object, item, 720);
+        var version = new Movie { Id = sourceId, ProviderIds = new() { [HlsVersionCatalog.Marker] = item.ToString("N") + ":720" } };
+
+        Assert.Equal(item, service.GetOriginalId(version));
+        Assert.Null(service.GetOriginalId(original));
+        foreach (var url in new[] { service.GetPlaylistUrl(original, sourceId.ToString("N"), 1, user), service.GetPlaylistUrl(version, null, 1, user) })
+        {
+            Assert.NotNull(url);
+            var parts = url.Split('/');
+            Assert.Equal([string.Empty, "HlsPlayback"], parts[..2]);
+            Assert.Equal(item, service.VerifyGrant(parts[2]));
+            Assert.Equal("720p-a1.m3u8", parts[3]);
+        }
+
+        // An original source, or none, is no source of pre-encoded HLS, also when a version item names it; an API key sees every item.
+        Assert.Null(service.GetPlaylistUrl(original, item.ToString("N"), null, user));
+        Assert.Null(service.GetPlaylistUrl(version, item.ToString("N"), null, user));
+        Assert.Null(service.GetPlaylistUrl(original, null, null, user));
+        Assert.EndsWith("/master.m3u8", service.GetPlaylistUrl(version, HlsVersionCatalog.GetVersionId(_libraryManager.Object, item, 0).ToString("N"), null, null), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetPlaylistUrl_UserWhoCannotPlayTheOriginal_IsRefused()
+    {
+        var (_, service) = Create();
+        var (item, _) = await PublishAsync(_environment!);
+        var user = CreateUser();
+        var version = new Movie { Id = HlsVersionCatalog.GetVersionId(_libraryManager.Object, item, 0), ProviderIds = new() { [HlsVersionCatalog.Marker] = item.ToString("N") + ":0" } };
+
+        // The original is not visible to the user.
+        Assert.Null(service.GetPlaylistUrl(version, null, null, user));
+
+        _libraryManager.Setup(l => l.GetItemById<BaseItem>(item, user)).Returns(new Movie { Id = item });
+        Assert.NotNull(service.GetPlaylistUrl(version, null, null, user));
+
+        // The marker alone names no source.
+        var forged = new Movie { Id = Guid.NewGuid(), ProviderIds = version.ProviderIds };
+        Assert.Null(service.GetPlaylistUrl(forged, null, null, user));
+
+        user.SetPermission(PermissionKind.EnableMediaPlayback, false);
+        Assert.Null(service.GetPlaylistUrl(version, null, null, user));
+    }
+
     private static User CreateUser(bool originals = false)
     {
         var user = new User("user", "default", "default");
@@ -534,7 +586,7 @@ public sealed class HlsPlaybackServiceTests : IDisposable
         }
 
         // The ids of the sources stand for those of the library, which hashes the path the same way every time.
-        var libraryManager = new Mock<ILibraryManager>();
+        var libraryManager = _libraryManager;
         libraryManager.Setup(l => l.GetNewItemId(It.IsAny<string>(), It.IsAny<Type>()))
             .Returns<string, Type>((key, _) => new Guid(MD5.HashData(Encoding.UTF8.GetBytes(key))));
         var localization = new Mock<ILocalizationManager>();

@@ -10,6 +10,7 @@ using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Events;
+using MediaBrowser.Controller.Hls;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Model.Session;
@@ -62,7 +63,8 @@ public class PlayCommandQueueTests : IDisposable
             Mock.Of<IServerApplicationHost>(),
             Mock.Of<IDeviceManager>(),
             Mock.Of<IMediaSourceManager>(),
-            Mock.Of<IHostApplicationLifetime>());
+            Mock.Of<IHostApplicationLifetime>(),
+            Mock.Of<IHlsPlaybackService>());
 
         var session = await sessionManager.LogSessionActivity("app_name", "0.0.0", "device_id", "device_name", "127.0.0.1", null);
 

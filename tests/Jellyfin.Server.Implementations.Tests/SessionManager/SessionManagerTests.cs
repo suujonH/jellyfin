@@ -10,6 +10,7 @@ using MediaBrowser.Controller.Devices;
 using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Events;
+using MediaBrowser.Controller.Hls;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Controller.Session;
@@ -41,7 +42,8 @@ public class SessionManagerTests
             Mock.Of<IServerApplicationHost>(),
             Mock.Of<IDeviceManager>(),
             Mock.Of<IMediaSourceManager>(),
-            Mock.Of<IHostApplicationLifetime>());
+            Mock.Of<IHostApplicationLifetime>(),
+            Mock.Of<IHlsPlaybackService>());
 
         await Assert.ThrowsAsync(exceptionType, () => sessionManager.GetAuthorizationToken(
             new User("test", "default", "default"),
@@ -68,7 +70,8 @@ public class SessionManagerTests
             Mock.Of<IServerApplicationHost>(),
             Mock.Of<IDeviceManager>(),
             Mock.Of<IMediaSourceManager>(),
-            Mock.Of<IHostApplicationLifetime>());
+            Mock.Of<IHostApplicationLifetime>(),
+            Mock.Of<IHlsPlaybackService>());
 
         await Assert.ThrowsAsync(exceptionType, () => sessionManager.AuthenticateNewSessionInternal(authenticationRequest, false));
     }
@@ -238,7 +241,8 @@ public class SessionManagerTests
             Mock.Of<IServerApplicationHost>(),
             Mock.Of<IDeviceManager>(),
             Mock.Of<IMediaSourceManager>(),
-            Mock.Of<IHostApplicationLifetime>());
+            Mock.Of<IHostApplicationLifetime>(),
+            Mock.Of<IHlsPlaybackService>());
     }
 
     // All sessions are logged with the same client and device id on purpose, those values are taken

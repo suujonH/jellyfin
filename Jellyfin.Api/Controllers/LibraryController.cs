@@ -121,7 +121,8 @@ public class LibraryController : BaseJellyfinApiController
     {
         var userId = User.GetUserId();
         var item = _libraryManager.GetItemById<BaseItem>(itemId, userId);
-        if (item is null)
+        // A version item has no file of its own.
+        if (item is null || _hlsPlayback.GetOriginalId(item) is not null)
         {
             return NotFound();
         }
@@ -692,7 +693,8 @@ public class LibraryController : BaseJellyfinApiController
             ? null
             : _userManager.GetUserById(userId);
         var item = _libraryManager.GetItemById<BaseItem>(itemId, user);
-        if (item is null)
+        // A version item has no file of its own.
+        if (item is null || _hlsPlayback.GetOriginalId(item) is not null)
         {
             return NotFound();
         }

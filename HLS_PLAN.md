@@ -517,9 +517,13 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 
 ### 7.4 版本条目
 
-移植 `VersionCatalog`：每个已发布的档位和「自动」各建一个视频条目，作为原始条目的备用版本，供按 id 打开版本的客户端（如 Android TV）使用。
-- 第 4 阶段的同步还没有排除这些条目，随本节实现：同步跳过版本条目，发布索引增加 `Changed` 事件和 `FindOriginalByPath`，供版本条目跟随发布变化。
-- 撤下档位时删除对应的 `HlsVersionItems` 和假条目。
+移植 `VersionCatalog`（独立托管服务 `HlsVersionCatalog`）：每个已发布的档位和「自动」各建一个视频条目，作为原始条目的备用版本，供按 id 打开版本的客户端（如 Android TV）使用。
+- 条目只带 `PrimaryVersionId` 和标记 `DistributedHls`（值 `{原条目}:{档位}`），id 沿用插件的公式；不设 `OwnerId`，原条目也不链接它，进度留在原条目，原条目的源列表也不含它。
+- 每 5 秒同步发布索引 `Changed` 事件、原条目更新或删除涉及的条目，设置变化时同步全部；发布索引读完一次（`IsLoaded`）之前不同步，免得启动时误删。失败的条目 10 分钟后重试。
+- 同步跳过版本条目；撤下档位、关闭或删除原条目时删除对应的 `HlsVersionItems` 和条目。
+- 按版本条目 id 访问：源列表是原条目的源，它自己的排第一，只对能看到原条目的用户；PlaybackInfo 按原条目处理，默认请求它自己的源；视频流入口（`stream`、`master.m3u8`、`live.m3u8`）302 到授权地址；`HlsPlayback/Versions/{id}/master.m3u8` 302；其他流路由与 `File`、`Download` 返回 `404`。可见性只看原条目（版本条目是普通 `Video`，不按它自己的分级判断）；按版本条目上报的播放进度记在原条目上。删除版本条目前先清掉 `PrimaryVersionId`，否则删除时会按原条目的源清掉原条目提取的字幕与附件。
+- 已知限制（与插件相同）：直接按版本条目 id 读取条目详情或用户数据（`/Items/{id}`、`UserData`）时，仍按版本条目自己判断可见性（未分级的普通 `Video` 归为「其他」）和读它自己的用户数据；客户端通常从原条目进入，不受影响。
+- 不移植 `FindOriginalByPath`：插件要从版本条目的路径找回原条目，服务器在每个路由里直接按条目判断。
 
 ## 八、管理页与 API
 
@@ -723,4 +727,5 @@ sealed class HlsEncoderRun     // 一次 ffmpeg
 - 2026-10-22：第 4e 阶段完成：`HlsOptions.LibraryQualities`（`HlsLibraryQualities`）与校验；`HlsSettingsSnapshot.GetQualities`；内容的应有档位取其来源所在媒体库的并集，没有时取 `HlsMedia.LibraryId`，仍为空时不同步，替换了同步、识别两处（`HlsIdentifyRequest.GetQualities`、`SyncRenditionsAsync` 改为按媒体库取档位）；`GET /HlsWorker/Libraries`；`POST /HlsWorker/Jobs/Eager`（`HlsJobStore.StartEagerJobAsync`），预编码任务没有输入，`Input` 回 `404`，重复 `Identify` 返回原计划。与计划的差别已写回：`Libraries` 变化也触发全量同步，交集校验只针对选中的媒体库，预编码要求媒体库存在。Release 构建 0 警告；Server.Implementations 中 HLS 的 184 个测试、Api 173 个、Integration 132 个通过。
 - 2026-10-22：第 5a 阶段完成：`HlsPlaybackGrant`、`HlsMasterPlaylistWriter`（移植，无标题的音轨、字幕改用英文名）与移植的测试；`IHlsPlaybackService`/`HlsPlaybackService`（签发授权时生成并保存密钥，播放只读发布索引，视频、音频的媒体播放列表经 `GetPublishedSegmentsAsync` 读取各段时长，按档位的根写外部地址或相对地址；字幕为整段一个文件）；`HlsDeliveryController`（`HlsPlayback/{grant}/…`，本地文件带 Range 发送，网络存储读取后转发）；`IHlsStore.GetClientAddressLifetime` 与网络存储的地址有效期，发布时被替换目录的宽限按旧根计算。Release 构建 0 警告；Server.Implementations 1362 个测试通过（2 个本地化测试因系统语言为中文而失败），Api 173 个、Controller 218 个、MediaEncoding.Hls 412 个（44 个跳过）、Integration 136 个通过。
 - 2026-10-22：第 5b 阶段完成：`IHlsPlaybackService` 增加 `IsPublished`、`IsOriginalAllowed`、`PrefersOriginal`、`ArrangeMediaSources`、`GetQuality`、`PrepareForPlayback`（原片规则读当前请求：API Key、内网、用户权限）；`MediaSourceManager` 对有用户的调用整理源列表（「自动」、源文件、各档位从高到低；没有播放权限时为空），已发布条目不探测、不加动态源、不排序；`MediaInfoHelper` 为 HLS 源签发授权并设置字段，跳过设备协商与排序；`MediaInfoController` 中「自动」按 7.1 解析为原片或 HLS；`StreamingHelpers` 对 HLS 源 id 返回 `404`（第 5c 阶段改为 302），按实际播放的源（含转码任务复用的源）检查原片，不允许时 `403`；HLS 源的音轨、字幕保留原片的强制、听障、原声标记；条目 DTO 的 `MediaStreams` 在源列表不含原片时取原片的流；`/Items/{id}/File`、`/Items/{id}/Download` 不允许时 `403`；`HlsEncodingLadder.GetName` 给原片命名（如「源文件 (1080p 24fps)」），本地化键 `HlsSourceAuto`、`HlsSourceOriginal`。Release 构建 0 警告；Server.Implementations 1381 个测试通过（2 个本地化测试因系统语言为中文而失败），Api 173 个、MediaEncoding.Hls 421 个（44 个跳过）、Integration 136 个通过。
-- 下一步：第 5c 阶段（版本条目、`Versions/{id}/master.m3u8`、流路由对 HLS 源 id 的 302）。
+- 2026-10-22：第 5c 阶段完成：版本条目 `HlsVersionCatalog`（见 7.4），发布索引增加 `Changed`、`IsLoaded`、`GetPublishedItems`；`IHlsPlaybackService` 增加 `GetOriginalId`、`GetPlaylistUrl`；视频流入口对 HLS 源 id 和版本条目 302 到授权地址（`HlsPlaybackRedirect`），`HlsPlayback/Versions/{id}/master.m3u8` 302；`MediaSourceManager`、`MediaInfoController` 按原条目处理版本条目；任务中心不再把版本条目当作库文件。Release 构建 0 警告；Server.Implementations 1399 个测试通过（2 个本地化测试因系统语言为中文而失败），Api 173 个、Integration 136 个通过。
+- 下一步：第 6a 阶段（TrueCache 工具）。

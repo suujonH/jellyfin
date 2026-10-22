@@ -13,7 +13,8 @@ namespace Jellyfin.Server.Implementations.Hls;
 /// The library files and what is published of their contents, in memory, for playback, which never reads the database.
 /// Whoever commits a change to sources, contents or renditions refreshes the matching part afterwards. Writers build the next
 /// snapshot under one lock and read the database inside it, so the last refresh sees every earlier commit; readers never lock.
-/// A refresh that fails leaves its part to the next one, which the coordinator asks for on every tick.
+/// A refresh that fails leaves its part to the next one, which the coordinator asks for on every tick. Every refresh raises
+/// <see cref="Changed"/> with the items it may have changed.
 /// </summary>
 public sealed class HlsPublishedIndex : IDisposable
 {
@@ -29,6 +30,7 @@ public sealed class HlsPublishedIndex : IDisposable
     private readonly HashSet<Guid> _staleItems = [];
     private readonly HashSet<string> _staleMedia = new(StringComparer.Ordinal);
     private Snapshot _snapshot = _empty;
+    private bool _loaded;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="HlsPublishedIndex"/> class.
@@ -38,6 +40,16 @@ public sealed class HlsPublishedIndex : IDisposable
     {
         _store = store;
     }
+
+    /// <summary>
+    /// Raised after a refresh, outside the lock, with the items whose files or published renditions it may have changed.
+    /// </summary>
+    public event EventHandler<IReadOnlyCollection<Guid>>? Changed;
+
+    /// <summary>
+    /// Gets a value indicating whether everything was read once.
+    /// </summary>
+    public bool IsLoaded => Volatile.Read(ref _loaded);
 
     /// <inheritdoc />
     public void Dispose() => _writeLock.Dispose();
@@ -49,6 +61,7 @@ public sealed class HlsPublishedIndex : IDisposable
     /// <returns>A task.</returns>
     public async Task LoadAsync(CancellationToken cancellationToken)
     {
+        IReadOnlyCollection<Guid> affected;
         await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -66,7 +79,9 @@ public sealed class HlsPublishedIndex : IDisposable
                 }
             }
 
+            affected = [.. Volatile.Read(ref _snapshot).Items.Keys.Union(items.Keys)];
             Volatile.Write(ref _snapshot, new Snapshot(items, media.ToImmutable(), shas));
+            Volatile.Write(ref _loaded, true);
             _staleItems.Clear();
             _staleMedia.Clear();
         }
@@ -74,6 +89,8 @@ public sealed class HlsPublishedIndex : IDisposable
         {
             _writeLock.Release();
         }
+
+        Raise(affected);
     }
 
     /// <summary>
@@ -85,10 +102,11 @@ public sealed class HlsPublishedIndex : IDisposable
     public async Task RefreshItemsAsync(IEnumerable<Guid> itemIds, CancellationToken cancellationToken)
     {
         var requested = itemIds.ToList();
+        List<Guid> list;
         await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var list = requested.Concat(_staleItems).Distinct().ToList();
+            list = requested.Concat(_staleItems).Distinct().ToList();
             if (list.Count == 0)
             {
                 return;
@@ -145,6 +163,8 @@ public sealed class HlsPublishedIndex : IDisposable
         {
             _writeLock.Release();
         }
+
+        Raise(list);
     }
 
     /// <summary>
@@ -156,6 +176,7 @@ public sealed class HlsPublishedIndex : IDisposable
     public async Task RefreshMediaAsync(IEnumerable<string> sha256s, CancellationToken cancellationToken)
     {
         var requested = sha256s.ToList();
+        IReadOnlyCollection<Guid> affected = [];
         await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -184,6 +205,7 @@ public sealed class HlsPublishedIndex : IDisposable
 
                 Volatile.Write(ref _snapshot, current with { Media = media.ToImmutable() });
                 _staleMedia.Clear();
+                affected = [.. list.SelectMany(sha => current.ShaToItems.TryGetValue(sha, out var members) ? members : []).Distinct()];
             }
             catch
             {
@@ -195,6 +217,8 @@ public sealed class HlsPublishedIndex : IDisposable
         {
             _writeLock.Release();
         }
+
+        Raise(affected);
     }
 
     /// <summary>
@@ -228,12 +252,30 @@ public sealed class HlsPublishedIndex : IDisposable
     }
 
     /// <summary>
+    /// Gets the items whose content has something published.
+    /// </summary>
+    /// <returns>The items.</returns>
+    public IReadOnlyCollection<Guid> GetPublishedItems()
+    {
+        var snapshot = Volatile.Read(ref _snapshot);
+        return [.. snapshot.Media.Keys.SelectMany(sha => snapshot.ShaToItems.TryGetValue(sha, out var items) ? items : [])];
+    }
+
+    /// <summary>
     /// Gets the library files of a content.
     /// </summary>
     /// <param name="sha256">The hash of the content.</param>
     /// <returns>The items.</returns>
     public IReadOnlyCollection<Guid> GetItemsForSha(string sha256)
         => Volatile.Read(ref _snapshot).ShaToItems.TryGetValue(sha256, out var items) ? items : ImmutableHashSet<Guid>.Empty;
+
+    private void Raise(IReadOnlyCollection<Guid> affected)
+    {
+        if (affected.Count > 0)
+        {
+            Changed?.Invoke(this, affected);
+        }
+    }
 
     private static HlsIndexedSource ToIndexed(HlsSourceRecord source)
         => new(source.File.ItemId, source.File.LibraryId, source.File.Path, source.Sha256);

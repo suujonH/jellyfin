@@ -187,8 +187,9 @@ namespace Emby.Server.Implementations.Library
             var mediaSources = GetStaticMediaSources(item, enablePathSubstitution, user);
             ResolveSymlinkPaths(mediaSources, enablePathSubstitution);
 
-            // The sources of pre-encoded HLS are complete as they are: nothing is probed or added, and their order is kept.
-            if (user is not null && item is Video && _hlsPlayback.IsPublished(item.Id))
+            // The sources of pre-encoded HLS are complete as they are: nothing is probed or added, and their order is kept. Those of a
+            // version item are those of its original, whose file is never probed for it.
+            if ((user is not null && item is Video && _hlsPlayback.IsPublished(item.Id)) || _hlsPlayback.GetOriginalId(item) is not null)
             {
                 return mediaSources;
             }
@@ -406,6 +407,27 @@ namespace Emby.Server.Implementations.Library
                 throw new ArgumentException(
                     string.Format(CultureInfo.InvariantCulture, "{0} {1} has no media sources and cannot be played.", item.GetType().Name, item.Id),
                     nameof(item));
+            }
+
+            // A version item stands for a source of pre-encoded HLS of its original: it has the sources of the original, its own first,
+            // and only for those who see the original.
+            if (_hlsPlayback.GetOriginalId(item) is { } originalId)
+            {
+                // Until it is deleted, a version item whose original is gone keeps its own placeholder source.
+                var original = _libraryManager.GetItemById(originalId);
+                if (original is null || _hlsPlayback.GetOriginalId(original) is not null)
+                {
+                    return hasMediaSources.GetMediaSources(enablePathSubstitution);
+                }
+
+                if (user is not null && _libraryManager.GetItemById<BaseItem>(originalId, user) is null)
+                {
+                    return [];
+                }
+
+                var versionId = item.Id.ToString("N", CultureInfo.InvariantCulture);
+                var originalSources = GetStaticMediaSources(original, enablePathSubstitution, user);
+                return [.. originalSources.Where(s => string.Equals(s.Id, versionId, StringComparison.OrdinalIgnoreCase)), .. originalSources.Where(s => !string.Equals(s.Id, versionId, StringComparison.OrdinalIgnoreCase))];
             }
 
             var sources = hasMediaSources.GetMediaSources(enablePathSubstitution);

@@ -63,6 +63,24 @@ public interface IHlsPlaybackService
     int? GetQuality(Guid itemId, string? mediaSourceId);
 
     /// <summary>
+    /// Gets the original of a version item, the item that stands for a source of pre-encoded HLS of it.
+    /// </summary>
+    /// <param name="item">The item.</param>
+    /// <returns>The original, or <c>null</c> when the item is not a version item.</returns>
+    Guid? GetOriginalId(BaseItem item);
+
+    /// <summary>
+    /// Gets the master playlist, under a new grant, of the source of pre-encoded HLS a request for an item names: a source of the
+    /// item, or the version item itself.
+    /// </summary>
+    /// <param name="item">The item of the request.</param>
+    /// <param name="mediaSourceId">The media source of the request, if any.</param>
+    /// <param name="audioStreamIndex">The audio track, if any.</param>
+    /// <param name="user">The user, who has to see the original; <c>null</c> for a request with an API key.</param>
+    /// <returns>The address relative to the server, or <c>null</c> when the request names no playable source of pre-encoded HLS.</returns>
+    string? GetPlaylistUrl(BaseItem item, string? mediaSourceId, int? audioStreamIndex, User? user);
+
+    /// <summary>
     /// Prepares a media source of pre-encoded HLS of an item for a playback: it is played from the playlists of a new grant, never
     /// directly or by the encoder of the server, and its subtitles are sent as files. The requested tracks that are published become
     /// its selected ones.

@@ -10,6 +10,7 @@ using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Events;
+using MediaBrowser.Controller.Hls;
 using MediaBrowser.Controller.Library;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -93,7 +94,8 @@ public sealed class RewatchPlayStateTests : IDisposable
             Mock.Of<IServerApplicationHost>(),
             Mock.Of<IDeviceManager>(),
             Mock.Of<IMediaSourceManager>(),
-            Mock.Of<IHostApplicationLifetime>());
+            Mock.Of<IHostApplicationLifetime>(),
+            Mock.Of<IHlsPlaybackService>());
     }
 
     private static void Invoke(Emby.Server.Implementations.Session.SessionManager sessionManager, string name, params object?[] args)
