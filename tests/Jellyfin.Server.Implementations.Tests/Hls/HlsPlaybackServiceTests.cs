@@ -542,6 +542,21 @@ public sealed class HlsPlaybackServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task PrepareForPlayback_PublicStore_GivesTheDirectAddressOfASubtitle()
+    {
+        var (environment, service) = Create(isPublic: true);
+        var (item, plan) = await PublishAsync(environment);
+        var source = service.ArrangeMediaSources(new Movie { Id = item }, [], CreateUser())[2];
+
+        Assert.True(service.PrepareForPlayback(item, source, "session", null, null, "http://server"));
+
+        var subtitle = Assert.Single(source.MediaStreams, s => s.Type == MediaStreamType.Subtitle);
+        Assert.Equal("https://cdn.example/" + plan.Renditions.Single(r => r.Key == "s2").RelativeDirectory + "/subtitle.vtt?sig=1", subtitle.DeliveryUrl);
+        Assert.Equal(SubtitleDeliveryMethod.External, subtitle.DeliveryMethod);
+        Assert.True(subtitle.IsExternalUrl);
+    }
+
+    [Fact]
     public async Task PrepareForPlayback_SourceThatCannotBePlayed_IsRefused()
     {
         var (environment, service) = Create();
