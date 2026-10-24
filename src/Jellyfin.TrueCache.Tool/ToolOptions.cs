@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using MediaBrowser.Controller.TrueCache;
+using MediaBrowser.Model.Entities;
 
 namespace Jellyfin.TrueCache.Tool;
 
@@ -40,6 +41,11 @@ internal sealed class ToolOptions
           --trickplay-interval <ms>    trickplay interval in milliseconds (default: the server's, 10000)
           --trickplay-tile <WxH>       thumbnails per tile (default: the server's, 10x10)
           --dummy-chapters <seconds>   length of generated chapters for videos without chapters (default: the server's, 0)
+          --hwaccel <type>             none, nvenc, qsv, amf or vaapi: the hardware trickplay decodes with, instead of the
+                                       server's hardware acceleration (default: the server's settings)
+          --hw-device <device>         with --hwaccel nvenc, the GPU index; with --hwaccel vaapi, the render node,
+                                       such as /dev/dri/renderD128; with --hwaccel qsv, the adapter index on Windows
+                                       or the render node on Linux (default: the first GPU)
           --kind <kind>                video, audio, dvd, bluray, book or photo instead of guessing from the path;
                                        video or audio for strm
           --force                      replace existing entries
@@ -71,6 +77,10 @@ internal sealed class ToolOptions
 
     public int? DummyChapterDuration { get; private init; }
 
+    public HardwareAccelerationType? HardwareAcceleration { get; private init; }
+
+    public string? HardwareDevice { get; private init; }
+
     public TrueCacheKind? Kind { get; private init; }
 
     public bool Force { get; private init; }
@@ -100,6 +110,8 @@ internal sealed class ToolOptions
         int? interval = null;
         (int, int)? tile = null;
         int? dummy = null;
+        HardwareAccelerationType? hwaccel = null;
+        string? device = null;
         TrueCacheKind? kind = null;
         var force = false;
 
@@ -160,6 +172,21 @@ internal sealed class ToolOptions
                         _ => throw new ArgumentException("Unknown kind " + value + ".")
                     };
                     break;
+                case "--hwaccel":
+                    var type = Next();
+                    hwaccel = type switch
+                    {
+                        "none" => HardwareAccelerationType.none,
+                        "nvenc" => HardwareAccelerationType.nvenc,
+                        "qsv" => HardwareAccelerationType.qsv,
+                        "amf" => HardwareAccelerationType.amf,
+                        "vaapi" => HardwareAccelerationType.vaapi,
+                        _ => throw new ArgumentException("Unknown hardware acceleration " + type + ".")
+                    };
+                    break;
+                case "--hw-device":
+                    device = Next();
+                    break;
                 case "--force":
                     force = true;
                     break;
@@ -187,6 +214,16 @@ internal sealed class ToolOptions
         if ((url is null) != (apiKey is null))
         {
             throw new ArgumentException("--server-url and --api-key go together.");
+        }
+
+        if (device is not null && hwaccel is not (HardwareAccelerationType.nvenc or HardwareAccelerationType.vaapi or HardwareAccelerationType.qsv))
+        {
+            throw new ArgumentException("--hw-device goes with --hwaccel nvenc, vaapi or qsv.");
+        }
+
+        if (hwaccel == HardwareAccelerationType.nvenc && device is not null && !int.TryParse(device, NumberStyles.None, CultureInfo.InvariantCulture, out _))
+        {
+            throw new ArgumentException("--hw-device of nvenc is a GPU index.");
         }
 
         if (args[0] == "strm")
@@ -237,6 +274,8 @@ internal sealed class ToolOptions
             TrickplayInterval = interval,
             TrickplayTile = tile,
             DummyChapterDuration = dummy,
+            HardwareAcceleration = hwaccel,
+            HardwareDevice = device,
             Kind = kind,
             Force = force
         };

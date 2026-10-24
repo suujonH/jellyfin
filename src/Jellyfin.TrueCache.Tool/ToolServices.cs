@@ -20,6 +20,7 @@ using MediaBrowser.MediaEncoding.Encoder;
 using MediaBrowser.MediaEncoding.Subtitles;
 using MediaBrowser.MediaEncoding.TrueCache;
 using MediaBrowser.Model.Configuration;
+using MediaBrowser.Model.Entities;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
@@ -69,6 +70,7 @@ internal sealed class ToolServices : IDisposable
         Config.AddParts([new EncodingConfigurationFactory()]);
         NetworkStorage = ToolNetworkStorage.Load(options.ServerDataDirectory);
         ApplyOverrides(Config.Configuration, options);
+        ApplyHardware(Config.GetEncodingOptions(), Config.Configuration.TrickplayOptions, options);
 
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { [MediaBrowser.Controller.Extensions.ConfigurationExtensions.FfmpegPathKey] = options.FfmpegPath })
@@ -235,6 +237,50 @@ internal sealed class ToolServices : IDisposable
         if (options.DummyChapterDuration.HasValue)
         {
             configuration.DummyChapterDuration = options.DummyChapterDuration.Value;
+        }
+    }
+
+    // The machine the tool runs on decodes with its own hardware, which the server's settings do not describe.
+    private static void ApplyHardware(EncodingOptions encoding, TrickplayOptions trickplay, ToolOptions options)
+    {
+        if (options.HardwareAcceleration is not { } type)
+        {
+            return;
+        }
+
+        encoding.HardwareAccelerationType = type;
+        trickplay.EnableHwAcceleration = type != HardwareAccelerationType.none;
+        trickplay.EnableHwEncoding = false;
+        if (type == HardwareAccelerationType.none)
+        {
+            return;
+        }
+
+        // What every GPU of recent years decodes; AV1 needs a newer one. A video the GPU cannot decode, such as 10-bit HEVC
+        // on an older one, is decoded in software instead, as EntryGenerator retries.
+        encoding.HardwareDecodingCodecs = ["h264", "hevc", "mpeg2video", "vc1", "vp9"];
+        encoding.EnableDecodingColorDepth10Hevc = true;
+        encoding.EnableDecodingColorDepth10Vp9 = true;
+
+        // The devices the server chose are those of its machine; this one takes its first GPU unless told otherwise.
+        var defaults = new EncodingOptions();
+        encoding.VaapiDevice = defaults.VaapiDevice;
+        encoding.QsvDevice = defaults.QsvDevice;
+        if (options.HardwareDevice is { } device)
+        {
+            if (type == HardwareAccelerationType.vaapi)
+            {
+                encoding.VaapiDevice = device;
+            }
+            else if (type == HardwareAccelerationType.qsv)
+            {
+                encoding.QsvDevice = device;
+            }
+            else
+            {
+                // The server always takes CUDA device 0; ffmpeg, started by this process, sees only the chosen one.
+                Environment.SetEnvironmentVariable("CUDA_VISIBLE_DEVICES", device);
+            }
         }
     }
 }
