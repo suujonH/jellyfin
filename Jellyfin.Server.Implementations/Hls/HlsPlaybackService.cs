@@ -247,11 +247,13 @@ public sealed class HlsPlaybackService : IHlsPlaybackService
         {
             if (media.Find(HlsRenditionKind.Subtitle, stream.Index) is { } subtitle)
             {
+                // At its direct address when clients read the store, as in its playlist, otherwise sent by the server.
+                var direct = OpenStore(subtitle.Base)?.GetClientAddress(subtitle.RelativeDirectory + "/" + HlsRenditionPaths.SubtitleFile);
                 stream.DeliveryMethod = SubtitleDeliveryMethod.External;
-                stream.DeliveryUrl = string.Create(
+                stream.DeliveryUrl = direct?.AbsoluteUri ?? string.Create(
                     CultureInfo.InvariantCulture,
                     $"{PlaybackRoute}/{grant}/r/subtitles/{stream.Index}/{GetAttempt(subtitle)}/{HlsRenditionPaths.SubtitleFile}");
-                stream.IsExternalUrl = false;
+                stream.IsExternalUrl = direct is not null;
             }
         }
 
