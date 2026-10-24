@@ -33,6 +33,16 @@ public class HlsLibraryFile
     public Guid? WorkerId { get; set; }
 
     /// <summary>
+    /// Gets or sets the hash of the media content the file is, as the worker reported it; null for other files.
+    /// </summary>
+    public string? Sha256 { get; set; }
+
+    /// <summary>
+    /// Gets or sets the size of that content, in bytes.
+    /// </summary>
+    public long? ContentLength { get; set; }
+
+    /// <summary>
     /// Gets or sets when the file was written.
     /// </summary>
     public DateTime DateCreated { get; set; }

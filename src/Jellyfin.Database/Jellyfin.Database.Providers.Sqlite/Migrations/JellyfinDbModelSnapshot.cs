@@ -791,6 +791,9 @@ namespace Jellyfin.Server.Implementations.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
+                    b.Property<long?>("ContentLength")
+                        .HasColumnType("INTEGER");
+
                     b.Property<DateTime>("DateCreated")
                         .HasColumnType("TEXT");
 
@@ -802,6 +805,9 @@ namespace Jellyfin.Server.Implementations.Migrations
 
                     b.Property<string>("Path")
                         .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Sha256")
                         .HasColumnType("TEXT");
 
                     b.Property<Guid?>("WorkerId")

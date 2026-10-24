@@ -200,6 +200,46 @@ public sealed class HlsLibraryWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task AShortcut_WithItsContent_RecordsTheContentWithTheStrmFileOnly()
+    {
+        var zip = CreateZip(("manifest.json", "{}"));
+        var id = await StartAsync("Film/a.strm", zip.Length);
+        using (var body = new MemoryStream(zip))
+        {
+            Assert.True(await _writer.WriteAsync(id, 0, body, CancellationToken));
+        }
+
+        Assert.True(await _writer.CompleteAsync(id, new HlsLibraryUploadComplete("s3://bucket/a.mkv", null, Sha('A'), 7000), CancellationToken));
+
+        await using var context = _environment.CreateDbContext();
+        var files = await context.HlsLibraryFiles.AsNoTracking().ToListAsync(CancellationToken);
+        var strm = Assert.Single(files, f => f.Path == Path.Combine(_movies, "Film", "a.strm"));
+        Assert.Equal((Sha('a'), (long?)7000), (strm.Sha256, strm.ContentLength));
+        var entry = Assert.Single(files, f => f != strm);
+        Assert.Equal((null, (long?)null), (entry.Sha256, entry.ContentLength));
+    }
+
+    [Fact]
+    public async Task AFile_WithAContentOfAnotherSize_OrOnlyAHash_IsRefused()
+    {
+        var id = await StartAsync("Film/a.mkv", 3);
+        Assert.True(await WriteAsync(id, 0, "abc"));
+        await Assert.ThrowsAsync<ArgumentException>(() => _writer.CompleteAsync(id, new HlsLibraryUploadComplete(null, null, Sha('a'), 4), CancellationToken));
+
+        id = await StartAsync("Film/a.mkv", 3);
+        Assert.True(await WriteAsync(id, 0, "abc"));
+        await Assert.ThrowsAsync<ArgumentException>(() => _writer.CompleteAsync(id, new HlsLibraryUploadComplete(null, null, Sha('a')), CancellationToken));
+
+        Assert.Empty(Directory.GetFiles(Path.Combine(_movies, "Film")));
+
+        id = await StartAsync("Film/a.mkv", 3);
+        Assert.True(await WriteAsync(id, 0, "abc"));
+        Assert.True(await _writer.CompleteAsync(id, new HlsLibraryUploadComplete(null, null, Sha('a'), 3), CancellationToken));
+        await using var context = _environment.CreateDbContext();
+        Assert.Equal(Sha('a'), Assert.Single(await context.HlsLibraryFiles.AsNoTracking().ToListAsync(CancellationToken)).Sha256);
+    }
+
+    [Fact]
     public async Task AShortcut_WithAnEntryLeavingItsDirectory_OrATargetThatIsNotRemote_IsRefused()
     {
         var evil = CreateZip(("../../evil.txt", "x"));

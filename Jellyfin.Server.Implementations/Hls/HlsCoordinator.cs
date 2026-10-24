@@ -321,14 +321,14 @@ public sealed class HlsCoordinator : BackgroundService
                 batch.Add(file);
                 if (batch.Count == UpsertBatch)
                 {
-                    await UpsertAsync(batch, null, now, cancellationToken).ConfigureAwait(false);
+                    await UpsertAsync(batch, null, null, now, cancellationToken).ConfigureAwait(false);
                     batch.Clear();
                 }
             }
 
             if (batch.Count > 0)
             {
-                await UpsertAsync(batch, null, now, cancellationToken).ConfigureAwait(false);
+                await UpsertAsync(batch, null, null, now, cancellationToken).ConfigureAwait(false);
             }
 
             foreach (var stale in (await _store.GetSourcesAsync(cancellationToken).ConfigureAwait(false)).Where(s => !seen.Contains(s.File.ItemId)))
@@ -358,7 +358,8 @@ public sealed class HlsCoordinator : BackgroundService
             {
                 if (exists && _libraryManager.GetItemById(itemId) is Video video && GetSourceFile(video, settings) is { } file)
                 {
-                    await UpsertAsync([file], settings, now, cancellationToken).ConfigureAwait(false);
+                    var added = await GetAddedShaAsync(video, file, cancellationToken).ConfigureAwait(false);
+                    await UpsertAsync([file], added is null ? null : new Dictionary<Guid, string> { [file.ItemId] = added }, settings, now, cancellationToken).ConfigureAwait(false);
                 }
                 else
                 {
@@ -386,24 +387,58 @@ public sealed class HlsCoordinator : BackgroundService
     // A changed or new file gets a source job from the store; a known content only needs scheduling.
     // A file of known content may have moved to another library, or become other content; either changes the qualities of the
     // content it was. That content is synced at once with the settings given, or scheduled when a full sync follows.
-    private async Task UpsertAsync(IReadOnlyList<HlsSourceFile> files, HlsSettingsSnapshot? syncWith, DateTime now, CancellationToken cancellationToken)
+    // A file a worker added as known content is linked to it at once, and that content synced like one the file was.
+    private async Task UpsertAsync(
+        IReadOnlyList<HlsSourceFile> files,
+        IReadOnlyDictionary<Guid, string>? added,
+        HlsSettingsSnapshot? syncWith,
+        DateTime now,
+        CancellationToken cancellationToken)
     {
-        foreach (var result in await _store.UpsertSourcesAsync(files, now, cancellationToken).ConfigureAwait(false))
+        foreach (var result in await _store.UpsertSourcesAsync(files, added, now, cancellationToken).ConfigureAwait(false))
         {
-            if (result is not { Change: HlsSourceChange.Unchanged or HlsSourceChange.ContentChanged, PreviousSha256: { } sha })
+            if (result.LinkedSha256 is { } linked)
             {
-                continue;
+                _logger.LogInformation("Item {ItemId} is the content {Sha256} a worker added", result.ItemId, linked);
+                await SyncOrScheduleAsync(linked, syncWith, now, cancellationToken).ConfigureAwait(false);
             }
 
-            if (syncWith is null)
+            if (result is { Change: HlsSourceChange.Unchanged or HlsSourceChange.ContentChanged, PreviousSha256: { } sha })
             {
-                _toSchedule[sha] = 0;
-            }
-            else
-            {
-                await SyncRenditionsAsync(sha, syncWith, now, cancellationToken).ConfigureAwait(false);
+                await SyncOrScheduleAsync(sha, syncWith, now, cancellationToken).ConfigureAwait(false);
             }
         }
+    }
+
+    private async Task SyncOrScheduleAsync(string sha256, HlsSettingsSnapshot? syncWith, DateTime now, CancellationToken cancellationToken)
+    {
+        if (syncWith is null)
+        {
+            _toSchedule[sha256] = 0;
+        }
+        else
+        {
+            await SyncRenditionsAsync(sha256, syncWith, now, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    // The content a worker reported for the file of the video, when the file is still the one it wrote: as large, written no
+    // later, and of the content's size. Null otherwise, for a source job to identify it.
+    private async Task<string?> GetAddedShaAsync(Video video, HlsSourceFile file, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(video.Path))
+        {
+            return null;
+        }
+
+        var added = await _store.GetAddedFileAsync(video.Path, cancellationToken).ConfigureAwait(false);
+        if (added is null || added.ContentLength != file.Length)
+        {
+            return null;
+        }
+
+        var info = new FileInfo(video.Path);
+        return info.Exists && info.Length == added.Length && info.LastWriteTimeUtc <= added.DateCreated ? added.Sha256 : null;
     }
 
     private async Task RemoveSourceAsync(Guid itemId, DateTime now, CancellationToken cancellationToken)

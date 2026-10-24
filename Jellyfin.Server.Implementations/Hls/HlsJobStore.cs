@@ -40,13 +40,19 @@ public sealed partial class HlsJobStore : IDisposable
 
     /// <summary>
     /// Records library files. A file whose path, size or modification time changed is new content, so its hash is cleared;
-    /// every file left without a hash gets a source job in the same transaction.
+    /// every file left without a hash gets a source job in the same transaction. A file without a hash that a worker added as a
+    /// content that is known gets that hash at once, instead of a source job.
     /// </summary>
     /// <param name="files">The files.</param>
+    /// <param name="added">The contents workers added, by item; null for none.</param>
     /// <param name="now">The current time.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>What changed, for every file in the order given.</returns>
-    public Task<IReadOnlyList<HlsUpsertResult>> UpsertSourcesAsync(IReadOnlyList<HlsSourceFile> files, DateTime now, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<HlsUpsertResult>> UpsertSourcesAsync(
+        IReadOnlyList<HlsSourceFile> files,
+        IReadOnlyDictionary<Guid, string>? added,
+        DateTime now,
+        CancellationToken cancellationToken)
         => WriteAsync<IReadOnlyList<HlsUpsertResult>>(
             async context =>
             {
@@ -77,7 +83,14 @@ public sealed partial class HlsJobStore : IDisposable
                         stored.Sha256 = null;
                     }
 
-                    if (stored.Sha256 is null)
+                    if (stored.Sha256 is null
+                        && added is not null
+                        && added.TryGetValue(file.ItemId, out var sha256)
+                        && await LinkAsync(context, stored, sha256, now, cancellationToken).ConfigureAwait(false))
+                    {
+                        results[^1] = results[^1] with { LinkedSha256 = sha256 };
+                    }
+                    else if (stored.Sha256 is null)
                     {
                         unhashed.Add(file.ItemId);
                     }
@@ -279,6 +292,30 @@ public sealed partial class HlsJobStore : IDisposable
         => new(media.Sha256, media.MediaKey, media.LibraryId, Deserialize<HlsProbe>(media.Probe), media.DateOrphaned);
 
     private static T Deserialize<T>(string json) => JsonSerializer.Deserialize<T>(json) ?? throw new JsonException("The stored value is null.");
+
+    // A file a worker added is the content it encoded before: the content is no orphan, and a pending source job of the file is
+    // no longer needed. False when the content is not known, for a source job to identify the file.
+    private static async Task<bool> LinkAsync(JellyfinDbContext context, HlsSource source, string sha256, DateTime now, CancellationToken cancellationToken)
+    {
+        var media = await context.HlsMedia.FindAsync([sha256], cancellationToken).ConfigureAwait(false);
+        if (media is null)
+        {
+            return false;
+        }
+
+        source.Sha256 = sha256;
+        media.DateOrphaned = null;
+        var workKey = GetSourceWorkKey(source.ItemId);
+        var job = await context.HlsJobs
+            .FirstOrDefaultAsync(j => j.WorkKey == workKey && j.Status == (int)HlsJobStatus.Pending, cancellationToken)
+            .ConfigureAwait(false);
+        if (job is not null)
+        {
+            await CancelAsync(context, job, now, cancellationToken).ConfigureAwait(false);
+        }
+
+        return true;
+    }
 
     // A job of a file without a hash: pending, running and verifying jobs and those whose worker still holds the lease stay as
     // they are, a failed one waits for a rebuild; a complete or cancelled one is created again with a new id, since the outputs

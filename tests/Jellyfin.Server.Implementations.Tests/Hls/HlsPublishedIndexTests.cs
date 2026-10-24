@@ -59,7 +59,7 @@ public sealed class HlsPublishedIndexTests : IDisposable
         await _environment.Index.LoadAsync(CancellationToken);
 
         // A new length is new content, until a worker identifies it again.
-        await _environment.Store.UpsertSourcesAsync([LibraryFile(copy) with { Length = 2000 }], _environment.Now, CancellationToken);
+        await _environment.Store.UpsertSourcesAsync([LibraryFile(copy) with { Length = 2000 }], null, _environment.Now, CancellationToken);
         await _environment.Store.RemoveSourceAsync(item, _environment.Now, CancellationToken);
         await _environment.Index.RefreshItemsAsync([item, copy, item], CancellationToken);
 

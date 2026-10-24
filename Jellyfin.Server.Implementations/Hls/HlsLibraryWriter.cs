@@ -8,6 +8,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.MediaEncoding.Hls.Published;
 using MediaBrowser.Common.Net.S3;
 using MediaBrowser.Controller.Hls;
 using MediaBrowser.Controller.Library;
@@ -172,6 +173,9 @@ public sealed class HlsLibraryWriter : IHlsLibraryWriter, IDisposable
                 throw new ArgumentException("The upload is not complete: " + upload.Written + " of " + upload.Length + " bytes were written.", nameof(uploadId));
             }
 
+            // The hash and size of the content go with the file the library sees, for its item to be linked to the content.
+            var content = ValidateContent(upload, request);
+
             // The file goes in place only while the operation holds it, and no claim comes in between.
             if (request.OperationId is { } operation)
             {
@@ -184,7 +188,7 @@ public sealed class HlsLibraryWriter : IHlsLibraryWriter, IDisposable
                 }
             }
 
-            files = request.ShortcutTarget is null ? PutFile(upload) : PutShortcut(upload, request.ShortcutTarget);
+            files = request.ShortcutTarget is null ? PutFile(upload, content) : PutShortcut(upload, request.ShortcutTarget, content);
         }
         finally
         {
@@ -403,7 +407,35 @@ public sealed class HlsLibraryWriter : IHlsLibraryWriter, IDisposable
         }
     }
 
-    private static HlsLibraryFileRecord Record(Upload upload, string path) => new(upload.LibraryId, path, new FileInfo(path).Length, upload.WorkerId);
+    // The content a file is, given as its hash and size together; a plain file is the content itself.
+    private static (string Sha256, long Length)? ValidateContent(Upload upload, HlsLibraryUploadComplete request)
+    {
+        if (request.Sha256 is null && request.ContentLength is null)
+        {
+            return null;
+        }
+
+        if (request.Sha256 is null || request.ContentLength is not { } length)
+        {
+            throw new ArgumentException("The hash and the size of the content are given together.", nameof(request));
+        }
+
+        var sha256 = HlsProbeReader.NormalizeSha256(request.Sha256);
+        if (length is < 0 or > MaxLength)
+        {
+            throw new ArgumentException("The size of a content is 0 to 10 TiB.", nameof(request));
+        }
+
+        if (request.ShortcutTarget is null && length != upload.Length)
+        {
+            throw new ArgumentException("A plain file is the content: its size is " + upload.Length + " bytes.", nameof(request));
+        }
+
+        return (sha256, length);
+    }
+
+    private static HlsLibraryFileRecord Record(Upload upload, string path, (string Sha256, long Length)? content = null)
+        => new(upload.LibraryId, path, new FileInfo(path).Length, upload.WorkerId, content?.Sha256, content?.Length);
 
     private static void TryDeleteFile(string path)
     {
@@ -434,14 +466,14 @@ public sealed class HlsLibraryWriter : IHlsLibraryWriter, IDisposable
 
     // A plain file replaces what is there; the TrueCache entry of a file it replaces would describe another file, and is put back
     // when the file cannot be replaced.
-    private IReadOnlyList<HlsLibraryFileRecord> PutFile(Upload upload)
+    private IReadOnlyList<HlsLibraryFileRecord> PutFile(Upload upload, (string Sha256, long Length)? content)
     {
         var name = Path.GetFileName(upload.FinalPath);
         var entry = Path.Combine(Path.GetDirectoryName(upload.FinalPath)!, EntriesDirectory, name);
         if (!Directory.Exists(entry))
         {
             File.Move(upload.TemporaryPath, upload.FinalPath, true);
-            return [Record(upload, upload.FinalPath)];
+            return [Record(upload, upload.FinalPath, content)];
         }
 
         // A name of its own, not one made from the file's: a long file name would go past the length a name can have.
@@ -466,12 +498,12 @@ public sealed class HlsLibraryWriter : IHlsLibraryWriter, IDisposable
             _logger.LogWarning("The old TrueCache entry {Path} could not be deleted: {Message}", previous, ex.Message);
         }
 
-        return [Record(upload, upload.FinalPath)];
+        return [Record(upload, upload.FinalPath, content)];
     }
 
     // The entry goes in place before the .strm file, so the .strm file is never read without it; an entry it replaces is put
     // back when this fails.
-    private List<HlsLibraryFileRecord> PutShortcut(Upload upload, string target)
+    private List<HlsLibraryFileRecord> PutShortcut(Upload upload, string target, (string Sha256, long Length)? content)
     {
         var directory = Path.GetDirectoryName(upload.FinalPath)!;
         var name = Path.GetFileName(upload.FinalPath);
@@ -529,7 +561,7 @@ public sealed class HlsLibraryWriter : IHlsLibraryWriter, IDisposable
                 }
             }
 
-            var files = new List<HlsLibraryFileRecord> { Record(upload, upload.FinalPath) };
+            var files = new List<HlsLibraryFileRecord> { Record(upload, upload.FinalPath, content) };
             files.AddRange(Directory.EnumerateFiles(final, "*", SearchOption.AllDirectories).Select(f => Record(upload, f)));
             return files;
         }
