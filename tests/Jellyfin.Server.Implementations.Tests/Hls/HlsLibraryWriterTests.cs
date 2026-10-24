@@ -116,6 +116,34 @@ public sealed class HlsLibraryWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task AChunkSentAgainThatFails_LeavesTheUploadNotComplete()
+    {
+        var id = await StartAsync("a.nfo", 6);
+        Assert.True(await WriteAsync(id, 0, "abcdef"));
+
+        await Assert.ThrowsAsync<ArgumentException>(() => WriteAsync(id, 0, "abcdefg"));
+
+        await Assert.ThrowsAsync<ArgumentException>(() => _writer.CompleteAsync(id, new HlsLibraryUploadComplete(null), CancellationToken));
+        Assert.Empty(Directory.GetFileSystemEntries(_movies));
+    }
+
+    [Fact]
+    public async Task AFileThatCannotReplaceWhatIsThere_KeepsItsEntry()
+    {
+        var entries = Path.Combine(_movies, "Film", "__true_cache__");
+        var entry = Directory.CreateDirectory(Path.Combine(entries, "a.nfo")).FullName;
+        await File.WriteAllTextAsync(Path.Combine(entry, "old.json"), "{}", CancellationToken);
+        Directory.CreateDirectory(Path.Combine(_movies, "Film", "a.nfo", "in-the-way"));
+        var id = await StartAsync("Film/a.nfo", 3);
+        Assert.True(await WriteAsync(id, 0, "abc"));
+
+        await Assert.ThrowsAnyAsync<Exception>(() => _writer.CompleteAsync(id, new HlsLibraryUploadComplete(null), CancellationToken));
+
+        Assert.Equal([entry], Directory.GetFileSystemEntries(entries));
+        Assert.True(File.Exists(Path.Combine(entry, "old.json")));
+    }
+
+    [Fact]
     public async Task AnUploadNotComplete_EndsWithoutAFile()
     {
         var id = await StartAsync("a.nfo", 6);

@@ -797,6 +797,21 @@ public sealed class HlsJobStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Eager_JobThatStopped_WhoseDirectoriesAreDueForDeletion_IsMadeAgainWithNewDirectories()
+    {
+        var lease = (await StartEagerAsync(Sha('a'), [720])).Lease!;
+        Assert.True(await ReleaseAsync(lease));
+
+        _now += TimeSpan.FromDays(1);
+        var result = await StartEagerAsync(Sha('a'), [720], resumeJobId: lease.Id, resumeToken: lease.LeaseToken);
+
+        Assert.Equal(HlsEagerJobOutcome.Started, result.Outcome);
+        Assert.NotEqual(lease.LeaseToken, result.Lease!.LeaseToken);
+        Assert.Empty(Directories(result.Lease.Plan!).Intersect(Directories(lease.Plan!)));
+        Assert.Equal(Directories(lease.Plan!), (await DeletionsAsync()).Select(d => d.RelativeDirectory).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
     public async Task Eager_JobThatStopped_IsReplaced_WithoutItsToken_AndItsDirectoriesAreDeletedAtOnce()
     {
         var lease = (await StartEagerAsync(Sha('a'), [720])).Lease!;

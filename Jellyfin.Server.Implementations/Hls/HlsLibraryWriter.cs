@@ -115,6 +115,7 @@ public sealed class HlsLibraryWriter : IHlsLibraryWriter, IDisposable
             await using (file.ConfigureAwait(false))
             {
                 file.SetLength(offset);
+                upload.Written = offset;
                 file.Position = offset;
                 var buffer = new byte[BufferSize];
                 int read;
@@ -166,7 +167,7 @@ public sealed class HlsLibraryWriter : IHlsLibraryWriter, IDisposable
 
             upload.Finished = true;
             _uploads.TryRemove(uploadId, out _);
-            if (upload.Written != upload.Length)
+            if (upload.Written != upload.Length || new FileInfo(upload.TemporaryPath).Length != upload.Length)
             {
                 throw new ArgumentException("The upload is not complete: " + upload.Written + " of " + upload.Length + " bytes were written.", nameof(uploadId));
             }
@@ -431,16 +432,39 @@ public sealed class HlsLibraryWriter : IHlsLibraryWriter, IDisposable
         }
     }
 
-    // A plain file replaces what is there; the TrueCache entry of a file it replaces would describe another file.
-    private static IReadOnlyList<HlsLibraryFileRecord> PutFile(Upload upload)
+    // A plain file replaces what is there; the TrueCache entry of a file it replaces would describe another file, and is put back
+    // when the file cannot be replaced.
+    private IReadOnlyList<HlsLibraryFileRecord> PutFile(Upload upload)
     {
-        var entry = Path.Combine(Path.GetDirectoryName(upload.FinalPath)!, EntriesDirectory, Path.GetFileName(upload.FinalPath));
-        if (Directory.Exists(entry))
+        var name = Path.GetFileName(upload.FinalPath);
+        var entry = Path.Combine(Path.GetDirectoryName(upload.FinalPath)!, EntriesDirectory, name);
+        if (!Directory.Exists(entry))
         {
-            Directory.Delete(entry, true);
+            File.Move(upload.TemporaryPath, upload.FinalPath, true);
+            return [Record(upload, upload.FinalPath)];
         }
 
-        File.Move(upload.TemporaryPath, upload.FinalPath, true);
+        var previous = Path.Combine(Path.GetDirectoryName(entry)!, "." + name + "-" + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture)[..12] + "-old");
+        Directory.Move(entry, previous);
+        try
+        {
+            File.Move(upload.TemporaryPath, upload.FinalPath, true);
+        }
+        catch
+        {
+            Directory.Move(previous, entry);
+            throw;
+        }
+
+        try
+        {
+            Directory.Delete(previous, true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning("The old TrueCache entry {Path} could not be deleted: {Message}", previous, ex.Message);
+        }
+
         return [Record(upload, upload.FinalPath)];
     }
 

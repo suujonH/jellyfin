@@ -28,6 +28,9 @@ public sealed partial class HlsJobStore
     // How long the directories of an eager job that stopped are kept for its worker to resume it.
     private static readonly TimeSpan _eagerKeep = TimeSpan.FromDays(1);
 
+    // How long before its deletion is due a directory is no longer taken back: the deletion service may be about to delete it.
+    private static readonly TimeSpan _resumeDeletionMargin = TimeSpan.FromMinutes(1);
+
     /// <summary>
     /// Creates the job of a content whose renditions need one and lets it hold them. A pending job is reused, a running or verifying
     /// one and a cancelled one whose worker still holds the lease are left alone; any other is created again with a new id, since
@@ -844,11 +847,19 @@ public sealed partial class HlsJobStore
                 || (job.Status == (int)HlsJobStatus.Cancelled && job.LeaseExpires is null));
 
     // Leases the job again with its plan, its token and so its directories, which are no longer to be deleted; null when one of its
-    // renditions was taken or published meanwhile, or the profile changed.
+    // renditions was taken or published meanwhile, the profile changed, or the deletion of one of its directories is due, so may
+    // have started: the job is then made again with new directories.
     private static async Task<HlsEagerJobResult?> TryResumeAsync(JellyfinDbContext context, HlsJob job, HlsEagerJobRequest request, bool keptStoredProbe, CancellationToken cancellationToken)
     {
         var plan = Deserialize<HlsEncodePlan>(job.Plan!);
         if (!string.Equals(plan.Profile, request.Profile, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var directories = plan.Renditions.Select(r => r.RelativeDirectory).ToList();
+        var deletions = await context.HlsDeletions.Where(d => directories.Contains(d.RelativeDirectory)).ToListAsync(cancellationToken).ConfigureAwait(false);
+        if (deletions.Any(d => d.NotBefore <= request.Now + _resumeDeletionMargin))
         {
             return null;
         }
@@ -868,8 +879,7 @@ public sealed partial class HlsJobStore
             rendition.JobId = job.Id;
         }
 
-        var directories = plan.Renditions.Select(r => r.RelativeDirectory).ToList();
-        context.HlsDeletions.RemoveRange(await context.HlsDeletions.Where(d => directories.Contains(d.RelativeDirectory)).ToListAsync(cancellationToken).ConfigureAwait(false));
+        context.HlsDeletions.RemoveRange(deletions);
         var now = request.Now;
         job.Status = (int)HlsJobStatus.Running;
         job.Worker = request.Worker;
