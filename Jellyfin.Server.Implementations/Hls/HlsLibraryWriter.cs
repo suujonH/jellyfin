@@ -444,7 +444,8 @@ public sealed class HlsLibraryWriter : IHlsLibraryWriter, IDisposable
             return [Record(upload, upload.FinalPath)];
         }
 
-        var previous = Path.Combine(Path.GetDirectoryName(entry)!, "." + name + "-" + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture)[..12] + "-old");
+        // A name of its own, not one made from the file's: a long file name would go past the length a name can have.
+        var previous = Path.Combine(Path.GetDirectoryName(entry)!, ".old-" + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture));
         Directory.Move(entry, previous);
         try
         {
@@ -482,7 +483,7 @@ public sealed class HlsLibraryWriter : IHlsLibraryWriter, IDisposable
         ValidateTarget(target);
         var entries = Path.Combine(directory, EntriesDirectory);
         var suffix = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture)[..12];
-        var staging = Path.Combine(entries, "." + name + "-" + suffix);
+        var staging = Path.Combine(entries, ".new-" + suffix);
         var text = Path.Combine(directory, ".hls-strm-" + suffix);
         try
         {
@@ -490,7 +491,7 @@ public sealed class HlsLibraryWriter : IHlsLibraryWriter, IDisposable
             File.WriteAllText(text, target + "\n", new UTF8Encoding(false));
 
             var final = Path.Combine(entries, name);
-            var previous = staging + "-old";
+            var previous = Path.Combine(entries, ".old-" + suffix);
             var replaced = Directory.Exists(final);
             if (replaced)
             {

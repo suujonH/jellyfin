@@ -144,6 +144,18 @@ public sealed class HlsLibraryWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task AFileOfTheLongestName_ReplacesOneWithAnEntry()
+    {
+        var name = new string('a', 251) + ".nfo";
+        Directory.CreateDirectory(Path.Combine(_movies, "__true_cache__", name));
+
+        await PutAsync(name, "abc");
+
+        Assert.Equal("abc", await File.ReadAllTextAsync(Path.Combine(_movies, name), CancellationToken));
+        Assert.Empty(Directory.GetFileSystemEntries(Path.Combine(_movies, "__true_cache__")));
+    }
+
+    [Fact]
     public async Task AnUploadNotComplete_EndsWithoutAFile()
     {
         var id = await StartAsync("a.nfo", 6);
