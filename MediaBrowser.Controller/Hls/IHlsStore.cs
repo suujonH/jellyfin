@@ -14,7 +14,7 @@ namespace MediaBrowser.Controller.Hls;
 public interface IHlsStore
 {
     /// <summary>
-    /// Gets the root in its normal form: an absolute local path, or <c>s3://bucket/prefix</c>.
+    /// Gets the root in its normal form: an absolute local path, <c>s3://bucket/prefix</c>, or <c>worker-local://{worker id}/{local path}</c>.
     /// </summary>
     string Location { get; }
 

@@ -223,6 +223,16 @@ public class JellyfinDbContext(DbContextOptions<JellyfinDbContext> options, ILog
     /// </summary>
     public DbSet<HlsVersionItem> HlsVersionItems => Set<HlsVersionItem>();
 
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing the HLS workers the server registered.
+    /// </summary>
+    public DbSet<HlsWorkerIdentity> HlsWorkers => Set<HlsWorkerIdentity>();
+
+    /// <summary>
+    /// Gets the <see cref="DbSet{TEntity}"/> containing the files HLS workers wrote into library folders.
+    /// </summary>
+    public DbSet<HlsLibraryFile> HlsLibraryFiles => Set<HlsLibraryFile>();
+
     /*public DbSet<Artwork> Artwork => Set<Artwork>();
 
     public DbSet<Book> Books => Set<Book>();

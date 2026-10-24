@@ -33,6 +33,11 @@ public class HlsRendition
     public Guid? PublishedJobId { get; set; }
 
     /// <summary>
+    /// Gets or sets the id of the worker whose job published the output.
+    /// </summary>
+    public Guid? WorkerId { get; set; }
+
+    /// <summary>
     /// Gets or sets the published directory, relative to the root of the HLS store.
     /// </summary>
     public string? RelativeDirectory { get; set; }

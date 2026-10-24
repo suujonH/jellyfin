@@ -14,12 +14,30 @@ namespace MediaBrowser.Controller.Hls;
 public interface IHlsTaskCenter
 {
     /// <summary>
-    /// Claims the oldest job a worker can do.
+    /// Registers a worker under the id it has, or a new one.
     /// </summary>
-    /// <param name="worker">The name of the worker.</param>
+    /// <param name="registration">The worker.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The id of the worker.</returns>
+    Task<Guid> RegisterWorkerAsync(HlsWorkerRegistration registration, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Claims the oldest job a worker can do, of the libraries it asks for and not of the items it excludes; a job whose file is
+    /// on the machine of a worker goes only to that worker.
+    /// </summary>
+    /// <param name="request">The worker.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
     /// <returns>The job, or <c>null</c> when there is none or pre-encoded HLS is off.</returns>
-    Task<HlsClaimedJob?> PollAsync(string worker, CancellationToken cancellationToken);
+    Task<HlsClaimedJob?> PollAsync(HlsWorkerRequest request, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Gives back a job whose file the worker cannot read, before it was identified; the attempt is not counted.
+    /// </summary>
+    /// <param name="jobId">The job.</param>
+    /// <param name="leaseToken">The token of the lease.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>Whether the lease was valid and the job was not identified yet.</returns>
+    Task<bool> ReturnAsync(Guid jobId, string leaseToken, CancellationToken cancellationToken);
 
     /// <summary>
     /// Gets where the worker reads the file of its job.

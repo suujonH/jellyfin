@@ -58,6 +58,11 @@ public class HlsJob
     public string? Worker { get; set; }
 
     /// <summary>
+    /// Gets or sets the id of the worker that claimed the job last.
+    /// </summary>
+    public Guid? WorkerId { get; set; }
+
+    /// <summary>
     /// Gets or sets the token of the lease, which also names the directories of the attempt.
     /// </summary>
     public string? LeaseToken { get; set; }

@@ -15,6 +15,7 @@ namespace Jellyfin.Server.Implementations.Hls;
 /// <param name="GetQualities">The video qualities of a library.</param>
 /// <param name="Profile">The current encoding profile.</param>
 /// <param name="IsLibraryEligible">Whether pre-encoded HLS is enabled for a library.</param>
+/// <param name="ExcludedQualities">The video qualities the worker does not encode, which are left for another job.</param>
 /// <param name="Now">The current time.</param>
 public sealed record HlsIdentifyRequest(
     Guid JobId,
@@ -25,4 +26,5 @@ public sealed record HlsIdentifyRequest(
     Func<Guid, IReadOnlyCollection<int>> GetQualities,
     string Profile,
     Func<Guid, bool> IsLibraryEligible,
+    IReadOnlySet<int> ExcludedQualities,
     DateTime Now);

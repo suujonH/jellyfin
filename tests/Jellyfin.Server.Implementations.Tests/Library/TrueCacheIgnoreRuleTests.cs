@@ -17,6 +17,14 @@ public class TrueCacheIgnoreRuleTests
     }
 
     [Fact]
+    public void ShouldIgnore_WorkingFolder_IsIgnored()
+    {
+        var rule = new TrueCacheIgnoreRule(NoTrueCacheService.Instance);
+
+        Assert.True(rule.ShouldIgnore(new FileSystemMetadata { FullName = "/media/__working__", Name = "__working__", IsDirectory = true }, null));
+    }
+
+    [Fact]
     public void ShouldIgnore_FileNamedLikeCacheFolder_IsNotIgnored()
     {
         var rule = new TrueCacheIgnoreRule(NoTrueCacheService.Instance);

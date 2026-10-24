@@ -13,5 +13,5 @@ public static class HlsWorkerProtocol
     /// <summary>
     /// The version the server speaks.
     /// </summary>
-    public const int Version = 1;
+    public const int Version = 3;
 }

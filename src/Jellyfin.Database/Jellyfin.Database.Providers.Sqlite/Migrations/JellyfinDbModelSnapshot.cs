@@ -737,6 +737,9 @@ namespace Jellyfin.Server.Implementations.Migrations
                     b.Property<string>("Worker")
                         .HasColumnType("TEXT");
 
+                    b.Property<Guid?>("WorkerId")
+                        .HasColumnType("TEXT");
+
                     b.HasKey("Id");
 
                     b.HasIndex("Sha256");
@@ -778,6 +781,37 @@ namespace Jellyfin.Server.Implementations.Migrations
                     b.HasKey("JobId", "Key");
 
                     b.ToTable("HlsJobOutputs");
+
+                    b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.HlsLibraryFile", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("DateCreated")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Length")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("LibraryId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Path")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("WorkerId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Path");
+
+                    b.ToTable("HlsLibraryFiles");
 
                     b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
                 });
@@ -846,6 +880,9 @@ namespace Jellyfin.Server.Implementations.Migrations
                     b.Property<string>("Summary")
                         .HasColumnType("TEXT");
 
+                    b.Property<Guid?>("WorkerId")
+                        .HasColumnType("TEXT");
+
                     b.HasKey("Sha256", "Key");
 
                     b.HasIndex("JobId");
@@ -904,6 +941,29 @@ namespace Jellyfin.Server.Implementations.Migrations
                     b.HasKey("ItemId", "Quality");
 
                     b.ToTable("HlsVersionItems");
+
+                    b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
+                });
+
+            modelBuilder.Entity("Jellyfin.Database.Implementations.Entities.HlsWorkerIdentity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("DateCreated")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("DateLastSeen")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("HlsWorkers");
 
                     b.HasAnnotation("Sqlite:UseSqlReturningClause", false);
                 });

@@ -1,8 +1,11 @@
+using System;
+using System.Globalization;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Jellyfin.Extensions.Json;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Hls;
 using Xunit;
@@ -81,11 +84,19 @@ namespace Jellyfin.Server.Integration.Tests.Controllers
             Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("HlsWorker/Protocol", TestContext.Current.CancellationToken)).StatusCode);
             Assert.Equal(HttpStatusCode.BadRequest, (await worker.GetAsync("HlsWorker/Protocol", TestContext.Current.CancellationToken)).StatusCode);
 
-            worker.DefaultRequestHeaders.Add(HlsWorkerProtocol.Header, "1");
-            Assert.Equal(new HlsProtocolVersion(1), await worker.GetFromJsonAsync<HlsProtocolVersion>("HlsWorker/Protocol", TestContext.Current.CancellationToken));
+            worker.DefaultRequestHeaders.Add(HlsWorkerProtocol.Header, HlsWorkerProtocol.Version.ToString(CultureInfo.InvariantCulture));
+            Assert.Equal(new HlsProtocolVersion(HlsWorkerProtocol.Version), await worker.GetFromJsonAsync<HlsProtocolVersion>("HlsWorker/Protocol", TestContext.Current.CancellationToken));
+
+            // A worker asks for work with the id it was registered with.
+            var unregistered = await worker.PostAsJsonAsync("HlsWorker/Poll", new HlsWorkerRequest("worker", Guid.Empty), TestContext.Current.CancellationToken);
+            Assert.Equal(HttpStatusCode.BadRequest, unregistered.StatusCode);
+            var registration = await worker.PostAsJsonAsync("HlsWorker/Workers", new HlsWorkerRegistration(null, "worker"), TestContext.Current.CancellationToken);
+            registration.EnsureSuccessStatusCode();
+            var registered = await registration.Content.ReadFromJsonAsync<HlsWorkerRegistered>(JsonDefaults.Options, TestContext.Current.CancellationToken);
+            Assert.NotEqual(Guid.Empty, registered!.Id);
 
             // Pre-encoded HLS is off, so there is no work.
-            var poll = await worker.PostAsJsonAsync("HlsWorker/Poll", new HlsWorkerRequest("worker"), TestContext.Current.CancellationToken);
+            var poll = await worker.PostAsJsonAsync("HlsWorker/Poll", new HlsWorkerRequest("worker", registered.Id), TestContext.Current.CancellationToken);
             Assert.Equal(HttpStatusCode.NoContent, poll.StatusCode);
         }
 

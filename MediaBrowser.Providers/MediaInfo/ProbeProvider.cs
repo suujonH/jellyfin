@@ -24,6 +24,7 @@ using MediaBrowser.Controller.Subtitles;
 using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Globalization;
+using MediaBrowser.Model.Hls;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.MediaInfo;
 using Microsoft.Extensions.Logging;
@@ -394,8 +395,8 @@ namespace MediaBrowser.Providers.MediaInfo
             }
 
             // Only allow remote URLs in .strm files to prevent local file access.
-            // An s3:// target is kept as written and presigned whenever it is read.
-            if (S3Address.TryParse(shortcutPath, out _))
+            // An s3:// target is kept as written and presigned whenever it is read; a worker-local:// one is only read by its worker.
+            if (S3Address.TryParse(shortcutPath, out _) || HlsWorkerLocalAddress.TryParse(shortcutPath, out _, out _))
             {
                 item.ShortcutPath = shortcutPath;
             }

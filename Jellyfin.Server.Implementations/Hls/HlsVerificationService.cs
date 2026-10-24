@@ -307,6 +307,12 @@ public sealed class HlsVerificationService : BackgroundService
     // A store that cannot be read fails the verification too, once the root is found trustworthy.
     private static async Task<string?> VerifyOutputAsync(IHlsStore store, string relativeDirectory, IReadOnlyList<HlsOutputFile> files, CancellationToken cancellationToken)
     {
+        // The files are on the worker, which the server cannot read: the list the worker reported is taken as it is.
+        if (HlsWorkerLocalAddress.TryParse(store.Location, out _, out _))
+        {
+            return null;
+        }
+
         try
         {
             return HlsOutputVerifier.Compare(files, await store.ListAsync(relativeDirectory, cancellationToken).ConfigureAwait(false));

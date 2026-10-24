@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using Jellyfin.Server.Implementations.Hls;
 using MediaBrowser.Controller.NetworkStorage;
 using Moq;
@@ -35,6 +36,25 @@ public class HlsStoreFactoryTests
         Assert.IsType<LocalHlsStore>(store);
         Assert.True(store.IsLocal);
         Assert.Equal(Path.Combine(Path.GetTempPath(), "hls"), store.Location);
+    }
+
+    [Theory]
+    [InlineData(@"worker-local://0123456789abcdef0123456789abcdef/D:\work\hls\", @"worker-local://0123456789abcdef0123456789abcdef/D:\work\hls")]
+    [InlineData(" worker-local://0123456789abcdef0123456789abcdef/srv/hls/ ", "worker-local://0123456789abcdef0123456789abcdef/srv/hls")]
+    [InlineData("worker-local://0123456789abcdef0123456789abcdef//", "worker-local://0123456789abcdef0123456789abcdef//")]
+    public async Task Create_WorkerLocalAddress_IsAStoreTheServerCannotRead(string location, string expected)
+    {
+        var store = _factory.Create(location);
+
+        Assert.IsType<WorkerLocalHlsStore>(store);
+        Assert.False(store.IsLocal);
+        Assert.Equal(expected, store.Location);
+        Assert.Null(await store.CheckRootAsync(["a"], TestContext.Current.CancellationToken));
+        Assert.True(await store.HasMarkerAsync(TestContext.Current.CancellationToken));
+        Assert.Null(store.GetServerPath("a/b"));
+        Assert.Null(store.GetClientAddress("a/b"));
+        await store.DeleteDirectoryAsync("a", TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<IOException>(() => store.ListAsync("a", TestContext.Current.CancellationToken));
     }
 
     [Theory]

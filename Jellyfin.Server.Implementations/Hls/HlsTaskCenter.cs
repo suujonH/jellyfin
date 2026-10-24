@@ -75,16 +75,37 @@ public sealed class HlsTaskCenter : IHlsTaskCenter
     }
 
     /// <inheritdoc />
-    public async Task<HlsClaimedJob?> PollAsync(string worker, CancellationToken cancellationToken)
+    public Task<Guid> RegisterWorkerAsync(HlsWorkerRegistration registration, CancellationToken cancellationToken)
     {
-        ValidateWorker(worker);
+        ArgumentNullException.ThrowIfNull(registration);
+        ValidateWorker(registration.Name);
+        return _store.RegisterWorkerAsync(registration.Id, registration.Name, DateTime.UtcNow, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<HlsClaimedJob?> PollAsync(HlsWorkerRequest request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ValidateWorker(request.Worker);
+        ValidateWorkerId(request.WorkerId);
         var settings = _settings.Current;
         if (!settings.Options.Enabled)
         {
             return null;
         }
 
-        var lease = await _store.ClaimAsync(new HlsClaimRequest(worker, settings.Lease, settings.IsLibraryEligible, DateTime.UtcNow), cancellationToken).ConfigureAwait(false);
+        var claim = new HlsClaimRequest(
+            request.Worker,
+            request.WorkerId,
+            settings.Lease,
+            settings.IsLibraryEligible,
+            request.Libraries?.ToHashSet(),
+            (request.ExcludedItems ?? []).ToHashSet(),
+            (request.ExcludedQualities ?? [])
+                .GroupBy(f => f.LibraryId)
+                .ToDictionary(g => g.Key, g => (IReadOnlySet<int>)g.SelectMany(f => f.Excluded ?? []).ToHashSet()),
+            DateTime.UtcNow);
+        var lease = await _store.ClaimAsync(claim, cancellationToken).ConfigureAwait(false);
         return lease is null
             ? null
             : new HlsClaimedJob(new HlsWorkLease(lease.Id, lease.LeaseToken, (int)settings.Lease.TotalSeconds, lease.Attempt), lease.Input!);
@@ -98,8 +119,8 @@ public sealed class HlsTaskCenter : IHlsTaskCenter
             return null;
         }
 
-        // A job started for media being added reads the file of its worker.
-        if (lease.Input is null)
+        // A job started for media being added, or one whose file is on the machine of its worker, reads the file of its worker.
+        if (lease.Input is null || HlsWorkerLocalAddress.TryParse(lease.Input.Path, out _, out _))
         {
             return new HlsJobInput(null, null);
         }
@@ -117,6 +138,10 @@ public sealed class HlsTaskCenter : IHlsTaskCenter
             ? new HlsJobInput(null, uri)
             : throw new IOException("No access of network storage covers " + path + ".");
     }
+
+    /// <inheritdoc />
+    public Task<bool> ReturnAsync(Guid jobId, string leaseToken, CancellationToken cancellationToken)
+        => _store.ReturnJobAsync(jobId, leaseToken, DateTime.UtcNow, cancellationToken);
 
     /// <inheritdoc />
     public Task<bool> HeartbeatAsync(Guid jobId, string leaseToken, CancellationToken cancellationToken)
@@ -138,7 +163,7 @@ public sealed class HlsTaskCenter : IHlsTaskCenter
         var previousSha256 = itemId is { } id ? (await _store.GetSourceAsync(id, cancellationToken).ConfigureAwait(false))?.Sha256 : null;
         var settings = _settings.Current;
         var result = await _store.IdentifyAsync(
-            new HlsIdentifyRequest(jobId, identification.LeaseToken, sha256, probe, root, settings.GetQualities, HlsEncodingProfile.Version, settings.IsLibraryEligible, now),
+            new HlsIdentifyRequest(jobId, identification.LeaseToken, sha256, probe, root, settings.GetQualities, HlsEncodingProfile.Version, settings.IsLibraryEligible, (identification.ExcludedQualities ?? []).ToHashSet(), now),
             cancellationToken).ConfigureAwait(false);
         if (result.Outcome == HlsIdentifyOutcome.LeaseLost)
         {
@@ -184,6 +209,7 @@ public sealed class HlsTaskCenter : IHlsTaskCenter
     {
         ArgumentNullException.ThrowIfNull(request);
         ValidateWorker(request.Worker);
+        ValidateWorkerId(request.WorkerId);
         var settings = _settings.Current;
         var library = GetLibraries().FirstOrDefault(l => l.Id.Equals(request.LibraryId))
             ?? throw new ArgumentException("Library " + request.LibraryId + " does not exist or is not pre-encoded.", nameof(request));
@@ -196,7 +222,7 @@ public sealed class HlsTaskCenter : IHlsTaskCenter
         var probe = ParseProbe(request.ProbeJson);
         var root = await GetUsableBaseAsync(request.Base, cancellationToken).ConfigureAwait(false);
         var result = await _store.StartEagerJobAsync(
-            new HlsEagerJobRequest(request.Worker, library.Id, sha256, probe, root, request.Qualities.ToHashSet(), settings.GetQualities, HlsEncodingProfile.Version, settings.Lease, DateTime.UtcNow),
+            new HlsEagerJobRequest(request.Worker, request.WorkerId, library.Id, sha256, probe, root, request.Qualities.ToHashSet(), settings.GetQualities, HlsEncodingProfile.Version, settings.Lease, DateTime.UtcNow, request.ResumeJobId, request.ResumeToken),
             cancellationToken).ConfigureAwait(false);
         if (result.KeptStoredProbe)
         {
@@ -292,6 +318,14 @@ public sealed class HlsTaskCenter : IHlsTaskCenter
         if (string.IsNullOrWhiteSpace(worker) || worker.Length > MaxWorkerName)
         {
             throw new ArgumentException("The name of a worker is 1 to 128 characters long.", nameof(worker));
+        }
+    }
+
+    private static void ValidateWorkerId(Guid workerId)
+    {
+        if (workerId.Equals(Guid.Empty))
+        {
+            throw new ArgumentException("The worker id is required; register the worker first.", nameof(workerId));
         }
     }
 

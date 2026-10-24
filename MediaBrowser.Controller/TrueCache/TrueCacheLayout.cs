@@ -15,6 +15,9 @@ public static class TrueCacheLayout
     /// <summary>The name of the folder that sits next to the resources it describes.</summary>
     public const string FolderName = "__true_cache__";
 
+    /// <summary>The name of the folder, next to the files of a library, where the HLS workers mark the files they are adding.</summary>
+    public const string WorkingFolderName = "__working__";
+
     /// <summary>The declaration of an entry.</summary>
     public const string MetaFile = "meta.toml";
 
@@ -73,6 +76,14 @@ public static class TrueCacheLayout
     /// <returns><c>true</c> for a cache folder.</returns>
     public static bool IsCacheFolderName(ReadOnlySpan<char> name)
         => name.Equals(FolderName, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Gets whether a file system entry is the folder where the HLS workers mark the files they are adding.
+    /// </summary>
+    /// <param name="name">The name of the entry.</param>
+    /// <returns><c>true</c> for that folder.</returns>
+    public static bool IsWorkingFolderName(ReadOnlySpan<char> name)
+        => name.Equals(WorkingFolderName, StringComparison.Ordinal);
 
     /// <summary>
     /// Gets whether a resource is a .strm, whose declared size is the size of the media it names.
