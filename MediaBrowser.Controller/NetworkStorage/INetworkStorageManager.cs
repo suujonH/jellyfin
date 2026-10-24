@@ -152,11 +152,11 @@ public interface INetworkStorageManager
     Task<IReadOnlyList<NetworkStorageResourceEntry>> GetResourceEntriesAsync(CancellationToken cancellationToken);
 
     /// <summary>
-    /// Gets the key of the storage a target or a root is in, such as <c>s3:bucket</c>.
+    /// Gets the storage a root, such as that of an HLS store, is in; the root may be a whole bucket, such as <c>s3://bucket</c>.
     /// </summary>
-    /// <param name="target">The target or root.</param>
-    /// <returns>The key, or <c>null</c> when no protocol knows the target.</returns>
-    string? GetStorageKey(string target);
+    /// <param name="root">The root.</param>
+    /// <returns>The storage, or <c>null</c> when no protocol knows the root.</returns>
+    NetworkStorageRoot? GetStorageRoot(string root);
 
     /// <summary>
     /// Reports that reading the network resource of an item failed. The resource is checked: only a resource that is

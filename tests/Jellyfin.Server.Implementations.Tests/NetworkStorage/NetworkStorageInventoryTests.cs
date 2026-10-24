@@ -7,6 +7,7 @@ using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Server.Implementations.NetworkStorage;
 using Jellyfin.Server.Implementations.Tests.Hls;
 using MediaBrowser.Common.Net.S3;
+using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
@@ -47,11 +48,13 @@ public sealed class NetworkStorageInventoryTests : IDisposable
         _manager = new NetworkStorageManager(factory.Object, [new S3StorageProtocol(null!)], trueCache.Object, NullLogger<NetworkStorageManager>.Instance);
 
         var libraryManager = new Mock<ILibraryManager>();
-        libraryManager.Setup(m => m.GetVirtualFolders()).Returns([new VirtualFolderInfo { ItemId = LibraryId.ToString("N"), Name = "剧集", Locations = ["/tv"] }]);
-        _inventory = new NetworkStorageInventory(_manager, _environment.Store, _environment.Settings, libraryManager.Object, factory.Object);
+        libraryManager.Setup(m => m.GetVirtualFolders()).Returns([new VirtualFolderInfo { ItemId = LibraryId.ToString("N"), Name = "剧集", Locations = ["/data/tv"] }]);
+        var appHost = new Mock<IServerApplicationHost>();
+        appHost.Setup(h => h.ExpandVirtualPath(It.IsAny<string>())).Returns((string path) => path.Replace("%AppDataPath%", "/data", StringComparison.Ordinal));
+        _inventory = new NetworkStorageInventory(_manager, _environment.Store, _environment.Settings, libraryManager.Object, appHost.Object, factory.Object);
 
-        // The folder of the library the items are in.
-        _folderId = AddItem(Guid.NewGuid(), "/tv", typeof(Folder).FullName!, null, null, null);
+        // The folder of the library the items are in, which the database keeps virtual.
+        _folderId = AddItem(Guid.NewGuid(), "%AppDataPath%/tv", typeof(Folder).FullName!, null, null, null);
     }
 
     private static CancellationToken CancellationToken => TestContext.Current.CancellationToken;
@@ -100,6 +103,37 @@ public sealed class NetworkStorageInventoryTests : IDisposable
         AddEpisode(item, 1);
 
         Assert.Empty(await _inventory.GetStoragesAsync(CancellationToken));
+    }
+
+    [Fact]
+    public async Task HlsAtTheRootOfABucket_IsInIt()
+    {
+        await AddAccessAsync();
+        var (item, _) = await _environment.PublishAsync(Sha('a'));
+        AddEpisode(item, 1);
+        await MoveHlsToStorageAsync("s3://media");
+
+        var resource = Assert.Single((await _inventory.GetResourcesAsync(StorageKey, [], null, 0, null, CancellationToken)).Items);
+
+        Assert.Equal(item, resource.ItemId);
+        Assert.All(resource.HlsRenditions, r => Assert.True(r.InStorage));
+    }
+
+    [Fact]
+    public async Task StorageOfHlsOnly_WithNoAccess_IsOfItsProtocol()
+    {
+        var (item, _) = await _environment.PublishAsync(Sha('a'));
+        AddEpisode(item, 1);
+        await MoveHlsToStorageAsync();
+
+        var media = Assert.Single(await _inventory.GetStoragesAsync(CancellationToken));
+
+        Assert.Equal(StorageKey, media.Key);
+        Assert.Equal("s3", media.Protocol);
+        Assert.Equal("media", media.Name);
+        Assert.True(media.RequiresAccess);
+        Assert.Null(media.AccessId);
+        Assert.Equal(1, media.ResourceCount);
     }
 
     [Fact]
@@ -208,10 +242,10 @@ public sealed class NetworkStorageInventoryTests : IDisposable
     }
 
     // The published HLS, as if its store were the bucket.
-    private async Task MoveHlsToStorageAsync()
+    private async Task MoveHlsToStorageAsync(string root = HlsRoot)
     {
         await using var context = _environment.CreateDbContext();
-        await context.HlsRenditions.ExecuteUpdateAsync(s => s.SetProperty(r => r.Base, HlsRoot), CancellationToken);
+        await context.HlsRenditions.ExecuteUpdateAsync(s => s.SetProperty(r => r.Base, root), CancellationToken);
     }
 
     private void AddEpisode(Guid id, int episode)

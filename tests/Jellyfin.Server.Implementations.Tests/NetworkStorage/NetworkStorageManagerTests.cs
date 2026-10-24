@@ -12,6 +12,7 @@ using Jellyfin.Database.Providers.Sqlite;
 using Jellyfin.Server.Implementations.Hls;
 using Jellyfin.Server.Implementations.NetworkStorage;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Controller;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
@@ -63,7 +64,9 @@ public sealed class NetworkStorageManagerTests : IDisposable
         _hlsSettings = new HlsSettings(configuration.Object, NullLogger<HlsSettings>.Instance);
         var libraryManager = new Mock<ILibraryManager>();
         libraryManager.Setup(m => m.GetVirtualFolders()).Returns([]);
-        _inventory = new NetworkStorageInventory(_manager, _hlsStore, _hlsSettings, libraryManager.Object, factory);
+        var appHost = new Mock<IServerApplicationHost>();
+        appHost.Setup(h => h.ExpandVirtualPath(It.IsAny<string>())).Returns((string path) => path);
+        _inventory = new NetworkStorageInventory(_manager, _hlsStore, _hlsSettings, libraryManager.Object, appHost.Object, factory);
     }
 
     public void Dispose()

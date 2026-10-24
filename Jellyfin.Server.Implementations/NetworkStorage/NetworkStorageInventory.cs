@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Database.Implementations;
 using Jellyfin.Server.Implementations.Hls;
+using MediaBrowser.Controller;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Model.Hls;
@@ -30,6 +31,7 @@ public sealed class NetworkStorageInventory : INetworkStorageInventory
     private readonly HlsJobStore _store;
     private readonly HlsSettings _settings;
     private readonly ILibraryManager _libraryManager;
+    private readonly IServerApplicationHost _appHost;
     private readonly IDbContextFactory<JellyfinDbContext> _dbProvider;
 
     /// <summary>
@@ -39,18 +41,21 @@ public sealed class NetworkStorageInventory : INetworkStorageInventory
     /// <param name="store">The store of the pre-encoded HLS.</param>
     /// <param name="settings">The HLS settings.</param>
     /// <param name="libraryManager">The library manager.</param>
+    /// <param name="appHost">The application host, which expands the paths the database keeps virtual.</param>
     /// <param name="dbProvider">The database context factory.</param>
     public NetworkStorageInventory(
         INetworkStorageManager networkStorage,
         HlsJobStore store,
         HlsSettings settings,
         ILibraryManager libraryManager,
+        IServerApplicationHost appHost,
         IDbContextFactory<JellyfinDbContext> dbProvider)
     {
         _networkStorage = networkStorage;
         _store = store;
         _settings = settings;
         _libraryManager = libraryManager;
+        _appHost = appHost;
         _dbProvider = dbProvider;
     }
 
@@ -81,14 +86,15 @@ public sealed class NetworkStorageInventory : INetworkStorageInventory
         {
             if (!summaries.TryGetValue(key, out var summary))
             {
+                // A storage of pre-encoded HLS only is known from the root of its store.
                 var entry = inventory.Entries.FirstOrDefault(e => string.Equals(e.StorageKey, key, StringComparison.Ordinal));
-                var parts = key.Split(':', 2);
+                var root = inventory.Roots.Values.FirstOrDefault(r => string.Equals(r?.StorageKey, key, StringComparison.Ordinal));
                 summary = new NetworkStorageSummary
                 {
                     Key = key,
-                    Protocol = entry?.Protocol ?? (parts.Length == 2 ? parts[0] : string.Empty),
-                    Name = entry?.Container ?? (parts.Length == 2 ? parts[1] : string.Empty),
-                    RequiresAccess = entry?.RequiresAccess ?? false
+                    Protocol = entry?.Protocol ?? root?.Protocol ?? string.Empty,
+                    Name = entry?.Container ?? root?.Container ?? string.Empty,
+                    RequiresAccess = entry?.RequiresAccess ?? root?.RequiresAccess ?? false
                 };
                 summaries[key] = summary;
             }
@@ -296,7 +302,7 @@ public sealed class NetworkStorageInventory : INetworkStorageInventory
 
     // The resource of an item in one storage: its source counts only when it is in that storage, and its state is that of
     // the source then; otherwise the item is there by its published HLS, which is known to be there.
-    private static NetworkStorageResource MakeRow(Source source, string storageKey, HlsStoredContent? content, IReadOnlyDictionary<string, string?> rootKeys)
+    private static NetworkStorageResource MakeRow(Source source, string storageKey, HlsStoredContent? content, IReadOnlyDictionary<string, NetworkStorageRoot?> roots)
     {
         var resource = source.Resource;
         var sourceInStorage = source.Entry is not null && string.Equals(source.Entry.StorageKey, storageKey, StringComparison.Ordinal);
@@ -312,8 +318,8 @@ public sealed class NetworkStorageInventory : INetworkStorageInventory
                 Size = r.Size,
                 FileCount = r.FileCount,
                 Location = r.Base,
-                StorageKey = rootKeys[r.Base],
-                InStorage = string.Equals(rootKeys[r.Base], storageKey, StringComparison.Ordinal)
+                StorageKey = roots[r.Base]?.StorageKey,
+                InStorage = string.Equals(roots[r.Base]?.StorageKey, storageKey, StringComparison.Ordinal)
             })
             .ToArray();
         var hlsSize = renditions.Where(r => r.InStorage).Sum(r => r.Size);
@@ -362,12 +368,12 @@ public sealed class NetworkStorageInventory : INetworkStorageInventory
             }
         }
 
-        var rootKeys = new Dictionary<string, string?>(StringComparer.Ordinal);
+        var roots = new Dictionary<string, NetworkStorageRoot?>(StringComparer.Ordinal);
         foreach (var rendition in contents.SelectMany(c => c.Renditions))
         {
-            if (!rootKeys.ContainsKey(rendition.Base))
+            if (!roots.ContainsKey(rendition.Base))
             {
-                rootKeys[rendition.Base] = _networkStorage.GetStorageKey(rendition.Base);
+                roots[rendition.Base] = _networkStorage.GetStorageRoot(rendition.Base);
             }
         }
 
@@ -408,7 +414,7 @@ public sealed class NetworkStorageInventory : INetworkStorageInventory
             var topParents = await context.BaseItems.AsNoTracking()
                 .Where(e => topParentIds.Contains(e.Id))
                 .Select(e => new { e.Id, e.Path })
-                .ToDictionaryAsync(e => e.Id, e => e.Path, cancellationToken)
+                .ToDictionaryAsync(e => e.Id, e => e.Path is null ? null : _appHost.ExpandVirtualPath(e.Path), cancellationToken)
                 .ConfigureAwait(false);
             var libraries = GetLibraries(topParents);
             foreach (var source in sources)
@@ -444,7 +450,7 @@ public sealed class NetworkStorageInventory : INetworkStorageInventory
 
             foreach (var rendition in content?.Renditions ?? [])
             {
-                if (rootKeys[rendition.Base] is { } key)
+                if (roots[rendition.Base]?.StorageKey is { } key)
                 {
                     keys.Add(key);
                 }
@@ -452,7 +458,7 @@ public sealed class NetworkStorageInventory : INetworkStorageInventory
 
             foreach (var key in keys)
             {
-                Add(key, MakeRow(source, key, content, rootKeys));
+                Add(key, MakeRow(source, key, content, roots));
             }
         }
 
@@ -460,9 +466,9 @@ public sealed class NetworkStorageInventory : INetworkStorageInventory
         {
             var retention = TimeSpan.FromHours(_settings.Current.Options.OrphanRetentionHours);
             var orphan = new Source(new NetworkStorageResource { State = NetworkStorageResourceState.Valid }, null, null) { LibraryId = content.LibraryId };
-            foreach (var key in content.Renditions.Select(r => rootKeys[r.Base]).OfType<string>().Distinct(StringComparer.Ordinal))
+            foreach (var key in content.Renditions.Select(r => roots[r.Base]?.StorageKey).OfType<string>().Distinct(StringComparer.Ordinal))
             {
-                var row = MakeRow(orphan, key, content, rootKeys);
+                var row = MakeRow(orphan, key, content, roots);
                 row.ItemId = Guid.Empty;
                 row.IsOrphan = true;
                 row.DateOrphanExpires = content.DateOrphaned + retention;
@@ -470,7 +476,7 @@ public sealed class NetworkStorageInventory : INetworkStorageInventory
             }
         }
 
-        return new Inventory(entries, storages);
+        return new Inventory(entries, roots, storages);
     }
 
     // The library of each top folder: the virtual folder one of whose locations it is.
@@ -494,7 +500,10 @@ public sealed class NetworkStorageInventory : INetworkStorageInventory
         return libraries;
     }
 
-    private sealed record Inventory(IReadOnlyList<NetworkStorageResourceEntry> Entries, Dictionary<string, List<NetworkStorageResource>> Storages);
+    private sealed record Inventory(
+        IReadOnlyList<NetworkStorageResourceEntry> Entries,
+        IReadOnlyDictionary<string, NetworkStorageRoot?> Roots,
+        Dictionary<string, List<NetworkStorageResource>> Storages);
 
     // An item and where its source is: the entry of the network storage for a .strm item, none otherwise.
     private sealed record Source(NetworkStorageResource Resource, NetworkStorageResourceEntry? Entry, Guid? TopParentId)

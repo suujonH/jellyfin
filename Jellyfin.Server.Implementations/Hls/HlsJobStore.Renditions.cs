@@ -33,9 +33,26 @@ public sealed partial class HlsJobStore
                     .Where(r => r.State == (int)HlsRenditionState.Published && r.Base != null && r.PublishedJobId != null)
                     .ToListAsync(cancellationToken)
                     .ConfigureAwait(false);
-                var jobIds = renditions.Select(r => r.PublishedJobId!.Value).Distinct().ToList();
-                var outputs = (await context.HlsJobOutputs.AsNoTracking().Where(o => jobIds.Contains(o.JobId)).ToListAsync(cancellationToken).ConfigureAwait(false))
-                    .ToDictionary(o => (o.JobId, o.Key));
+                // Only the outputs not read before are read: their file lists, which are the bulk of them, once each.
+                var jobIds = renditions
+                    .Where(r => !_outputSizes.ContainsKey((r.PublishedJobId!.Value, r.Key)))
+                    .Select(r => r.PublishedJobId!.Value)
+                    .Distinct()
+                    .ToList();
+                if (jobIds.Count > 0)
+                {
+                    var outputs = await context.HlsJobOutputs.AsNoTracking()
+                        .Where(o => jobIds.Contains(o.JobId))
+                        .Select(o => new { o.JobId, o.Key, o.Files })
+                        .ToListAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    foreach (var output in outputs)
+                    {
+                        var files = Deserialize<List<HlsOutputFile>>(output.Files);
+                        _outputSizes[(output.JobId, output.Key)] = (files.Sum(f => f.Length), files.Count);
+                    }
+                }
+
                 var sources = (await context.HlsSources.AsNoTracking()
                         .Where(s => s.Sha256 != null)
                         .Select(s => new { s.ItemId, s.Sha256 })
@@ -47,7 +64,7 @@ public sealed partial class HlsJobStore
                         m.Sha256,
                         m.LibraryId,
                         m.DateOrphaned,
-                        bySha[m.Sha256].OrderBy(r => r.Key, StringComparer.Ordinal).Select(r => ToStored(r, outputs)).ToList(),
+                        bySha[m.Sha256].OrderBy(r => r.Key, StringComparer.Ordinal).Select(ToStored).ToList(),
                         sources[m.Sha256].Order().ToList()))
                     .ToList();
             },
@@ -334,18 +351,16 @@ public sealed partial class HlsJobStore
             rendition.Profile);
 
     // A rendition whose outputs are gone has no size known.
-    private static HlsStoredRendition ToStored(HlsRendition rendition, Dictionary<(Guid JobId, string Key), HlsJobOutput> outputs)
+    private HlsStoredRendition ToStored(HlsRendition rendition)
     {
-        var files = outputs.TryGetValue((rendition.PublishedJobId!.Value, rendition.Key), out var output)
-            ? Deserialize<List<HlsOutputFile>>(output.Files)
-            : [];
+        var (size, count) = _outputSizes.GetValueOrDefault((rendition.PublishedJobId!.Value, rendition.Key));
         return new HlsStoredRendition(
             rendition.Key,
             GetKind(rendition.Key),
             rendition.Base!,
             rendition.Summary is null ? new HlsRenditionSummary() : Deserialize<HlsRenditionSummary>(rendition.Summary),
-            files.Sum(f => f.Length),
-            files.Count);
+            size,
+            count);
     }
 
     // The kind of a rendition by its key, as HlsRenditionPlanner names them: v1080, a1, s2 and preview.

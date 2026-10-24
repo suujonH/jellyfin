@@ -397,8 +397,22 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
             .ToArray();
 
     /// <inheritdoc />
-    public string? GetStorageKey(string target)
-        => !string.IsNullOrEmpty(target) && TryLocate(target, out var location, out _) ? location.StorageKey : null;
+    public NetworkStorageRoot? GetStorageRoot(string root)
+    {
+        if (string.IsNullOrEmpty(root))
+        {
+            return null;
+        }
+
+        // A protocol locates objects, and the root of a whole bucket names none: an object in the root is located instead.
+        if (!TryLocate(root, out var location, out var protocol)
+            && !TryLocate(root.TrimEnd('/') + "/.root", out location, out protocol))
+        {
+            return null;
+        }
+
+        return new NetworkStorageRoot(location.StorageKey, location.Protocol, location.Container, protocol.RequiresAccess);
+    }
 
     /// <inheritdoc />
     public async Task ReportAccessFailureAsync(Guid itemId, NetworkStorageFailureSource source, string? target, CancellationToken cancellationToken)
