@@ -17,6 +17,7 @@ using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.Hls;
 using MediaBrowser.Model.MediaInfo;
 using MediaBrowser.Model.NetworkStorage;
 using Microsoft.Data.Sqlite;
@@ -248,6 +249,22 @@ public sealed class NetworkStorageManagerTests : IDisposable
         archive.SecretKey = null;
         await _manager.SaveAccessAsync(archive, CancellationToken.None);
         Assert.False(_manager.IsArchived("s3://archive/Film.mkv"));
+    }
+
+    [Fact]
+    public void AFileOnAWorker_IsNeitherReadNorPlayedByTheServer()
+    {
+        var target = HlsWorkerLocalAddress.Format(Guid.Parse("11111111111111111111111111111111"), @"D:\Movies\Film.mkv");
+        var source = new MediaSourceInfo { Path = target, ShortcutTarget = target, SupportsDirectPlay = true, SupportsDirectStream = true, SupportsTranscoding = true };
+
+        _manager.PrepareForClient(source);
+
+        Assert.Null(_manager.ResolveShortcutTarget(target));
+        Assert.True(_manager.IsArchived(target));
+        Assert.Equal(target, source.Path);
+        Assert.False(source.SupportsDirectPlay);
+        Assert.False(source.SupportsDirectStream);
+        Assert.False(source.SupportsTranscoding);
     }
 
     [Fact]

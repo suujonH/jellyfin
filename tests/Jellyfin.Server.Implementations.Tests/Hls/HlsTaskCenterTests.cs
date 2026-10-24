@@ -50,12 +50,12 @@ public sealed class HlsTaskCenterTests : IDisposable
         var (environment, taskCenter) = Create();
         var item = await environment.AddSourceAsync();
 
-        var job = await taskCenter.PollAsync("worker", CancellationToken);
+        var job = await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId), CancellationToken);
 
         Assert.NotNull(job);
         Assert.Equal((300, 1), (job.Lease.LeaseSeconds, job.Lease.Attempt));
         Assert.Equal(LibraryFile(item), job.Source);
-        Assert.Null(await taskCenter.PollAsync("worker", CancellationToken));
+        Assert.Null(await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId), CancellationToken));
     }
 
     [Fact]
@@ -64,10 +64,10 @@ public sealed class HlsTaskCenterTests : IDisposable
         var (environment, taskCenter) = Create();
         await environment.AddSourceAsync();
 
-        await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.PollAsync(" ", CancellationToken));
-        await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.PollAsync(new string('w', 129), CancellationToken));
+        await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.PollAsync(new HlsWorkerRequest(" ", WorkerId), CancellationToken));
+        await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.PollAsync(new HlsWorkerRequest(new string('w', 129), WorkerId), CancellationToken));
         environment.Save(new HlsOptions { Enabled = false });
-        Assert.Null(await taskCenter.PollAsync("worker", CancellationToken));
+        Assert.Null(await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId), CancellationToken));
     }
 
     [Fact]
@@ -81,7 +81,7 @@ public sealed class HlsTaskCenterTests : IDisposable
         await environment.Store.UpsertSourcesAsync([new HlsSourceFile(Guid.NewGuid(), LibraryId, "s3://other/b.mkv", 7000, Modified)], environment.Now, CancellationToken);
 
         var jobs = new Dictionary<string, HlsWorkLease>();
-        while (await taskCenter.PollAsync("worker", CancellationToken) is { } job)
+        while (await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId), CancellationToken) is { } job)
         {
             jobs[job.Source.Path] = job.Lease;
         }
@@ -100,11 +100,49 @@ public sealed class HlsTaskCenterTests : IDisposable
     }
 
     [Fact]
+    public async Task GetInput_OfAFileOnTheWorker_IsReadByTheWorker()
+    {
+        var (environment, taskCenter) = Create();
+        var target = HlsWorkerLocalAddress.Format(WorkerId, "/srv/movies/a.mkv");
+        await environment.Store.UpsertSourcesAsync([new HlsSourceFile(Guid.NewGuid(), LibraryId, target, 7000, Modified)], environment.Now, CancellationToken);
+
+        Assert.Null(await taskCenter.PollAsync(new HlsWorkerRequest("worker", OtherWorkerId), CancellationToken));
+        var job = (await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId), CancellationToken))!;
+
+        Assert.Equal(target, job.Source.Path);
+        Assert.Equal(new HlsJobInput(null, null), await taskCenter.GetInputAsync(job.Lease.JobId, job.Lease.LeaseToken, CancellationToken));
+        Assert.True(await taskCenter.ReturnAsync(job.Lease.JobId, job.Lease.LeaseToken, CancellationToken));
+        Assert.Equal(job.Lease.JobId, (await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId), CancellationToken))!.Lease.JobId);
+    }
+
+    [Fact]
+    public async Task Poll_FollowsTheLibrariesAndExclusionsOfTheWorker_WhichNeedsAnId()
+    {
+        var (environment, taskCenter) = Create();
+        var excluded = await environment.AddSourceAsync();
+        var item = await environment.AddSourceAsync();
+
+        await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.PollAsync(new HlsWorkerRequest("worker", Guid.Empty), CancellationToken));
+        Assert.Null(await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId, [OtherLibraryId]), CancellationToken));
+        var job = await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId, [LibraryId], [excluded]), CancellationToken);
+        Assert.Equal(item, job!.Source.ItemId);
+    }
+
+    [Fact]
+    public async Task RegisterWorker_NeedsAName()
+    {
+        var (_, taskCenter) = Create();
+
+        Assert.Equal(WorkerId, await taskCenter.RegisterWorkerAsync(new HlsWorkerRegistration(WorkerId, "worker"), CancellationToken));
+        await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.RegisterWorkerAsync(new HlsWorkerRegistration(null, " "), CancellationToken));
+    }
+
+    [Fact]
     public async Task Identify_RecordsTheHash_AndReturnsThePlan()
     {
         var (environment, taskCenter) = Create();
         var item = await environment.AddSourceAsync();
-        var lease = (await taskCenter.PollAsync("worker", CancellationToken))!.Lease;
+        var lease = (await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId), CancellationToken))!.Lease;
 
         await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, "abc", ProbeJson, environment.Root), CancellationToken));
         await Assert.ThrowsAsync<ArgumentException>(() => taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, Sha('a'), "{}", environment.Root), CancellationToken));
@@ -124,7 +162,7 @@ public sealed class HlsTaskCenterTests : IDisposable
     {
         var (environment, taskCenter) = Create();
         await environment.AddSourceAsync();
-        var lease = (await taskCenter.PollAsync("worker", CancellationToken))!.Lease;
+        var lease = (await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId), CancellationToken))!.Lease;
 
         foreach (var root in new[] { null, " ", "relative/hls", "ftp://bucket/hls", Path.Combine(environment.TempDirectory, "missing"), _library })
         {
@@ -133,6 +171,20 @@ public sealed class HlsTaskCenterTests : IDisposable
         }
 
         Assert.Null((await environment.JobAsync(lease.JobId)).Plan);
+    }
+
+    [Fact]
+    public async Task CheckBase_AcceptsADirectoryOnAWorker_InItsNormalForm()
+    {
+        var (environment, taskCenter) = Create();
+        var worker = Guid.NewGuid();
+        var root = HlsWorkerLocalAddress.Format(worker, @"D:\work\hls\");
+        await environment.AddSourceAsync();
+        var lease = (await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId), CancellationToken))!.Lease;
+
+        Assert.Equal(new HlsStoreTestResult(true, true, null), await taskCenter.CheckBaseAsync(root, CancellationToken));
+        Assert.NotNull(await taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, Sha('a'), ProbeJson, root), CancellationToken));
+        Assert.Equal(HlsWorkerLocalAddress.Format(worker, @"D:\work\hls"), (await environment.JobAsync(lease.JobId)).Base);
     }
 
     [Fact]
@@ -189,7 +241,7 @@ public sealed class HlsTaskCenterTests : IDisposable
         var (environment, taskCenter) = Create();
         await environment.PublishAsync(Sha('a'));
         await environment.AddSourceAsync();
-        var lease = (await taskCenter.PollAsync("worker", CancellationToken))!.Lease;
+        var lease = (await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId), CancellationToken))!.Lease;
 
         var response = await taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, Sha('a'), ProbeJson, environment.Root), CancellationToken);
 
@@ -212,7 +264,7 @@ public sealed class HlsTaskCenterTests : IDisposable
     public async Task Eager_StartsAJobLeasedToTheWorker_ThatReadsNoFileOfTheServer()
     {
         var (environment, taskCenter) = Create();
-        var request = new HlsEagerRequest("worker", LibraryId, Sha('a'), ProbeJson, environment.Root, [720]);
+        var request = new HlsEagerRequest("worker", WorkerId, LibraryId, Sha('a'), ProbeJson, environment.Root, [720]);
 
         var response = await taskCenter.StartEagerJobAsync(request, CancellationToken);
 
@@ -229,7 +281,7 @@ public sealed class HlsTaskCenterTests : IDisposable
     public async Task Eager_OfAnotherLibrary_OrOtherQualities_IsRefused()
     {
         var (environment, taskCenter) = Create();
-        var request = new HlsEagerRequest("worker", LibraryId, Sha('a'), ProbeJson, environment.Root, [720]);
+        var request = new HlsEagerRequest("worker", WorkerId, LibraryId, Sha('a'), ProbeJson, environment.Root, [720]);
 
         foreach (var refused in new[]
         {
@@ -267,7 +319,7 @@ public sealed class HlsTaskCenterTests : IDisposable
     {
         var (environment, taskCenter) = Create();
         await environment.AddSourceAsync();
-        var lease = (await taskCenter.PollAsync("worker", CancellationToken))!.Lease;
+        var lease = (await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId), CancellationToken))!.Lease;
 
         Assert.False(await taskCenter.FailAsync(lease.JobId, new HlsFailure("another lease", "ffmpeg failed"), CancellationToken));
         Assert.True(await taskCenter.FailAsync(lease.JobId, new HlsFailure(lease.LeaseToken, new string('e', 3000)), CancellationToken));
@@ -309,7 +361,7 @@ public sealed class HlsTaskCenterTests : IDisposable
     private static async Task<(HlsWorkLease Lease, HlsEncodePlan Plan)> IdentifiedAsync(HlsTestEnvironment environment, HlsTaskCenter taskCenter)
     {
         await environment.AddSourceAsync();
-        var lease = (await taskCenter.PollAsync("worker", CancellationToken))!.Lease;
+        var lease = (await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId), CancellationToken))!.Lease;
         var response = await taskCenter.IdentifyAsync(lease.JobId, new HlsIdentification(lease.LeaseToken, Sha('a'), ProbeJson, environment.Root), CancellationToken);
         return (lease, response!.Plan!);
     }

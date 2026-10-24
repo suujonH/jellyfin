@@ -78,7 +78,8 @@ public static class HlsProbeReader
                 .ToArray(),
             Integer(video, "index"),
             sarNumerator,
-            sarDenominator);
+            sarDenominator,
+            Text(video, "color_space"));
     }
 
     /// <summary>

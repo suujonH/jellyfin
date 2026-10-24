@@ -136,10 +136,11 @@ public interface INetworkStorageManager
 
     /// <summary>
     /// Gets a value indicating whether a target lies in an archive, which clients cannot play from and the server
-    /// neither streams nor transcodes for them. Probing and checks still read it.
+    /// neither streams nor transcodes for them. Probing and checks still read it. A <c>worker-local://</c> target, a file on
+    /// the machine of an HLS worker, counts as archived too.
     /// </summary>
     /// <param name="target">The target a <c>.strm</c> file names, or <c>null</c>.</param>
-    /// <returns><c>true</c> when an archived access covers the target.</returns>
+    /// <returns><c>true</c> when an archived access covers the target, or it is on the machine of a worker.</returns>
     bool IsArchived(string? target);
 
     /// <summary>

@@ -83,6 +83,14 @@ public class HlsProbeReaderTests
     }
 
     [Fact]
+    public void Parse_ColorSpace_IsRead()
+        => Assert.Equal("bt470bg", HlsProbeReader.Parse(VideoJson(null, frameRate: "\"avg_frame_rate\":\"25/1\",\"color_space\":\"bt470bg\"")).ColorSpace);
+
+    [Fact]
+    public void Parse_NoColorSpace_IsEmpty()
+        => Assert.Equal(string.Empty, HlsProbeReader.Parse(VideoJson(null)).ColorSpace);
+
+    [Fact]
     public void NormalizeSha256_UpperCase_IsLowered()
         => Assert.Equal(new string('a', 64), HlsProbeReader.NormalizeSha256(new string('A', 64)));
 

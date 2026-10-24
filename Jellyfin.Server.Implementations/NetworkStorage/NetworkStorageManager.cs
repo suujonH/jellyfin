@@ -16,6 +16,7 @@ using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.Hls;
 using MediaBrowser.Model.MediaInfo;
 using MediaBrowser.Model.NetworkStorage;
 using MediaBrowser.Model.Querying;
@@ -241,6 +242,12 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
     /// <inheritdoc />
     public string? ResolveShortcutTarget(string target)
     {
+        // The file is on the machine of a worker.
+        if (HlsWorkerLocalAddress.TryParse(target, out _, out _))
+        {
+            return null;
+        }
+
         if (!TryLocate(target, out var location, out var protocol))
         {
             // A malformed s3:// address cannot be read; any other target, such as rtsp, is not network storage.
@@ -328,8 +335,22 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
     public void PrepareForClient(MediaSourceInfo source)
     {
         ArgumentNullException.ThrowIfNull(source);
-        if (string.IsNullOrEmpty(source.ShortcutTarget)
-            || !TryLocate(source.ShortcutTarget, out var location, out var protocol)
+        if (string.IsNullOrEmpty(source.ShortcutTarget))
+        {
+            return;
+        }
+
+        // The file is on the machine of a worker: like an archive, the server can neither stream nor transcode it.
+        if (HlsWorkerLocalAddress.TryParse(source.ShortcutTarget, out _, out _))
+        {
+            source.Path = source.ShortcutTarget;
+            source.SupportsDirectPlay = false;
+            source.SupportsDirectStream = false;
+            source.SupportsTranscoding = false;
+            return;
+        }
+
+        if (!TryLocate(source.ShortcutTarget, out var location, out var protocol)
             || !protocol.RequiresAccess)
         {
             // Without an access the address is the one the .strm file names, which carries nothing of the server's.
@@ -366,8 +387,8 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
     /// <inheritdoc />
     public bool IsArchived(string? target)
         => !string.IsNullOrEmpty(target)
-            && TryLocate(target, out var location, out var protocol)
-            && FindAccess(protocol, location.Container)?.Access.IsArchive == true;
+            && (HlsWorkerLocalAddress.TryParse(target, out _, out _)
+                || (TryLocate(target, out var location, out var protocol) && FindAccess(protocol, location.Container)?.Access.IsArchive == true));
 
     /// <inheritdoc />
     public async Task<IReadOnlyList<NetworkStorageSummary>> GetStoragesAsync(CancellationToken cancellationToken)

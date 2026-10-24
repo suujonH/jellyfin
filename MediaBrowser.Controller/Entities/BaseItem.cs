@@ -33,6 +33,7 @@ using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Globalization;
+using MediaBrowser.Model.Hls;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Library;
 using MediaBrowser.Model.LiveTv;
@@ -1260,7 +1261,12 @@ namespace MediaBrowser.Controller.Entities
                 var shortcutTarget = NetworkStorage is null ? item.ShortcutPath : NetworkStorage.ResolveShortcutTarget(item.ShortcutPath);
                 if (shortcutTarget is null)
                 {
-                    Logger.LogWarning("No network storage access covers {Target} named by {Path}", item.ShortcutPath, item.Path);
+                    // A file on the machine of an HLS worker is not network storage.
+                    if (!HlsWorkerLocalAddress.TryParse(item.ShortcutPath, out _, out _))
+                    {
+                        Logger.LogWarning("No network storage access covers {Target} named by {Path}", item.ShortcutPath, item.Path);
+                    }
+
                     shortcutTarget = item.ShortcutPath;
                 }
 

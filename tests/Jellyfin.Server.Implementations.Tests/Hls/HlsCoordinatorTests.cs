@@ -78,6 +78,7 @@ public sealed class HlsCoordinatorTests : IDisposable
         var local = AddLocal();
         var sized = AddLocal(size: 5000, modified: Modified.ToLocalTime());
         var shortcut = AddShortcut("s3://bucket/a.mkv", 7000);
+        var onWorker = AddShortcut(HlsWorkerLocalAddress.Format(WorkerId, "/srv/e.mkv"), 300);
 
         // Its folder is in a library that is not selected first.
         var shared = AddLocal();
@@ -94,7 +95,8 @@ public sealed class HlsCoordinatorTests : IDisposable
         await TickAsync(_start);
 
         var sources = (await _environment.Store.GetSourcesAsync(CancellationToken)).ToDictionary(s => s.File.ItemId, s => s.File);
-        Assert.Equal(new[] { local.Id, sized.Id, shortcut.Id, shared.Id }.Order(), sources.Keys.Order());
+        Assert.Equal(new[] { local.Id, sized.Id, shortcut.Id, onWorker.Id, shared.Id }.Order(), sources.Keys.Order());
+        Assert.Equal(HlsWorkerLocalAddress.Format(WorkerId, "/srv/e.mkv"), sources[onWorker.Id].Path);
         Assert.Equal(new HlsSourceFile(local.Id, LibraryId, local.Path, 123, Modified), sources[local.Id]);
         Assert.Equal(new HlsSourceFile(sized.Id, LibraryId, sized.Path, 5000, Modified), sources[sized.Id]);
         Assert.Equal(new HlsSourceFile(shortcut.Id, LibraryId, "s3://bucket/a.mkv", 7000, Modified), sources[shortcut.Id]);
@@ -210,9 +212,9 @@ public sealed class HlsCoordinatorTests : IDisposable
         // The same content in both libraries: the file of the other library is identified once both are published.
         var (item, _) = await _environment.PublishAsync(Sha('a'));
         var copy = await _environment.AddSourceAsync(OtherLibraryId);
-        var lease = (await _environment.Store.ClaimAsync(new HlsClaimRequest("worker", Lease, _ => true, _environment.Now), CancellationToken))!;
+        var lease = (await _environment.Store.ClaimAsync(Claim(_environment.Now), CancellationToken))!;
         await _environment.Store.IdentifyAsync(
-            new HlsIdentifyRequest(lease.Id, lease.LeaseToken, Sha('a'), Probe, _environment.Root, _environment.Settings.Current.GetQualities, Profile, _ => true, _environment.Now),
+            new HlsIdentifyRequest(lease.Id, lease.LeaseToken, Sha('a'), Probe, _environment.Root, _environment.Settings.Current.GetQualities, Profile, _ => true, new HashSet<int>(), _environment.Now),
             CancellationToken);
         AddKnown(item);
         var video = AddKnown(copy);

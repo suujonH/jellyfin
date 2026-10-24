@@ -50,6 +50,22 @@ public sealed class HlsVerificationServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task OutputsOnAWorker_ArePublishedAsReported()
+    {
+        var (environment, service) = Create();
+        var root = HlsWorkerLocalAddress.Format(Guid.NewGuid(), Path.Combine(environment.TempDirectory, "worker", "hls"));
+        await environment.AddSourceAsync();
+        var (lease, plan) = await environment.ClaimAndPlanAsync(Sha('a'), root);
+        Assert.True(await environment.Store.SubmitOutputsAsync(lease.Id, lease.LeaseToken, Outputs(plan), environment.Now, CancellationToken));
+
+        await service.VerifyBatchAsync(environment.Now, CancellationToken);
+
+        Assert.Equal((int)HlsJobStatus.Complete, (await environment.JobAsync(lease.Id)).Status);
+        Assert.All(await environment.Store.GetRenditionsAsync(Sha('a'), CancellationToken), r => Assert.Equal(HlsRenditionState.Published, r.State));
+        Assert.False(Directory.Exists(Path.Combine(environment.TempDirectory, "worker")));
+    }
+
+    [Fact]
     public async Task AFileMissing_FailsTheVerification_AndQueuesTheOutputs()
     {
         var (environment, service) = Create();
@@ -251,9 +267,9 @@ public sealed class HlsVerificationServiceTests : IDisposable
 
         // The content is encoded again under another profile, and its new outputs are verified.
         await environment.Store.EnsureMediaJobAsync(Sha('a'), null, "next-profile", _ => true, environment.Now, CancellationToken);
-        var lease = await environment.Store.ClaimAsync(new HlsClaimRequest("worker", Lease, _ => true, environment.Now), CancellationToken);
+        var lease = await environment.Store.ClaimAsync(Claim(environment.Now), CancellationToken);
         var plan = (await environment.Store.IdentifyAsync(
-            new HlsIdentifyRequest(lease!.Id, lease.LeaseToken, Sha('a'), Probe, environment.Root, _ => Qualities, "next-profile", _ => true, environment.Now),
+            new HlsIdentifyRequest(lease!.Id, lease.LeaseToken, Sha('a'), Probe, environment.Root, _ => Qualities, "next-profile", _ => true, new HashSet<int>(), environment.Now),
             CancellationToken)).Plan!;
         environment.WriteFiles(plan);
         Assert.True(await environment.Store.SubmitOutputsAsync(lease.Id, lease.LeaseToken, Outputs(plan), environment.Now, CancellationToken));

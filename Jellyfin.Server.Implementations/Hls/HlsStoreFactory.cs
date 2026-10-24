@@ -3,11 +3,13 @@ using System.IO;
 using MediaBrowser.Common.Net.S3;
 using MediaBrowser.Controller.Hls;
 using MediaBrowser.Controller.NetworkStorage;
+using MediaBrowser.Model.Hls;
 
 namespace Jellyfin.Server.Implementations.Hls;
 
 /// <summary>
-/// Opens the HLS store a root names: a local directory, or a prefix of a bucket of network storage.
+/// Opens the HLS store a root names: a local directory, a prefix of a bucket of network storage, or a directory on the machine of a
+/// worker, <c>worker-local://{worker id}/{local path}</c>.
 /// </summary>
 public class HlsStoreFactory : IHlsStoreFactory
 {
@@ -25,6 +27,13 @@ public class HlsStoreFactory : IHlsStoreFactory
     /// <inheritdoc />
     public IHlsStore Create(string location)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(location);
+        if (HlsWorkerLocalAddress.TryParse(location.Trim(), out var worker, out var localPath))
+        {
+            var trimmed = localPath.TrimEnd('/', '\\');
+            return new WorkerLocalHlsStore(HlsWorkerLocalAddress.Format(worker, trimmed.Length == 0 ? localPath : trimmed));
+        }
+
         var (bucket, path) = Parse(location);
         return bucket is null
             ? new LocalHlsStore(path)

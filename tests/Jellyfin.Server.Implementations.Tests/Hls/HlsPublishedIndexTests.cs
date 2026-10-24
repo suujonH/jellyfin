@@ -142,10 +142,10 @@ public sealed class HlsPublishedIndexTests : IDisposable
     private async Task<Guid> AddCopyAsync(string sha)
     {
         var copy = await _environment.AddSourceAsync();
-        var lease = await _environment.Store.ClaimAsync(new HlsClaimRequest("worker", Lease, _ => true, _environment.Now), CancellationToken);
+        var lease = await _environment.Store.ClaimAsync(Claim(_environment.Now), CancellationToken);
         Assert.Equal(copy, lease!.Input!.ItemId);
         var result = await _environment.Store.IdentifyAsync(
-            new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, Probe, _environment.Root, _ => Qualities, Profile, _ => true, _environment.Now),
+            new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, Probe, _environment.Root, _ => Qualities, Profile, _ => true, new HashSet<int>(), _environment.Now),
             CancellationToken);
         Assert.Equal(HlsIdentifyOutcome.Done, result.Outcome);
         return copy;

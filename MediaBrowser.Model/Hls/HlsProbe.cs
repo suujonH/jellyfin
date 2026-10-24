@@ -19,6 +19,7 @@ namespace MediaBrowser.Model.Hls;
 /// <param name="VideoIndex">The ffprobe index of the video stream.</param>
 /// <param name="SarNumerator">The numerator of the sample aspect ratio.</param>
 /// <param name="SarDenominator">The denominator of the sample aspect ratio.</param>
+/// <param name="ColorSpace">The matrix coefficients of the video, such as <c>bt709</c>; empty when ffprobe reports none.</param>
 public sealed record HlsProbe(
     int Width,
     int Height,
@@ -33,4 +34,5 @@ public sealed record HlsProbe(
     IReadOnlyList<HlsSubtitleTrack> Subtitles,
     int VideoIndex = 0,
     int SarNumerator = 1,
-    int SarDenominator = 1);
+    int SarDenominator = 1,
+    string ColorSpace = "");

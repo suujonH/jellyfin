@@ -419,7 +419,8 @@ public sealed class HlsCoordinator : BackgroundService
         }
     }
 
-    // The file of a video in an enabled library: a local file, or the target of a .strm file that the network storage can read.
+    // The file of a video in an enabled library: a local file, the target of a .strm file that the network storage can read, or
+    // one on the machine of a worker, which only that worker reads.
     // A .strm file has the size TrueCache found for its target and its own modification time. Null when the video is not one,
     // or its size is not known.
     private HlsSourceFile? GetSourceFile(Video video, HlsSettingsSnapshot settings)
@@ -440,7 +441,8 @@ public sealed class HlsCoordinator : BackgroundService
         long length;
         if (video.IsShortcut)
         {
-            if (string.IsNullOrEmpty(video.ShortcutPath) || !IsHttpAddress(_networkStorage.ResolveShortcutTarget(video.ShortcutPath)))
+            if (string.IsNullOrEmpty(video.ShortcutPath)
+                || !(HlsWorkerLocalAddress.TryParse(video.ShortcutPath, out _, out _) || IsHttpAddress(_networkStorage.ResolveShortcutTarget(video.ShortcutPath))))
             {
                 return null;
             }

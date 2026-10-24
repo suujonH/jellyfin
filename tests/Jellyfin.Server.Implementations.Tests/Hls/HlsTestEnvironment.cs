@@ -42,6 +42,10 @@ internal sealed class HlsTestEnvironment : IDisposable
 
     public static readonly Guid OtherLibraryId = Guid.Parse("fedcba9876543210fedcba9876543210");
 
+    public static readonly Guid WorkerId = Guid.Parse("11111111111111111111111111111111");
+
+    public static readonly Guid OtherWorkerId = Guid.Parse("22222222222222222222222222222222");
+
     public static readonly DateTime Modified = new(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc);
 
     // One audio track (index 1), one text subtitle (index 2) and one graphic subtitle (index 3, never planned); 60 seconds, so 10 segments.
@@ -114,6 +118,9 @@ internal sealed class HlsTestEnvironment : IDisposable
 
     public static string Sha(char c) => new(c, 64);
 
+    // A claim of a worker that takes every job.
+    public static HlsClaimRequest Claim(DateTime now, string worker = "worker") => new(worker, WorkerId, Lease, _ => true, null, new HashSet<Guid>(), new Dictionary<Guid, IReadOnlySet<int>>(), now);
+
     // What a worker reports: every rendition of the plan with the files and segment durations it should have.
     public static HlsRenditionOutput[] Outputs(HlsEncodePlan plan)
     {
@@ -161,9 +168,9 @@ internal sealed class HlsTestEnvironment : IDisposable
     // Claims the oldest pending job and identifies its file as the content, which it must then encode.
     public async Task<(HlsJobLease Lease, HlsEncodePlan Plan)> ClaimAndPlanAsync(string sha, string? root = null)
     {
-        var lease = await Store.ClaimAsync(new HlsClaimRequest("worker", Lease, _ => true, Now), CancellationToken);
+        var lease = await Store.ClaimAsync(Claim(Now), CancellationToken);
         Assert.NotNull(lease);
-        var result = await Store.IdentifyAsync(new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, Probe, root ?? Root, _ => Qualities, Profile, _ => true, Now), CancellationToken);
+        var result = await Store.IdentifyAsync(new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, Probe, root ?? Root, _ => Qualities, Profile, _ => true, new HashSet<int>(), Now), CancellationToken);
         Assert.Equal(HlsIdentifyOutcome.Planned, result.Outcome);
         return (lease, result.Plan!);
     }

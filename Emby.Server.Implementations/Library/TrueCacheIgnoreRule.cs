@@ -6,7 +6,8 @@ using MediaBrowser.Model.IO;
 namespace Emby.Server.Implementations.Library;
 
 /// <summary>
-/// Hides <c>__true_cache__</c> folders from the library, and leaves out every resource whose entry is incomplete or invalid.
+/// Hides <c>__true_cache__</c> folders, and the <c>__working__</c> folders of the HLS workers, from the library, and leaves out every
+/// resource whose entry is incomplete or invalid.
 /// </summary>
 public class TrueCacheIgnoreRule : IResolverIgnoreRule
 {
@@ -24,7 +25,7 @@ public class TrueCacheIgnoreRule : IResolverIgnoreRule
     /// <inheritdoc />
     public bool ShouldIgnore(FileSystemMetadata fileInfo, BaseItem? parent)
     {
-        if (fileInfo.IsDirectory && TrueCacheLayout.IsCacheFolderName(fileInfo.Name))
+        if (fileInfo.IsDirectory && (TrueCacheLayout.IsCacheFolderName(fileInfo.Name) || TrueCacheLayout.IsWorkingFolderName(fileInfo.Name)))
         {
             return true;
         }

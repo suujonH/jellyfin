@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -265,9 +266,9 @@ public sealed class HlsPlaybackServiceTests : IDisposable
         var (environment, service) = Create();
         var (item, plan) = await PublishAsync(environment);
         await environment.Store.EnsureMediaJobAsync(Sha('a'), null, "next-profile", _ => true, environment.Now, CancellationToken);
-        var lease = await environment.Store.ClaimAsync(new HlsClaimRequest("worker", Lease, _ => true, environment.Now), CancellationToken);
+        var lease = await environment.Store.ClaimAsync(Claim(environment.Now), CancellationToken);
         var next = (await environment.Store.IdentifyAsync(
-            new HlsIdentifyRequest(lease!.Id, lease.LeaseToken, Sha('a'), Probe, environment.Root, _ => Qualities, "next-profile", _ => true, environment.Now),
+            new HlsIdentifyRequest(lease!.Id, lease.LeaseToken, Sha('a'), Probe, environment.Root, _ => Qualities, "next-profile", _ => true, new HashSet<int>(), environment.Now),
             CancellationToken)).Plan!;
         environment.WriteFiles(next);
         Assert.True(await environment.Store.SubmitOutputsAsync(lease.Id, lease.LeaseToken, Outputs(next), environment.Now, CancellationToken));

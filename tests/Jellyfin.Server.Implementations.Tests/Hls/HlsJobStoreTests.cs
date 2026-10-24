@@ -191,6 +191,113 @@ public sealed class HlsJobStoreTests : IDisposable
         Assert.Equal(HlsIdentifyOutcome.LeaseLost, (await IdentifyAsync(lease, Sha('a'))).Outcome);
     }
 
+    [Fact]
+    public async Task Claim_LeavesTheJobsOfLibrariesNotAskedFor_WaitingForAnotherWorker()
+    {
+        var other = await AddSourceAsync(OtherLibraryId);
+        var item = await AddSourceAsync();
+
+        var lease = await ClaimAsync(libraries: new HashSet<Guid> { LibraryId });
+
+        Assert.Equal(item, lease!.Input!.ItemId);
+        Assert.Equal((int)HlsJobStatus.Pending, (await SourceJobAsync(other)).Status);
+        Assert.Null(await ClaimAsync(libraries: new HashSet<Guid>()));
+        Assert.Equal(other, (await ClaimAsync())!.Input!.ItemId);
+    }
+
+    [Fact]
+    public async Task Claim_GivesTheJobOfAFileOnAWorker_OnlyToThatWorker()
+    {
+        var item = await AddSourceAsync(path: HlsWorkerLocalAddress.Format(OtherWorkerId, @"D:\Movies\a.mkv"));
+
+        Assert.Null(await ClaimAsync());
+        Assert.Equal((int)HlsJobStatus.Pending, (await SourceJobAsync(item)).Status);
+
+        var lease = await ClaimAsync("other", workerId: OtherWorkerId);
+        Assert.Equal(item, lease!.Input!.ItemId);
+        var job = await JobAsync(lease.Id);
+        Assert.Equal(("other", (Guid?)OtherWorkerId), (job.Worker, job.WorkerId));
+    }
+
+    [Fact]
+    public async Task Claim_SkipsTheItemsTheWorkerExcludes()
+    {
+        var excluded = await AddSourceAsync();
+        var item = await AddSourceAsync();
+
+        Assert.Equal(item, (await ClaimAsync(excluded: new HashSet<Guid> { excluded }))!.Input!.ItemId);
+        Assert.Equal((int)HlsJobStatus.Pending, (await SourceJobAsync(excluded)).Status);
+        Assert.Equal((Guid?)WorkerId, (await SourceJobAsync(item)).WorkerId);
+    }
+
+    [Fact]
+    public async Task Return_PutsTheJobBack_WithoutCountingTheAttempt()
+    {
+        await AddSourceAsync();
+        var lease = (await ClaimAsync())!;
+
+        Assert.False(await _store.ReturnJobAsync(lease.Id, "another lease", _now, TestContext.Current.CancellationToken));
+        Assert.True(await _store.ReturnJobAsync(lease.Id, lease.LeaseToken, _now, TestContext.Current.CancellationToken));
+
+        var job = await JobAsync(lease.Id);
+        Assert.Equal((int)HlsJobStatus.Pending, job.Status);
+        Assert.Equal(0, job.Attempt);
+        Assert.Null(job.LeaseToken);
+        Assert.Null(job.WorkerId);
+        Assert.NotNull(job.Error);
+        Assert.Equal(1, (await ClaimAsync())!.Attempt);
+    }
+
+    [Fact]
+    public async Task Return_RefusesAnIdentifiedJob()
+    {
+        await AddSourceAsync();
+        var (lease, _) = await ClaimAndPlanAsync(Sha('a'));
+
+        Assert.False(await _store.ReturnJobAsync(lease.Id, lease.LeaseToken, _now, TestContext.Current.CancellationToken));
+        Assert.Equal((int)HlsJobStatus.Running, (await JobAsync(lease.Id)).Status);
+    }
+
+    [Fact]
+    public async Task RegisterWorker_RecordsANewIdOrTheOneGiven_AndSeesAKnownWorkerAgain()
+    {
+        var created = _now;
+        var id = await _store.RegisterWorkerAsync(null, "a", _now, TestContext.Current.CancellationToken);
+        Assert.NotEqual(Guid.Empty, id);
+        Assert.Equal(WorkerId, await _store.RegisterWorkerAsync(WorkerId, "b", _now, TestContext.Current.CancellationToken));
+        _now += TimeSpan.FromMinutes(1);
+        Assert.Equal(WorkerId, await _store.RegisterWorkerAsync(WorkerId, "c", _now, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<ArgumentException>(() => _store.RegisterWorkerAsync(Guid.Empty, "d", _now, TestContext.Current.CancellationToken));
+
+        await using var context = _environment.CreateDbContext();
+        var workers = await context.HlsWorkers.AsNoTracking().ToListAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(2, workers.Count);
+        var known = workers.Single(w => w.Id.Equals(WorkerId));
+        Assert.Equal(("c", created, _now), (known.Name, known.DateCreated, known.DateLastSeen));
+    }
+
+    [Fact]
+    public async Task Publish_RecordsTheWorkerOfTheJob()
+    {
+        await EncodeAndPublishAsync(Sha('a'));
+
+        await using var context = _environment.CreateDbContext();
+        var renditions = await context.HlsRenditions.AsNoTracking().Where(r => r.Sha256 == Sha('a')).ToListAsync(TestContext.Current.CancellationToken);
+        Assert.NotEmpty(renditions);
+        Assert.All(renditions, r => Assert.Equal((Guid?)WorkerId, r.WorkerId));
+    }
+
+    [Fact]
+    public async Task RecordLibraryFiles_ReplacesAPathRecordedBefore()
+    {
+        await _store.RecordLibraryFilesAsync([new HlsLibraryFileRecord(LibraryId, "/media/a.strm", 10, WorkerId), new HlsLibraryFileRecord(LibraryId, "/media/b.nfo", 20, WorkerId)], _now, TestContext.Current.CancellationToken);
+        await _store.RecordLibraryFilesAsync([new HlsLibraryFileRecord(LibraryId, "/media/a.strm", 30, OtherWorkerId)], _now, TestContext.Current.CancellationToken);
+
+        await using var context = _environment.CreateDbContext();
+        var files = await context.HlsLibraryFiles.AsNoTracking().OrderBy(f => f.Path).ToListAsync(TestContext.Current.CancellationToken);
+        Assert.Equal([("/media/a.strm", 30L, (Guid?)OtherWorkerId), ("/media/b.nfo", 20L, (Guid?)WorkerId)], files.Select(f => (f.Path, f.Length, f.WorkerId)));
+    }
+
     // ---- Identify
 
     [Fact]
@@ -288,6 +395,37 @@ public sealed class HlsJobStoreTests : IDisposable
         Assert.Equal(Json(Probe), Json(plan.Probe));
         Assert.Equal(Json(Probe), Json((await _store.GetMediaAsync(Sha('a'), TestContext.Current.CancellationToken))!.Probe));
         Assert.Equal(25, plan.Renditions[0].Video!.FramesPerSecond);
+    }
+
+    [Fact]
+    public async Task Identify_KnownContent_WithAProbeStoredBeforeTheColorSpace_TakesTheColorSpace()
+    {
+        await EncodeAndPublishAsync(Sha('a'));
+        await StoreProbeWithoutColorSpaceAsync(Sha('a'));
+        await AddSourceAsync();
+        var lease = (await ClaimAsync())!;
+
+        var result = await IdentifyAsync(lease, Sha('a'), NextProfile, probe: Probe with { ColorSpace = "bt709" });
+
+        Assert.Equal(HlsIdentifyOutcome.Planned, result.Outcome);
+        Assert.False(result.KeptStoredProbe);
+        Assert.Equal("bt709", result.Plan!.Probe.ColorSpace);
+        Assert.Equal("bt709", (await _store.GetMediaAsync(Sha('a'), TestContext.Current.CancellationToken))!.Probe.ColorSpace);
+    }
+
+    [Fact]
+    public async Task Eager_KnownContent_WithAProbeStoredBeforeTheColorSpace_TakesItOnlyWhenTheRestIsTheSame()
+    {
+        await EncodeAndPublishAsync(Sha('a'));
+        await StoreProbeWithoutColorSpaceAsync(Sha('a'));
+
+        var other = await StartEagerAsync(Sha('a'), [480], probe: Probe with { ColorSpace = "bt709", Rotation = 90 });
+        Assert.True(other.KeptStoredProbe);
+        Assert.Equal(string.Empty, (await _store.GetMediaAsync(Sha('a'), TestContext.Current.CancellationToken))!.Probe.ColorSpace);
+
+        var same = await StartEagerAsync(Sha('a'), [480], probe: Probe with { ColorSpace = "bt709" });
+        Assert.False(same.KeptStoredProbe);
+        Assert.Equal("bt709", (await _store.GetMediaAsync(Sha('a'), TestContext.Current.CancellationToken))!.Probe.ColorSpace);
     }
 
     [Fact]
@@ -478,6 +616,60 @@ public sealed class HlsJobStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Claim_LeavesAMediaJobWhoseQualitiesTheWorkerExcludes_WaitingForAnotherWorker()
+    {
+        // The new profile needs every rendition again; the job of the content holds both qualities.
+        var (item, _, _) = await EncodeAndPublishAsync(Sha('a'));
+        var id = await EnsureMediaJobAsync(Sha('a'), NextProfile, item);
+        var both = new Dictionary<Guid, IReadOnlySet<int>> { [LibraryId] = new HashSet<int> { 1080, 720 } };
+        var one = new Dictionary<Guid, IReadOnlySet<int>> { [LibraryId] = new HashSet<int> { 720 } };
+
+        Assert.Null(await ClaimAsync(excludedQualities: both));
+        Assert.Equal((int)HlsJobStatus.Pending, (await JobAsync(id!.Value)).Status);
+
+        // Another library's exclusions do not count.
+        var other = new Dictionary<Guid, IReadOnlySet<int>> { [OtherLibraryId] = new HashSet<int> { 1080, 720 } };
+        var lease = await ClaimAsync(excludedQualities: other);
+        Assert.Equal(id, lease!.Id);
+        Assert.True(await ReleaseAsync(lease));
+        Assert.Equal(id, (await ClaimAsync(excludedQualities: one))!.Id);
+    }
+
+    [Fact]
+    public async Task Identify_GivesBackTheExcludedQualities_ForAnotherJob()
+    {
+        await AddSourceAsync();
+        var lease = (await ClaimAsync())!;
+
+        var plan = (await IdentifyAsync(lease, Sha('a'), excludedQualities: new HashSet<int> { 720 })).Plan!;
+
+        Assert.DoesNotContain("v720", plan.Renditions.Select(r => r.Key));
+        Assert.Contains("v1080", plan.Renditions.Select(r => r.Key));
+        var renditions = await _store.GetRenditionsAsync(Sha('a'), TestContext.Current.CancellationToken);
+        Assert.Null(renditions.Single(r => r.Key == "v720").JobId);
+        Assert.Equal(lease.Id, renditions.Single(r => r.Key == "a1").JobId);
+
+        // The quality left gets a job of its own, which another worker can take.
+        var next = await EnsureMediaJobAsync(Sha('a'), Profile);
+        Assert.NotNull(next);
+        renditions = await _store.GetRenditionsAsync(Sha('a'), TestContext.Current.CancellationToken);
+        Assert.Equal(["v720"], renditions.Where(r => r.JobId.Equals(next)).Select(r => r.Key));
+    }
+
+    [Fact]
+    public async Task Identify_WithEveryVideoQualityExcluded_IsDone()
+    {
+        await AddSourceAsync();
+        var lease = (await ClaimAsync())!;
+
+        var result = await IdentifyAsync(lease, Sha('a'), excludedQualities: new HashSet<int> { 1080, 720 });
+
+        Assert.Equal(HlsIdentifyOutcome.Done, result.Outcome);
+        Assert.Equal((int)HlsJobStatus.Complete, (await JobAsync(lease.Id)).Status);
+        Assert.All(await _store.GetRenditionsAsync(Sha('a'), TestContext.Current.CancellationToken), r => Assert.Null(r.JobId));
+    }
+
+    [Fact]
     public async Task Sync_OfAContentInNoChosenLibrary_LeavesItsRenditions()
     {
         await EncodeAndPublishAsync(Sha('a'));
@@ -577,6 +769,80 @@ public sealed class HlsJobStoreTests : IDisposable
 
         Assert.Null(await ClaimAsync());
         Assert.Equal((int)HlsJobStatus.Cancelled, (await _environment.JobAsync(lease.Id)).Status);
+    }
+
+    [Fact]
+    public async Task Eager_JobThatStopped_IsResumedByItsWorker_WithItsPlanAndDirectories()
+    {
+        var lease = (await StartEagerAsync(Sha('a'), [720])).Lease!;
+        Assert.True(await ReleaseAsync(lease));
+
+        var job = await JobAsync(lease.Id);
+        Assert.Equal(((int)HlsJobStatus.Pending, lease.LeaseToken, "ffmpeg failed"), (job.Status, job.LeaseToken, job.Error));
+        Assert.NotNull(job.Plan);
+        AssertQueued(await DeletionsAsync(), Directories(lease.Plan!), _now + TimeSpan.FromDays(1));
+
+        _now += TimeSpan.FromMinutes(1);
+        var resumed = await StartEagerAsync(Sha('a'), [720], resumeJobId: lease.Id, resumeToken: lease.LeaseToken);
+
+        Assert.Equal(HlsEagerJobOutcome.Started, resumed.Outcome);
+        Assert.Equal((lease.Id, lease.LeaseToken), (resumed.Lease!.Id, resumed.Lease.LeaseToken));
+        Assert.Equal(Json(lease.Plan!), Json(resumed.Lease.Plan!));
+        Assert.Empty(await DeletionsAsync());
+        job = await JobAsync(lease.Id);
+        Assert.Equal(((int)HlsJobStatus.Running, (string?)null, (DateTime?)(_now + Lease)), (job.Status, job.Error, job.LeaseExpires));
+        Assert.All(
+            (await _store.GetRenditionsAsync(Sha('a'), TestContext.Current.CancellationToken)).Where(r => r.Key != "v1080"),
+            r => Assert.Equal(lease.Id, r.JobId));
+    }
+
+    [Fact]
+    public async Task Eager_JobThatStopped_IsReplaced_WithoutItsToken_AndItsDirectoriesAreDeletedAtOnce()
+    {
+        var lease = (await StartEagerAsync(Sha('a'), [720])).Lease!;
+        Assert.True(await ReleaseAsync(lease));
+
+        _now += TimeSpan.FromMinutes(1);
+        var result = await StartEagerAsync(Sha('a'), [720]);
+
+        Assert.Equal(HlsEagerJobOutcome.Started, result.Outcome);
+        Assert.NotEqual(lease.LeaseToken, result.Lease!.LeaseToken);
+        AssertQueued(await DeletionsAsync(), Directories(lease.Plan!), _now);
+        Assert.DoesNotContain(await _environment.JobsAsync(), j => j.Id.Equals(lease.Id));
+    }
+
+    [Fact]
+    public async Task Eager_JobThatStopped_AndWasCancelledByAClaim_IsStillResumed()
+    {
+        var lease = (await StartEagerAsync(Sha('a'), [720])).Lease!;
+        Assert.True(await ReleaseAsync(lease));
+        Assert.Null(await ClaimAsync());
+        Assert.Equal((int)HlsJobStatus.Cancelled, (await JobAsync(lease.Id)).Status);
+
+        var resumed = await StartEagerAsync(Sha('a'), [720], resumeJobId: lease.Id, resumeToken: lease.LeaseToken);
+
+        Assert.Equal(HlsEagerJobOutcome.Started, resumed.Outcome);
+        Assert.Equal((lease.Id, lease.LeaseToken), (resumed.Lease!.Id, resumed.Lease.LeaseToken));
+        Assert.Empty(await DeletionsAsync());
+    }
+
+    [Fact]
+    public async Task Eager_FailedRenditions_AreEncodedAgain()
+    {
+        await AddSourceAsync();
+        HlsJobLease? lease = null;
+        for (var attempt = 1; attempt <= MaxAttempts; attempt++)
+        {
+            (lease, _) = await ClaimAndPlanAsync(Sha('a'));
+            Assert.True(await ReleaseAsync(lease));
+        }
+
+        Assert.All(await _store.GetRenditionsAsync(Sha('a'), TestContext.Current.CancellationToken), r => Assert.Equal(HlsRenditionState.Failed, r.State));
+
+        var result = await StartEagerAsync(Sha('a'), [720]);
+
+        Assert.Equal(HlsEagerJobOutcome.Started, result.Outcome);
+        Assert.Equal(["v720", "a1", "s2", "preview"], result.Lease!.Plan!.Renditions.Select(r => r.Key));
     }
 
     // ---- Outputs and publishing
@@ -1077,11 +1343,12 @@ public sealed class HlsJobStoreTests : IDisposable
     }
 
     // Records a new library file; its source job is created a second after every earlier one, so jobs are claimed in this order.
-    private async Task<Guid> AddSourceAsync(Guid? libraryId = null)
+    private async Task<Guid> AddSourceAsync(Guid? libraryId = null, string? path = null)
     {
         var item = Guid.NewGuid();
         _now += TimeSpan.FromSeconds(1);
-        var result = Assert.Single(await _store.UpsertSourcesAsync([LibraryFile(item, libraryId)], _now, TestContext.Current.CancellationToken));
+        var file = LibraryFile(item, libraryId);
+        var result = Assert.Single(await _store.UpsertSourcesAsync([file with { Path = path ?? file.Path }], _now, TestContext.Current.CancellationToken));
         Assert.Equal(HlsSourceChange.Inserted, result.Change);
         return item;
     }
@@ -1093,8 +1360,16 @@ public sealed class HlsJobStoreTests : IDisposable
         Assert.Equal(HlsSourceChange.ContentChanged, result.Change);
     }
 
-    private Task<HlsJobLease?> ClaimAsync(string worker = "worker", Func<Guid, bool>? eligible = null)
-        => _store.ClaimAsync(new HlsClaimRequest(worker, Lease, eligible ?? (_ => true), _now), TestContext.Current.CancellationToken);
+    private Task<HlsJobLease?> ClaimAsync(
+        string worker = "worker",
+        Func<Guid, bool>? eligible = null,
+        Guid? workerId = null,
+        IReadOnlySet<Guid>? libraries = null,
+        IReadOnlySet<Guid>? excluded = null,
+        IReadOnlyDictionary<Guid, IReadOnlySet<int>>? excludedQualities = null)
+        => _store.ClaimAsync(
+            new HlsClaimRequest(worker, workerId ?? WorkerId, Lease, eligible ?? (_ => true), libraries, excluded ?? new HashSet<Guid>(), excludedQualities ?? new Dictionary<Guid, IReadOnlySet<int>>(), _now),
+            TestContext.Current.CancellationToken);
 
     private Task<HlsIdentifyResult> IdentifyAsync(
         HlsJobLease lease,
@@ -1104,14 +1379,22 @@ public sealed class HlsJobStoreTests : IDisposable
         HlsProbe? probe = null,
         int[]? qualities = null,
         string? root = null,
-        Func<Guid, IReadOnlyCollection<int>>? getQualities = null)
+        Func<Guid, IReadOnlyCollection<int>>? getQualities = null,
+        IReadOnlySet<int>? excludedQualities = null)
         => _store.IdentifyAsync(
-            new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, probe ?? Probe, root ?? _environment.Root, getQualities ?? (_ => qualities ?? Qualities), profile, eligible ?? (_ => true), _now),
+            new HlsIdentifyRequest(lease.Id, lease.LeaseToken, sha, probe ?? Probe, root ?? _environment.Root, getQualities ?? (_ => qualities ?? Qualities), profile, eligible ?? (_ => true), excludedQualities ?? new HashSet<int>(), _now),
             TestContext.Current.CancellationToken);
 
-    private Task<HlsEagerJobResult> StartEagerAsync(string sha, int[] qualities, Guid? libraryId = null, Func<Guid, IReadOnlyCollection<int>>? getQualities = null)
+    private Task<HlsEagerJobResult> StartEagerAsync(
+        string sha,
+        int[] qualities,
+        Guid? libraryId = null,
+        Func<Guid, IReadOnlyCollection<int>>? getQualities = null,
+        Guid? resumeJobId = null,
+        string? resumeToken = null,
+        HlsProbe? probe = null)
         => _store.StartEagerJobAsync(
-            new HlsEagerJobRequest("worker", libraryId ?? LibraryId, sha, Probe, _environment.Root, qualities, getQualities ?? (_ => Qualities), Profile, Lease, _now),
+            new HlsEagerJobRequest("worker", WorkerId, libraryId ?? LibraryId, sha, probe ?? Probe, _environment.Root, qualities, getQualities ?? (_ => Qualities), Profile, Lease, _now, resumeJobId, resumeToken),
             TestContext.Current.CancellationToken);
 
     // Claims the oldest pending job and identifies its file as the content, which it must then encode.
@@ -1153,6 +1436,17 @@ public sealed class HlsJobStoreTests : IDisposable
         => _store.EnsureMediaJobAsync(sha, preferredItem, profile, eligible ?? (_ => true), _now, TestContext.Current.CancellationToken);
 
     private Task<HlsJob> JobAsync(Guid id) => _environment.JobAsync(id);
+
+    // Stores the probe of a content as a server that did not read the color space stored it.
+    private async Task StoreProbeWithoutColorSpaceAsync(string sha)
+    {
+        await using var context = _environment.CreateDbContext();
+        var media = await context.HlsMedia.SingleAsync(m => m.Sha256 == sha, TestContext.Current.CancellationToken);
+        var probe = System.Text.Json.Nodes.JsonNode.Parse(media.Probe)!.AsObject();
+        Assert.True(probe.Remove("ColorSpace"));
+        media.Probe = probe.ToJsonString();
+        await context.SaveChangesAsync(TestContext.Current.CancellationToken);
+    }
 
     private async Task<HlsJob> SourceJobAsync(Guid item)
     {

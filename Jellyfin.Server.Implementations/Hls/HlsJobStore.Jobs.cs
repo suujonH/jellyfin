@@ -20,6 +20,13 @@ namespace Jellyfin.Server.Implementations.Hls;
 public sealed partial class HlsJobStore
 {
     private const int MaxClaimRounds = 20;
+    private const int ClaimPage = 50;
+    private const int MaxClaimCandidates = 500;
+
+    private static readonly IReadOnlySet<int> _noQualities = new HashSet<int>();
+
+    // How long the directories of an eager job that stopped are kept for its worker to resume it.
+    private static readonly TimeSpan _eagerKeep = TimeSpan.FromDays(1);
 
     /// <summary>
     /// Creates the job of a content whose renditions need one and lets it hold them. A pending job is reused, a running or verifying
@@ -134,9 +141,11 @@ public sealed partial class HlsJobStore
             cancellationToken);
 
     /// <summary>
-    /// Gives a worker the oldest pending job. A job found stale on the way is cancelled and the search goes on, up to 20 jobs:
-    /// a source job needs its file in an enabled library, a media job a file of its content in an enabled library, the preferred
-    /// item's first, and a rendition it still holds.
+    /// Gives a worker the oldest pending job it takes. A job found stale on the way is cancelled and the search goes on, up to 20
+    /// such jobs: a source job needs its file in an enabled library, a media job a file of its content in an enabled library, the
+    /// preferred item's first, and a rendition it still holds. A job the worker does not take is left waiting for another worker,
+    /// up to 500 such jobs: its file is in a library the worker did not ask for, is excluded by the worker, or is on the machine of
+    /// another worker.
     /// </summary>
     /// <param name="request">The request.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
@@ -145,43 +154,60 @@ public sealed partial class HlsJobStore
         => WriteAsync<HlsJobLease?>(
             async context =>
             {
-                for (var round = 0; round < MaxClaimRounds; round++)
+                // A cancelled job leaves the pending ones, so only the jobs left waiting are skipped.
+                var skipped = 0;
+                var cancelled = 0;
+                while (true)
                 {
-                    var job = await context.HlsJobs
+                    var page = await context.HlsJobs
                         .Where(j => j.Status == (int)HlsJobStatus.Pending)
                         .OrderBy(j => j.DateCreated)
                         .ThenBy(j => j.Id)
-                        .FirstOrDefaultAsync(cancellationToken)
+                        .Skip(skipped)
+                        .Take(ClaimPage)
+                        .ToListAsync(cancellationToken)
                         .ConfigureAwait(false);
-                    if (job is null)
+                    if (page.Count == 0)
                     {
                         return null;
                     }
 
-                    var input = await FindInputAsync(context, job, request.IsLibraryEligible, cancellationToken).ConfigureAwait(false);
-                    if (input is null)
+                    foreach (var job in page)
                     {
-                        await CancelAsync(context, job, request.Now, cancellationToken).ConfigureAwait(false);
-                        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-                        continue;
+                        var inputs = await FindInputsAsync(context, job, request.IsLibraryEligible, cancellationToken).ConfigureAwait(false);
+                        if (inputs.Count == 0)
+                        {
+                            if (++cancelled > MaxClaimRounds)
+                            {
+                                return null;
+                            }
+
+                            await CancelAsync(context, job, request.Now, cancellationToken).ConfigureAwait(false);
+                            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                            continue;
+                        }
+
+                        // The renditions a media job holds decide which workers can take it; a source job does not know them yet.
+                        IReadOnlyList<string> keys = [];
+                        if (job.Kind == (int)HlsJobKind.Media && request.ExcludedQualities.Count > 0)
+                        {
+                            var jobId = job.Id;
+                            keys = await context.HlsRenditions.Where(r => r.JobId.Equals(jobId)).Select(r => r.Key).ToListAsync(cancellationToken).ConfigureAwait(false);
+                        }
+
+                        if (inputs.FirstOrDefault(s => IsAcceptable(request, s) && HlsQualityRules.CanTake(keys, GetExcludedQualities(request, s.LibraryId))) is not { } source)
+                        {
+                            if (++skipped >= MaxClaimCandidates)
+                            {
+                                return null;
+                            }
+
+                            continue;
+                        }
+
+                        return Claim(job, ToRecord(source).File, request);
                     }
-
-                    // The token also names the directories of this attempt.
-                    var lease = new HlsJobLease(job.Id, (HlsJobKind)job.Kind, input, Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture), request.Now + request.Lease, job.Attempt + 1, null);
-                    job.Status = (int)HlsJobStatus.Running;
-                    job.Worker = request.Worker;
-                    job.LeaseToken = lease.LeaseToken;
-                    job.LeaseExpires = lease.LeaseExpires;
-                    job.Attempt = lease.Attempt;
-                    job.Error = null;
-                    job.Input = JsonSerializer.Serialize(input);
-                    job.Plan = null;
-                    job.Base = null;
-                    job.DateModified = request.Now;
-                    return lease;
                 }
-
-                return null;
             },
             cancellationToken);
 
@@ -311,7 +337,7 @@ public sealed partial class HlsJobStore
                 }
                 else
                 {
-                    keptStoredProbe = !string.Equals(media.Probe, probe, StringComparison.Ordinal);
+                    keptStoredProbe = KeepStoredProbe(media, request.Probe, probe);
                     media.DateOrphaned = null;
                 }
 
@@ -351,7 +377,24 @@ public sealed partial class HlsJobStore
 
                 await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
                 var jobId = job.Id;
-                var held = await context.HlsRenditions.Where(r => r.Sha256 == sha256 && r.JobId.Equals(jobId)).Select(r => r.Key).ToListAsync(cancellationToken).ConfigureAwait(false);
+                var holding = await context.HlsRenditions.Where(r => r.Sha256 == sha256 && r.JobId.Equals(jobId)).ToListAsync(cancellationToken).ConfigureAwait(false);
+
+                // The qualities the worker does not encode go back, for a job of another worker once this one ends.
+                if (request.ExcludedQualities.Count > 0)
+                {
+                    if (!HlsQualityRules.CanTake(holding.Select(r => r.Key), request.ExcludedQualities))
+                    {
+                        await CompleteAsync(context, job, now, cancellationToken).ConfigureAwait(false);
+                        return new HlsIdentifyResult(HlsIdentifyOutcome.Done, KeptStoredProbe: keptStoredProbe);
+                    }
+
+                    foreach (var rendition in holding.Where(r => HlsQualityRules.IsExcluded(r.Key, request.ExcludedQualities)))
+                    {
+                        rendition.JobId = null;
+                    }
+                }
+
+                var held = holding.Where(r => r.JobId.Equals(jobId)).Select(r => r.Key).ToList();
                 var specs = desired.Where(s => held.Contains(s.Key)).ToList();
                 if (specs.Count == 0)
                 {
@@ -402,7 +445,7 @@ public sealed partial class HlsJobStore
                 }
                 else
                 {
-                    keptStoredProbe = !string.Equals(media.Probe, probe, StringComparison.Ordinal);
+                    keptStoredProbe = KeepStoredProbe(media, request.Probe, probe);
                 }
 
                 // The library the media is added to counts as if its file were already there.
@@ -415,14 +458,27 @@ public sealed partial class HlsJobStore
                 await SyncRenditionsAsync(context, sha256, desired, now, cancellationToken).ConfigureAwait(false);
                 await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-                // The worker would encode what another job is encoding, or wait for it.
+                // The worker resumes the job of its earlier addition, or replaces a job nobody works on; it would otherwise encode what
+                // another job is encoding, or wait for it.
                 var workKey = GetMediaWorkKey(sha256);
                 var job = await context.HlsJobs.FirstOrDefaultAsync(j => j.WorkKey == workKey, cancellationToken).ConfigureAwait(false);
-                if (job is not null && !CanBeCreatedAgain(job) && job.Status != (int)HlsJobStatus.Failed)
+                if (job is not null && CanResume(job, request) && await TryResumeAsync(context, job, request, keptStoredProbe, cancellationToken).ConfigureAwait(false) is { } resumed)
                 {
-                    return new HlsEagerJobResult(HlsEagerJobOutcome.Busy, KeptStoredProbe: keptStoredProbe);
+                    return resumed;
                 }
 
+                if (job is not null && !CanBeCreatedAgain(job))
+                {
+                    if (!CanBeReplaced(job, now))
+                    {
+                        return new HlsEagerJobResult(HlsEagerJobOutcome.Busy, KeptStoredProbe: keptStoredProbe);
+                    }
+
+                    // A worker whose lease expired may still be uploading until it notices.
+                    await ReplaceAsync(context, job, job.Status == (int)HlsJobStatus.Running ? now + request.Lease : now, now, cancellationToken).ConfigureAwait(false);
+                }
+
+                await ResetFailedRenditionsAsync(context, sha256, cancellationToken).ConfigureAwait(false);
                 if (await context.HlsRenditions.AnyAsync(r => r.Sha256 == sha256 && r.JobId.HasValue, cancellationToken).ConfigureAwait(false))
                 {
                     return new HlsEagerJobResult(HlsEagerJobOutcome.Busy, KeptStoredProbe: keptStoredProbe);
@@ -450,6 +506,7 @@ public sealed partial class HlsJobStore
                 job = NewJob(HlsJobKind.Media, workKey, null, sha256, now);
                 job.Status = (int)HlsJobStatus.Running;
                 job.Worker = request.Worker;
+                job.WorkerId = request.WorkerId;
                 job.LeaseToken = token;
                 job.LeaseExpires = now + request.Lease;
                 job.Attempt = 1;
@@ -583,6 +640,7 @@ public sealed partial class HlsJobStore
                     rendition.State = (int)HlsRenditionState.Published;
                     rendition.JobId = null;
                     rendition.PublishedJobId = jobId;
+                    rendition.WorkerId = job.WorkerId;
                     rendition.RelativeDirectory = output.RelativeDirectory;
                     rendition.Base = job.Base;
                     rendition.Summary = output.Summary;
@@ -753,6 +811,112 @@ public sealed partial class HlsJobStore
             },
             cancellationToken);
 
+    // The job of an earlier addition of the media by the same worker, stopped or still leased, with its plan and root.
+    // Whether the stored probe of a content differs from a new one and is kept. A probe stored before the color space was read
+    // takes it from a new probe that is the same otherwise, as it is no other description of the file, only a longer one.
+    private static bool KeepStoredProbe(HlsMedia media, HlsProbe probe, string json)
+    {
+        if (string.Equals(media.Probe, json, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var stored = Deserialize<HlsProbe>(media.Probe);
+        if (stored.ColorSpace.Length == 0 && string.Equals(JsonSerializer.Serialize(stored with { ColorSpace = probe.ColorSpace }), json, StringComparison.Ordinal))
+        {
+            media.Probe = json;
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool CanResume(HlsJob job, HlsEagerJobRequest request)
+        => request.ResumeJobId.Equals(job.Id)
+            && request.ResumeToken is not null
+            && string.Equals(job.LeaseToken, request.ResumeToken, StringComparison.Ordinal)
+            && job.Plan is not null
+            && job.Input is null
+            && job.WorkerId.Equals(request.WorkerId)
+            && string.Equals(job.Base, request.Base, StringComparison.Ordinal)
+            && (job.Status == (int)HlsJobStatus.Pending
+                || job.Status == (int)HlsJobStatus.Running
+                || (job.Status == (int)HlsJobStatus.Cancelled && job.LeaseExpires is null));
+
+    // Leases the job again with its plan, its token and so its directories, which are no longer to be deleted; null when one of its
+    // renditions was taken or published meanwhile, or the profile changed.
+    private static async Task<HlsEagerJobResult?> TryResumeAsync(JellyfinDbContext context, HlsJob job, HlsEagerJobRequest request, bool keptStoredProbe, CancellationToken cancellationToken)
+    {
+        var plan = Deserialize<HlsEncodePlan>(job.Plan!);
+        if (!string.Equals(plan.Profile, request.Profile, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var sha256 = request.Sha256;
+        await ResetFailedRenditionsAsync(context, sha256, cancellationToken).ConfigureAwait(false);
+        var keys = plan.Renditions.Select(r => r.Key).ToList();
+        var renditions = await context.HlsRenditions.Where(r => r.Sha256 == sha256 && keys.Contains(r.Key)).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var jobId = job.Id;
+        if (keys.Any(k => !renditions.Any(r => r.Key == k && (r.JobId.Equals(jobId) || (!r.JobId.HasValue && r.State == (int)HlsRenditionState.Missing)))))
+        {
+            return null;
+        }
+
+        foreach (var rendition in renditions)
+        {
+            rendition.JobId = job.Id;
+        }
+
+        var directories = plan.Renditions.Select(r => r.RelativeDirectory).ToList();
+        context.HlsDeletions.RemoveRange(await context.HlsDeletions.Where(d => directories.Contains(d.RelativeDirectory)).ToListAsync(cancellationToken).ConfigureAwait(false));
+        var now = request.Now;
+        job.Status = (int)HlsJobStatus.Running;
+        job.Worker = request.Worker;
+        job.LeaseExpires = now + request.Lease;
+        job.Attempt = Math.Max(1, job.Attempt);
+        job.Error = null;
+        job.DateModified = now;
+        var lease = new HlsJobLease(job.Id, HlsJobKind.Media, null, job.LeaseToken!, job.LeaseExpires.Value, job.Attempt, plan);
+        return new HlsEagerJobResult(HlsEagerJobOutcome.Started, lease, keptStoredProbe);
+    }
+
+    // A job an addition takes the place of: one waiting, one that failed, or one of another addition whose lease expired.
+    private static bool CanBeReplaced(HlsJob job, DateTime now)
+        => job.Status == (int)HlsJobStatus.Pending
+            || job.Status == (int)HlsJobStatus.Failed
+            || (job.Status == (int)HlsJobStatus.Running && job.Input is null && job.LeaseExpires <= now);
+
+    // Cancels the job, releasing its renditions, and queues the directories of its plan that were not published.
+    private static async Task ReplaceAsync(JellyfinDbContext context, HlsJob job, DateTime notBefore, DateTime now, CancellationToken cancellationToken)
+    {
+        if (job.Plan is not null)
+        {
+            var sha256 = job.Sha256;
+            var published = await context.HlsRenditions.Where(r => r.Sha256 == sha256 && r.RelativeDirectory != null).Select(r => r.RelativeDirectory!).ToListAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var rendition in Deserialize<HlsEncodePlan>(job.Plan).Renditions.Where(r => !published.Contains(r.RelativeDirectory)))
+            {
+                await QueueDeletionAsync(context, job.Base, rendition.RelativeDirectory, notBefore, "The job was replaced by an addition of its media.", cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        await CancelAsync(context, job, now, cancellationToken).ConfigureAwait(false);
+        job.LeaseToken = null;
+        job.LeaseExpires = null;
+    }
+
+    // Adding the media again is a reason to try the renditions that failed for good.
+    private static async Task ResetFailedRenditionsAsync(JellyfinDbContext context, string sha256, CancellationToken cancellationToken)
+    {
+        foreach (var rendition in await context.HlsRenditions.Where(r => r.Sha256 == sha256 && r.State == (int)HlsRenditionState.Failed).ToListAsync(cancellationToken).ConfigureAwait(false))
+        {
+            rendition.State = (int)HlsRenditionState.Missing;
+            rendition.JobId = null;
+        }
+
+        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     private static bool IsLeaseValid([NotNullWhen(true)] HlsJob? job, string leaseToken, DateTime now)
         => job is not null
             && job.Status == (int)HlsJobStatus.Running
@@ -772,26 +936,53 @@ public sealed partial class HlsJobStore
             HlsEncodingProfile.GetExpectedSegments(probe.DurationSeconds),
             specs.Select(s => new HlsPlannedRendition(s.Key, s.Kind, HlsRenditionPaths.GetRelativeDirectory(media.MediaKey, s, token), s.Video, s.SourceIndex, s.Channels)).ToList());
 
-    // The file the job reads, or null when the job is stale.
-    private static async Task<HlsSourceFile?> FindInputAsync(JellyfinDbContext context, HlsJob job, Func<Guid, bool> isLibraryEligible, CancellationToken cancellationToken)
+    // Leases the job to the worker.
+    private static HlsJobLease Claim(HlsJob job, HlsSourceFile input, HlsClaimRequest request)
+    {
+        // The token also names the directories of this attempt.
+        var lease = new HlsJobLease(job.Id, (HlsJobKind)job.Kind, input, Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture), request.Now + request.Lease, job.Attempt + 1, null);
+        job.Status = (int)HlsJobStatus.Running;
+        job.Worker = request.Worker;
+        job.WorkerId = request.WorkerId;
+        job.LeaseToken = lease.LeaseToken;
+        job.LeaseExpires = lease.LeaseExpires;
+        job.Attempt = lease.Attempt;
+        job.Error = null;
+        job.Input = JsonSerializer.Serialize(input);
+        job.Plan = null;
+        job.Base = null;
+        job.DateModified = request.Now;
+        return lease;
+    }
+
+    // The files the job may read, the preferred first; none when the job is stale.
+    private static async Task<List<HlsSource>> FindInputsAsync(JellyfinDbContext context, HlsJob job, Func<Guid, bool> isLibraryEligible, CancellationToken cancellationToken)
     {
         if (job.Kind == (int)HlsJobKind.Source)
         {
             var source = job.ItemId is { } itemId ? await context.HlsSources.FindAsync([itemId], cancellationToken).ConfigureAwait(false) : null;
-            return source is not null && isLibraryEligible(source.LibraryId) ? ToRecord(source).File : null;
+            return source is not null && isLibraryEligible(source.LibraryId) ? [source] : [];
         }
 
         var jobId = job.Id;
         if (!await context.HlsRenditions.AnyAsync(r => r.JobId.Equals(jobId), cancellationToken).ConfigureAwait(false))
         {
-            return null;
+            return [];
         }
 
         var sha256 = job.Sha256;
         var sources = await context.HlsSources.Where(s => s.Sha256 == sha256).ToListAsync(cancellationToken).ConfigureAwait(false);
-        var input = sources.OrderBy(s => !job.ItemId.Equals(s.ItemId)).ThenBy(s => s.ItemId).FirstOrDefault(s => isLibraryEligible(s.LibraryId));
-        return input is null ? null : ToRecord(input).File;
+        return sources.OrderBy(s => !job.ItemId.Equals(s.ItemId)).ThenBy(s => s.ItemId).Where(s => isLibraryEligible(s.LibraryId)).ToList();
     }
+
+    private static IReadOnlySet<int> GetExcludedQualities(HlsClaimRequest request, Guid libraryId)
+        => request.ExcludedQualities.TryGetValue(libraryId, out var excluded) ? excluded : _noQualities;
+
+    // Whether the worker takes a file: it is in a library the worker asked for and not excluded by it, and not on another worker.
+    private static bool IsAcceptable(HlsClaimRequest request, HlsSource source)
+        => (request.Libraries is null || request.Libraries.Contains(source.LibraryId))
+            && !request.ExcludedItems.Contains(source.ItemId)
+            && (!HlsWorkerLocalAddress.TryParse(source.Path, out var owner, out _) || owner.Equals(request.WorkerId));
 
     // Cancels the job and releases its renditions. The lease is kept: its worker is refused on the next call, and releasing the
     // lease or its expiry still queues the directories of the worker.
@@ -847,14 +1038,22 @@ public sealed partial class HlsJobStore
         context.HlsJobOutputs.RemoveRange(outputs);
     }
 
-    // The worker's directories are queued; a cancelled job only loses its lease, a running one fails.
+    // The worker's directories are queued; a cancelled job only loses its lease, a running one fails. An eager job keeps its plan
+    // and directories for its worker to resume; its directories are deleted after a day unless it does.
     private static async Task EndLeaseAsync(JellyfinDbContext context, HlsJob job, string reason, DateTime notBefore, string error, int maxAttempts, DateTime now, CancellationToken cancellationToken)
     {
+        var kept = job.Status == (int)HlsJobStatus.Running && job.Input is null && job.Plan is not null;
         if (job.Plan is not null)
         {
             foreach (var rendition in Deserialize<HlsEncodePlan>(job.Plan).Renditions)
             {
-                await QueueDeletionAsync(context, job.Base, rendition.RelativeDirectory, notBefore, reason, cancellationToken).ConfigureAwait(false);
+                await QueueDeletionAsync(
+                    context,
+                    job.Base,
+                    rendition.RelativeDirectory,
+                    kept ? now + _eagerKeep : notBefore,
+                    kept ? "The job of media being added stopped." : reason,
+                    cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -864,10 +1063,25 @@ public sealed partial class HlsJobStore
             job.LeaseExpires = null;
             job.DateModified = now;
         }
+        else if (kept)
+        {
+            Keep(job, error, now);
+        }
         else
         {
             await FailAsync(context, job, error, maxAttempts, now, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    // Waits for its worker to resume it, keeping its plan, root and token; a claim cancels it, as no file of it is in a library, or
+    // takes it as a new job.
+    private static void Keep(HlsJob job, string error, DateTime now)
+    {
+        job.Status = (int)HlsJobStatus.Pending;
+        job.LeaseExpires = null;
+        job.Attempt = 0;
+        job.Error = error;
+        job.DateModified = now;
     }
 
     // After the last attempt the job fails for good: its missing renditions fail and are released, its published ones stay held so
