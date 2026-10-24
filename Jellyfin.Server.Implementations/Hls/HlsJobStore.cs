@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -25,6 +26,9 @@ public sealed partial class HlsJobStore : IDisposable
 {
     private readonly IDbContextFactory<JellyfinDbContext> _dbProvider;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
+
+    // The size and number of the files each job submitted for a rendition, which never change once submitted.
+    private readonly ConcurrentDictionary<(Guid JobId, string Key), (long Size, int Count)> _outputSizes = new();
 
     /// <summary>
     /// Initializes a new instance of the <see cref="HlsJobStore"/> class.

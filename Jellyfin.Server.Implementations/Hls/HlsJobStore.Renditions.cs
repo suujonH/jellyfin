@@ -19,6 +19,73 @@ namespace Jellyfin.Server.Implementations.Hls;
 public sealed partial class HlsJobStore
 {
     /// <summary>
+    /// Gets every content with what is published of it, the size of each rendition from the files its job submitted, and the
+    /// items whose file is the content.
+    /// </summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The contents, by hash.</returns>
+    public Task<IReadOnlyList<HlsStoredContent>> GetStoredContentsAsync(CancellationToken cancellationToken)
+        => ReadAsync<IReadOnlyList<HlsStoredContent>>(
+            async context =>
+            {
+                var media = await context.HlsMedia.AsNoTracking().OrderBy(m => m.Sha256).ToListAsync(cancellationToken).ConfigureAwait(false);
+                var renditions = await context.HlsRenditions.AsNoTracking()
+                    .Where(r => r.State == (int)HlsRenditionState.Published && r.Base != null && r.PublishedJobId != null)
+                    .ToListAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                // Only the outputs not read before are read: their file lists, which are the bulk of them, once each. The sizes of
+                // this listing are its own, taken as the cache is read, so another listing letting go of some does not change them.
+                var published = renditions.Select(r => (r.PublishedJobId!.Value, r.Key)).ToHashSet();
+                var sizes = new Dictionary<(Guid JobId, string Key), (long Size, int Count)>();
+                foreach (var key in published)
+                {
+                    if (_outputSizes.TryGetValue(key, out var size))
+                    {
+                        sizes[key] = size;
+                    }
+                }
+
+                var jobIds = published.Where(k => !sizes.ContainsKey(k)).Select(k => k.Item1).Distinct().ToList();
+                if (jobIds.Count > 0)
+                {
+                    var outputs = await context.HlsJobOutputs.AsNoTracking()
+                        .Where(o => jobIds.Contains(o.JobId))
+                        .Select(o => new { o.JobId, o.Key, o.Files })
+                        .ToListAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    foreach (var output in outputs)
+                    {
+                        var files = Deserialize<List<HlsOutputFile>>(output.Files);
+                        var key = (output.JobId, output.Key);
+                        sizes[key] = (files.Sum(f => f.Length), files.Count);
+                        _outputSizes[key] = sizes[key];
+                    }
+                }
+
+                // The cache lets go of what is no longer published.
+                foreach (var key in _outputSizes.Keys.Where(k => !published.Contains(k)))
+                {
+                    _outputSizes.TryRemove(key, out _);
+                }
+
+                var sources = (await context.HlsSources.AsNoTracking()
+                        .Where(s => s.Sha256 != null)
+                        .Select(s => new { s.ItemId, s.Sha256 })
+                        .ToListAsync(cancellationToken)
+                        .ConfigureAwait(false))
+                    .ToLookup(s => s.Sha256!, s => s.ItemId, StringComparer.Ordinal);
+                var bySha = renditions.ToLookup(r => r.Sha256, StringComparer.Ordinal);
+                return media.Select(m => new HlsStoredContent(
+                        m.Sha256,
+                        m.LibraryId,
+                        m.DateOrphaned,
+                        bySha[m.Sha256].OrderBy(r => r.Key, StringComparer.Ordinal).Select(r => ToStored(r, sizes)).ToList(),
+                        sources[m.Sha256].Order().ToList()))
+                    .ToList();
+            },
+            cancellationToken);
+
+    /// <summary>
     /// Brings the renditions of a content in line with its stored probe and the qualities it should have: renditions no longer
     /// wanted are removed and their directories queued for deletion, new ones are added as missing. A content in no chosen
     /// library is left as it is, for the orphan rules.
@@ -297,6 +364,30 @@ public sealed partial class HlsJobStore
             rendition.RelativeDirectory,
             rendition.Summary is null ? null : Deserialize<HlsRenditionSummary>(rendition.Summary),
             rendition.Profile);
+
+    // A rendition whose outputs are gone has no size known.
+    private static HlsStoredRendition ToStored(HlsRendition rendition, IReadOnlyDictionary<(Guid JobId, string Key), (long Size, int Count)> sizes)
+    {
+        var (size, count) = sizes.GetValueOrDefault((rendition.PublishedJobId!.Value, rendition.Key));
+        return new HlsStoredRendition(
+            rendition.Key,
+            GetKind(rendition.Key),
+            rendition.Base!,
+            rendition.Summary is null ? new HlsRenditionSummary() : Deserialize<HlsRenditionSummary>(rendition.Summary),
+            size,
+            count);
+    }
+
+    // The kind of a rendition by its key, as HlsRenditionPlanner names them: v1080, a1, s2 and preview.
+    private static HlsRenditionKind GetKind(string key)
+        => string.Equals(key, "preview", StringComparison.Ordinal)
+            ? HlsRenditionKind.Preview
+            : key[0] switch
+            {
+                'a' => HlsRenditionKind.Audio,
+                's' => HlsRenditionKind.Subtitle,
+                _ => HlsRenditionKind.Video
+            };
 
     private static async Task<bool> SyncRenditionsAsync(JellyfinDbContext context, string sha256, IReadOnlyList<HlsRenditionSpec> desired, DateTime now, CancellationToken cancellationToken)
     {

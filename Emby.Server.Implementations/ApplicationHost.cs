@@ -573,6 +573,7 @@ namespace Emby.Server.Implementations
             serviceCollection.AddSingleton<INetworkStorageProtocol, S3StorageProtocol>();
             serviceCollection.AddSingleton<INetworkStorageProtocol, HttpStorageProtocol>();
             serviceCollection.AddSingleton<INetworkStorageManager, NetworkStorageManager>();
+            serviceCollection.AddSingleton<INetworkStorageInventory, NetworkStorageInventory>();
             serviceCollection.AddSingleton<IHlsStoreFactory, HlsStoreFactory>();
             serviceCollection.AddSingleton<HlsJobStore>();
             serviceCollection.AddSingleton<HlsSettings>();

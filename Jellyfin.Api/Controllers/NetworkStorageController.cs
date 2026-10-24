@@ -25,16 +25,19 @@ namespace Jellyfin.Api.Controllers;
 public class NetworkStorageController : BaseJellyfinApiController
 {
     private readonly INetworkStorageManager _networkStorage;
+    private readonly INetworkStorageInventory _inventory;
     private readonly ITaskManager _taskManager;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="NetworkStorageController"/> class.
     /// </summary>
     /// <param name="networkStorage">The network storage manager.</param>
+    /// <param name="inventory">What the library has in each network storage.</param>
     /// <param name="taskManager">The task manager.</param>
-    public NetworkStorageController(INetworkStorageManager networkStorage, ITaskManager taskManager)
+    public NetworkStorageController(INetworkStorageManager networkStorage, INetworkStorageInventory inventory, ITaskManager taskManager)
     {
         _networkStorage = networkStorage;
+        _inventory = inventory;
         _taskManager = taskManager;
     }
 
@@ -48,13 +51,30 @@ public class NetworkStorageController : BaseJellyfinApiController
     [HttpGet("Storages")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public async Task<ActionResult<IReadOnlyList<NetworkStorageSummary>>> GetStorages(CancellationToken cancellationToken)
-        => Ok(await _networkStorage.GetStoragesAsync(cancellationToken).ConfigureAwait(false));
+        => Ok(await _inventory.GetStoragesAsync(cancellationToken).ConfigureAwait(false));
 
     /// <summary>
-    /// Gets the resources of one storage, invalid first.
+    /// Gets the groups of the resources of one storage: its libraries with their series, and the contents no item refers to.
     /// </summary>
     /// <param name="key">The key of the storage, such as <c>s3:bucket</c>.</param>
     /// <param name="states">The states to include; none includes all.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <response code="200">Groups returned.</response>
+    /// <returns>The groups that have resources of those states, the orphans last.</returns>
+    [HttpGet("Storages/{key}/Groups")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<IReadOnlyList<NetworkStorageGroup>>> GetGroups(
+        [FromRoute, Required] string key,
+        [FromQuery] NetworkStorageResourceState[] states,
+        CancellationToken cancellationToken)
+        => Ok(await _inventory.GetGroupsAsync(key, states, cancellationToken).ConfigureAwait(false));
+
+    /// <summary>
+    /// Gets the resources of one storage, invalid first, or of one group of it, in episode order.
+    /// </summary>
+    /// <param name="key">The key of the storage, such as <c>s3:bucket</c>.</param>
+    /// <param name="states">The states to include; none includes all.</param>
+    /// <param name="group">The key of a group: <c>library:{id}</c>, <c>library:none</c>, <c>series:{id}</c> or <c>orphans</c>; none for the whole storage.</param>
     /// <param name="startIndex">The index of the first resource.</param>
     /// <param name="limit">The most resources to return; none returns all.</param>
     /// <param name="cancellationToken">The cancellation token.</param>
@@ -65,10 +85,11 @@ public class NetworkStorageController : BaseJellyfinApiController
     public async Task<ActionResult<QueryResult<NetworkStorageResource>>> GetResources(
         [FromRoute, Required] string key,
         [FromQuery] NetworkStorageResourceState[] states,
+        [FromQuery] string? group,
         [FromQuery] int? startIndex,
         [FromQuery] int? limit,
         CancellationToken cancellationToken)
-        => Ok(await _networkStorage.GetResourcesAsync(key, states, startIndex ?? 0, limit, cancellationToken).ConfigureAwait(false));
+        => Ok(await _inventory.GetResourcesAsync(key, states, group, startIndex ?? 0, limit, cancellationToken).ConfigureAwait(false));
 
     /// <summary>
     /// Starts checking every resource that can be checked: that it exists and has its declared size.

@@ -391,102 +391,27 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
                 || (TryLocate(target, out var location, out var protocol) && FindAccess(protocol, location.Container)?.Access.IsArchive == true));
 
     /// <inheritdoc />
-    public async Task<IReadOnlyList<NetworkStorageSummary>> GetStoragesAsync(CancellationToken cancellationToken)
-    {
-        var resources = await GetAllResourcesAsync(cancellationToken).ConfigureAwait(false);
-        var summaries = new Dictionary<string, NetworkStorageSummary>(StringComparer.Ordinal);
-
-        // Every access is listed, with or without resources.
-        foreach (var stored in Accesses)
-        {
-            var key = StorageLocation.GetStorageKey(stored.Access.Protocol, stored.Access.Bucket);
-            summaries[key] = new NetworkStorageSummary
-            {
-                Key = key,
-                Protocol = stored.Access.Protocol,
-                Name = stored.Access.Bucket,
-                AccessId = stored.Access.Id,
-                IsArchive = stored.Access.IsArchive,
-                RequiresAccess = true
-            };
-        }
-
-        foreach (var resource in resources)
-        {
-            if (!summaries.TryGetValue(resource.StorageKey, out var summary))
-            {
-                summary = new NetworkStorageSummary
-                {
-                    Key = resource.StorageKey,
-                    Protocol = resource.ProtocolName,
-                    Name = resource.Container,
-                    RequiresAccess = resource.RequiresAccess
-                };
-                summaries[resource.StorageKey] = summary;
-            }
-
-            summary.ResourceCount++;
-            switch (resource.Resource.State)
-            {
-                case NetworkStorageResourceState.Valid:
-                    summary.ValidCount++;
-                    break;
-                case NetworkStorageResourceState.Invalid:
-                    summary.InvalidCount++;
-                    break;
-                default:
-                    summary.UnknownCount++;
-                    break;
-            }
-
-            if (resource.Resource.Size is { } size)
-            {
-                summary.TotalSize += size;
-            }
-            else
-            {
-                summary.UndeclaredSizeCount++;
-            }
-        }
-
-        return summaries.Values
-            .OrderBy(s => s.Key == UnresolvedStorageKey)
-            .ThenBy(s => s.Protocol, StringComparer.Ordinal)
-            .ThenBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+    public async Task<IReadOnlyList<NetworkStorageResourceEntry>> GetResourceEntriesAsync(CancellationToken cancellationToken)
+        => (await GetAllResourcesAsync(cancellationToken).ConfigureAwait(false))
+            .Select(r => new NetworkStorageResourceEntry(r.Resource, r.StorageKey, r.ProtocolName, r.Container, r.RequiresAccess, r.TopParentId))
             .ToArray();
-    }
 
     /// <inheritdoc />
-    public async Task<QueryResult<NetworkStorageResource>> GetResourcesAsync(
-        string storageKey,
-        IReadOnlyCollection<NetworkStorageResourceState> states,
-        int startIndex,
-        int? limit,
-        CancellationToken cancellationToken)
+    public NetworkStorageRoot? GetStorageRoot(string root)
     {
-        ArgumentNullException.ThrowIfNull(states);
-        var resources = await GetAllResourcesAsync(cancellationToken).ConfigureAwait(false);
-        var matching = resources
-            .Where(r => string.Equals(r.StorageKey, storageKey, StringComparison.Ordinal))
-            .Select(r => r.Resource)
-            .Where(r => states.Count == 0 || states.Contains(r.State))
-            .OrderBy(r => r.State switch
-            {
-                NetworkStorageResourceState.Invalid => 0,
-                NetworkStorageResourceState.Unknown => 1,
-                _ => 2
-            })
-            .ThenBy(r => r.SeriesName, StringComparer.CurrentCultureIgnoreCase)
-            .ThenBy(r => r.Name, StringComparer.CurrentCultureIgnoreCase)
-            .ToArray();
-
-        IEnumerable<NetworkStorageResource> page = matching.Skip(Math.Max(0, startIndex));
-        if (limit.HasValue)
+        if (string.IsNullOrEmpty(root))
         {
-            page = page.Take(Math.Max(0, limit.Value));
+            return null;
         }
 
-        return new QueryResult<NetworkStorageResource>(startIndex, matching.Length, page.ToArray());
+        // A protocol locates objects, and the root of a whole bucket names none: an object in the root is located instead.
+        if (!TryLocate(root, out var location, out var protocol)
+            && !TryLocate(root.TrimEnd('/') + "/.root", out location, out protocol))
+        {
+            return null;
+        }
+
+        return new NetworkStorageRoot(location.StorageKey, location.Protocol, location.Container, protocol.RequiresAccess);
     }
 
     /// <inheritdoc />
@@ -637,12 +562,14 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
     {
         var rows = await query
             .Where(e => !e.IsVirtualItem && e.Path != null && EF.Functions.Like(e.Path, "%.strm") && _resourceTypes.Contains(e.Type))
-            .Select(e => new { e.Id, e.Name, e.SeriesName, e.Type, e.Path, e.Size, e.Data })
+            .Select(e => new { e.Id, e.Name, e.SeriesName, e.Type, e.Path, e.Size, e.Data, e.SeriesId, e.TopParentId, e.IndexNumber, e.ParentIndexNumber })
             .AsNoTracking()
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        return rows.Select(r => new ResourceRow(r.Id, r.Name, r.SeriesName, r.Type, r.Path!, r.Size, ReadShortcutPath(r.Data))).ToList();
+        return rows
+            .Select(r => new ResourceRow(r.Id, r.Name, r.SeriesName, r.Type, r.Path!, r.Size, ReadShortcutPath(r.Data), r.SeriesId, r.TopParentId, r.IndexNumber, r.ParentIndexNumber))
+            .ToList();
     }
 
     private static string? ReadShortcutPath(string? data)
@@ -802,10 +729,13 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
             StatusCode = failure?.StatusCode,
             FailureSource = failure is null ? null : (NetworkStorageFailureSource)failure.Source,
             DateLastFailed = failure?.DateLastFailed,
-            FailureCount = failure?.Count ?? 0
+            FailureCount = failure?.Count ?? 0,
+            SeriesId = row.SeriesId,
+            SeasonNumber = row.ParentIndexNumber,
+            EpisodeNumber = row.IndexNumber
         };
 
-        return new DescribedResource(resource, location, protocol, access);
+        return new DescribedResource(resource, location, protocol, access, row.TopParentId);
     }
 
     private async Task RecordFailureAsync(
@@ -878,9 +808,20 @@ public sealed class NetworkStorageManager : INetworkStorageManager, IDisposable
 
     private sealed record StoredAccess(NetworkStorageAccessDto Access, NetworkStorageExternalAddressDto External);
 
-    private sealed record ResourceRow(Guid Id, string? Name, string? SeriesName, string Type, string Path, long? Size, string? Target);
+    private sealed record ResourceRow(
+        Guid Id,
+        string? Name,
+        string? SeriesName,
+        string Type,
+        string Path,
+        long? Size,
+        string? Target,
+        Guid? SeriesId,
+        Guid? TopParentId,
+        int? IndexNumber,
+        int? ParentIndexNumber);
 
-    private sealed record DescribedResource(NetworkStorageResource Resource, StorageLocation? Location, INetworkStorageProtocol? ProtocolHandler, StoredAccess? Access)
+    private sealed record DescribedResource(NetworkStorageResource Resource, StorageLocation? Location, INetworkStorageProtocol? ProtocolHandler, StoredAccess? Access, Guid? TopParentId)
     {
         public bool RequiresAccess => ProtocolHandler?.RequiresAccess ?? false;
 
