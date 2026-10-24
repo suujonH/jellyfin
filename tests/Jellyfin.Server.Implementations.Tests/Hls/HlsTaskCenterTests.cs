@@ -77,8 +77,8 @@ public sealed class HlsTaskCenterTests : IDisposable
         _networkStorage.Setup(n => n.ResolveShortcutTarget("s3://bucket/a.mkv")).Returns("https://storage.example/bucket/a.mkv?X-Amz-Signature=0");
         var local = await environment.AddSourceAsync();
         var shortcut = Guid.NewGuid();
-        await environment.Store.UpsertSourcesAsync([new HlsSourceFile(shortcut, LibraryId, "s3://bucket/a.mkv", 7000, Modified)], environment.Now, CancellationToken);
-        await environment.Store.UpsertSourcesAsync([new HlsSourceFile(Guid.NewGuid(), LibraryId, "s3://other/b.mkv", 7000, Modified)], environment.Now, CancellationToken);
+        await environment.Store.UpsertSourcesAsync([new HlsSourceFile(shortcut, LibraryId, "s3://bucket/a.mkv", 7000, Modified)], null, environment.Now, CancellationToken);
+        await environment.Store.UpsertSourcesAsync([new HlsSourceFile(Guid.NewGuid(), LibraryId, "s3://other/b.mkv", 7000, Modified)], null, environment.Now, CancellationToken);
 
         var jobs = new Dictionary<string, HlsWorkLease>();
         while (await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId), CancellationToken) is { } job)
@@ -104,7 +104,7 @@ public sealed class HlsTaskCenterTests : IDisposable
     {
         var (environment, taskCenter) = Create();
         var target = HlsWorkerLocalAddress.Format(WorkerId, "/srv/movies/a.mkv");
-        await environment.Store.UpsertSourcesAsync([new HlsSourceFile(Guid.NewGuid(), LibraryId, target, 7000, Modified)], environment.Now, CancellationToken);
+        await environment.Store.UpsertSourcesAsync([new HlsSourceFile(Guid.NewGuid(), LibraryId, target, 7000, Modified)], null, environment.Now, CancellationToken);
 
         Assert.Null(await taskCenter.PollAsync(new HlsWorkerRequest("worker", OtherWorkerId), CancellationToken));
         var job = (await taskCenter.PollAsync(new HlsWorkerRequest("worker", WorkerId), CancellationToken))!;

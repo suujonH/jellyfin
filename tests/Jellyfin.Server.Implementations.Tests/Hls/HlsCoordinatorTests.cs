@@ -411,6 +411,49 @@ public sealed class HlsCoordinatorTests : IDisposable
         Assert.Equal(plan.Renditions.Select(r => r.RelativeDirectory).Order(StringComparer.Ordinal), (await _environment.DeletionsAsync()).Select(d => d.RelativeDirectory));
     }
 
+    [Fact]
+    public async Task AShortcutAWorkerAdded_IsLinkedToItsContentOnItsEvent()
+    {
+        await TickAsync(_start);
+        var shortcut = await AddAddedShortcutAsync(Sha('a'), recordedLength: null);
+
+        _libraryManager.Raise(m => m.ItemAdded += null, _libraryManager.Object, new ItemChangeEventArgs { Item = shortcut });
+        await TickAsync(_start + TimeSpan.FromSeconds(5));
+
+        Assert.Equal(Sha('a'), (await _environment.Store.GetSourceAsync(shortcut.Id, CancellationToken))!.Sha256);
+        Assert.DoesNotContain(await _environment.JobsAsync(), j => j.ItemId.Equals(shortcut.Id));
+        Assert.Equal(Sha('a'), _environment.Index.GetSource(shortcut.Id)!.Sha256);
+    }
+
+    [Fact]
+    public async Task AShortcutAWorkerAdded_ThatChangedSince_GetsASourceJob()
+    {
+        await TickAsync(_start);
+        var shortcut = await AddAddedShortcutAsync(Sha('a'), recordedLength: 1);
+
+        _libraryManager.Raise(m => m.ItemAdded += null, _libraryManager.Object, new ItemChangeEventArgs { Item = shortcut });
+        await TickAsync(_start + TimeSpan.FromSeconds(5));
+
+        Assert.Null((await _environment.Store.GetSourceAsync(shortcut.Id, CancellationToken))!.Sha256);
+        Assert.Equal((int)HlsJobStatus.Pending, Assert.Single(await _environment.JobsAsync(), j => j.ItemId.Equals(shortcut.Id)).Status);
+    }
+
+    // A .strm file of a file on a worker, which the worker wrote as the content it encoded before; the length recorded is the
+    // file's unless given.
+    private async Task<Movie> AddAddedShortcutAsync(string sha256, long? recordedLength)
+    {
+        await _environment.Store.StartEagerJobAsync(
+            new HlsEagerJobRequest("worker", WorkerId, LibraryId, sha256, Probe, _environment.Root, [720], _ => Qualities, Profile, Lease, _environment.Now, null, null),
+            CancellationToken);
+        var shortcut = AddShortcut(HlsWorkerLocalAddress.Format(WorkerId, "/srv/e.mkv"), 7000);
+        await File.WriteAllTextAsync(shortcut.Path, "worker-local://e.mkv\n", CancellationToken);
+        await _environment.Store.RecordLibraryFilesAsync(
+            [new HlsLibraryFileRecord(LibraryId, shortcut.Path, recordedLength ?? new FileInfo(shortcut.Path).Length, WorkerId, sha256, 7000)],
+            DateTime.UtcNow + TimeSpan.FromMinutes(1),
+            CancellationToken);
+        return shortcut;
+    }
+
     private HlsOptions Options(bool enabled = true, Guid[]? libraries = null, int[]? qualities = null, int orphanRetentionHours = 72)
         => new()
         {

@@ -160,7 +160,7 @@ internal sealed class HlsTestEnvironment : IDisposable
     {
         var item = Guid.NewGuid();
         Now += TimeSpan.FromSeconds(1);
-        var result = Assert.Single(await Store.UpsertSourcesAsync([LibraryFile(item, libraryId)], Now, CancellationToken));
+        var result = Assert.Single(await Store.UpsertSourcesAsync([LibraryFile(item, libraryId)], null, Now, CancellationToken));
         Assert.Equal(HlsSourceChange.Inserted, result.Change);
         return item;
     }

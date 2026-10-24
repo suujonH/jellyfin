@@ -98,11 +98,32 @@ public sealed partial class HlsJobStore
                         Path = file.Path,
                         Length = file.Length,
                         WorkerId = file.WorkerId,
+                        Sha256 = file.Sha256,
+                        ContentLength = file.ContentLength,
                         DateCreated = now
                     });
                 }
 
                 return true;
+            },
+            cancellationToken);
+
+    /// <summary>
+    /// Gets the content a worker reported for a file it wrote into a library folder.
+    /// </summary>
+    /// <param name="path">The full path of the file on the server.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The file, or null when no worker wrote it as a content.</returns>
+    public Task<HlsAddedFile?> GetAddedFileAsync(string path, CancellationToken cancellationToken)
+        => ReadAsync(
+            async context =>
+            {
+                var file = await context.HlsLibraryFiles.AsNoTracking()
+                    .Where(f => f.Path == path && f.Sha256 != null && f.ContentLength != null)
+                    .OrderByDescending(f => f.DateCreated)
+                    .FirstOrDefaultAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                return file is null ? null : new HlsAddedFile(file.Sha256!, file.ContentLength!.Value, file.Length, file.DateCreated);
             },
             cancellationToken);
 }

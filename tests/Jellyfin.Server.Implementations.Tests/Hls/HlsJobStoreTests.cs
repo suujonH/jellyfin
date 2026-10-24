@@ -45,6 +45,7 @@ public sealed class HlsJobStoreTests : IDisposable
 
         var results = await _store.UpsertSourcesAsync(
             [LibraryFile(item, OtherLibraryId), LibraryFile(other), LibraryFile(item) with { Length = 2000 }],
+            null,
             _now,
             TestContext.Current.CancellationToken);
 
@@ -677,6 +678,46 @@ public sealed class HlsJobStoreTests : IDisposable
         Assert.False(await _store.SyncRenditionsAsync(Sha('a'), _ => [], _now, TestContext.Current.CancellationToken));
 
         Assert.Equal(_sortedKeys, (await _store.GetRenditionsAsync(Sha('a'), TestContext.Current.CancellationToken)).Select(r => r.Key));
+    }
+
+    [Fact]
+    public async Task Upsert_OfAnAddedFile_LinksItToTheKnownContent_WithoutASourceJob()
+    {
+        await StartEagerAsync(Sha('a'), [720]);
+        var item = Guid.NewGuid();
+
+        var result = Assert.Single(await _store.UpsertSourcesAsync([LibraryFile(item)], new Dictionary<Guid, string> { [item] = Sha('a') }, _now, TestContext.Current.CancellationToken));
+
+        Assert.Equal(new HlsUpsertResult(item, HlsSourceChange.Inserted, null, Sha('a')), result);
+        Assert.Equal(Sha('a'), (await _store.GetSourceAsync(item, TestContext.Current.CancellationToken))!.Sha256);
+        Assert.Null((await _store.GetMediaAsync(Sha('a'), TestContext.Current.CancellationToken))!.DateOrphaned);
+        Assert.DoesNotContain(await _environment.JobsAsync(), j => j.ItemId.Equals(item));
+    }
+
+    [Fact]
+    public async Task Upsert_OfAnAddedFile_OfUnknownContent_GetsASourceJob()
+    {
+        var item = Guid.NewGuid();
+
+        var result = Assert.Single(await _store.UpsertSourcesAsync([LibraryFile(item)], new Dictionary<Guid, string> { [item] = Sha('a') }, _now, TestContext.Current.CancellationToken));
+
+        Assert.Null(result.LinkedSha256);
+        Assert.Null((await _store.GetSourceAsync(item, TestContext.Current.CancellationToken))!.Sha256);
+        var job = Assert.Single(await _environment.JobsAsync());
+        Assert.Equal((item, (int)HlsJobKind.Source, (int)HlsJobStatus.Pending), (job.ItemId!.Value, job.Kind, job.Status));
+    }
+
+    [Fact]
+    public async Task Upsert_OfAnAddedFile_CancelsItsPendingSourceJob()
+    {
+        var item = await AddSourceAsync();
+        await StartEagerAsync(Sha('a'), [720]);
+
+        var result = Assert.Single(await _store.UpsertSourcesAsync([LibraryFile(item)], new Dictionary<Guid, string> { [item] = Sha('a') }, _now, TestContext.Current.CancellationToken));
+
+        Assert.Equal(new HlsUpsertResult(item, HlsSourceChange.Unchanged, null, Sha('a')), result);
+        Assert.Equal(Sha('a'), (await _store.GetSourceAsync(item, TestContext.Current.CancellationToken))!.Sha256);
+        Assert.Equal((int)HlsJobStatus.Cancelled, Assert.Single(await _environment.JobsAsync(), j => j.ItemId.Equals(item)).Status);
     }
 
     // ---- Eager jobs
@@ -1363,7 +1404,7 @@ public sealed class HlsJobStoreTests : IDisposable
         var item = Guid.NewGuid();
         _now += TimeSpan.FromSeconds(1);
         var file = LibraryFile(item, libraryId);
-        var result = Assert.Single(await _store.UpsertSourcesAsync([file with { Path = path ?? file.Path }], _now, TestContext.Current.CancellationToken));
+        var result = Assert.Single(await _store.UpsertSourcesAsync([file with { Path = path ?? file.Path }], null, _now, TestContext.Current.CancellationToken));
         Assert.Equal(HlsSourceChange.Inserted, result.Change);
         return item;
     }
@@ -1371,7 +1412,7 @@ public sealed class HlsJobStoreTests : IDisposable
     private async Task ChangeFileAsync(Guid item, long length)
     {
         _now += TimeSpan.FromSeconds(1);
-        var result = Assert.Single(await _store.UpsertSourcesAsync([LibraryFile(item) with { Length = length }], _now, TestContext.Current.CancellationToken));
+        var result = Assert.Single(await _store.UpsertSourcesAsync([LibraryFile(item) with { Length = length }], null, _now, TestContext.Current.CancellationToken));
         Assert.Equal(HlsSourceChange.ContentChanged, result.Change);
     }
 
