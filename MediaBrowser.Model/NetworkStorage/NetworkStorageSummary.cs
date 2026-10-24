@@ -59,12 +59,23 @@ public class NetworkStorageSummary
     public int UnknownCount { get; set; }
 
     /// <summary>
-    /// Gets or sets the total size, in bytes, of the resources whose size is declared.
+    /// Gets or sets the size, in bytes, of what is in the storage: the sources in it and the pre-encoded HLS, each content once.
     /// </summary>
     public long TotalSize { get; set; }
 
     /// <summary>
-    /// Gets or sets the number of resources whose size is not declared and is not in <see cref="TotalSize"/>.
+    /// Gets or sets the size, in bytes, of the sources in the storage whose size is declared.
+    /// </summary>
+    public long SourceSize { get; set; }
+
+    /// <summary>
+    /// Gets or sets the size, in bytes, of the pre-encoded HLS in the storage, each content once.
+    /// </summary>
+    public long HlsSize { get; set; }
+
+    /// <summary>
+    /// Gets or sets the number of resources whose source is in the storage without a declared size, which is not in
+    /// <see cref="TotalSize"/>.
     /// </summary>
     public int UndeclaredSizeCount { get; set; }
 }

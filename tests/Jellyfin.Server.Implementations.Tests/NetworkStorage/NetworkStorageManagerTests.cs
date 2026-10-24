@@ -9,12 +9,15 @@ using Jellyfin.Database.Implementations;
 using Jellyfin.Database.Implementations.Entities;
 using Jellyfin.Database.Implementations.Locking;
 using Jellyfin.Database.Providers.Sqlite;
+using Jellyfin.Server.Implementations.Hls;
 using Jellyfin.Server.Implementations.NetworkStorage;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.NetworkStorage;
 using MediaBrowser.Controller.TrueCache;
+using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Hls;
@@ -35,6 +38,9 @@ public sealed class NetworkStorageManagerTests : IDisposable
     private readonly Mock<ITrueCacheService> _trueCache = new();
     private readonly CheckingS3Protocol _s3 = new();
     private readonly NetworkStorageManager _manager;
+    private readonly HlsJobStore _hlsStore;
+    private readonly HlsSettings _hlsSettings;
+    private readonly NetworkStorageInventory _inventory;
 
     public NetworkStorageManagerTests()
     {
@@ -48,21 +54,40 @@ public sealed class NetworkStorageManagerTests : IDisposable
 
         _trueCache.Setup(t => t.Lookup(It.IsAny<string>())).Returns(TrueCacheLookup.None);
         _manager = CreateManager();
+
+        // What the library has in each storage, listed with no pre-encoded HLS and no library.
+        var factory = CreateDbFactory();
+        _hlsStore = new HlsJobStore(factory);
+        var configuration = new Mock<IConfigurationManager>();
+        configuration.Setup(m => m.GetConfiguration(HlsConfigurationStore.StoreKey)).Returns(new HlsOptions());
+        _hlsSettings = new HlsSettings(configuration.Object, NullLogger<HlsSettings>.Instance);
+        var libraryManager = new Mock<ILibraryManager>();
+        libraryManager.Setup(m => m.GetVirtualFolders()).Returns([]);
+        _inventory = new NetworkStorageInventory(_manager, _hlsStore, _hlsSettings, libraryManager.Object, factory);
     }
 
-    public void Dispose() => _connection.Dispose();
+    public void Dispose()
+    {
+        _hlsSettings.Dispose();
+        _hlsStore.Dispose();
+        _manager.Dispose();
+        _connection.Dispose();
+    }
 
     // A new manager loads what the database holds, as after a restart.
     private NetworkStorageManager CreateManager()
+        => new(
+            CreateDbFactory(),
+            [_s3, new HttpStorageProtocol(null!)],
+            _trueCache.Object,
+            NullLogger<NetworkStorageManager>.Instance);
+
+    private IDbContextFactory<JellyfinDbContext> CreateDbFactory()
     {
         var factory = new Mock<IDbContextFactory<JellyfinDbContext>>();
         factory.Setup(f => f.CreateDbContext()).Returns(CreateDbContext);
         factory.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>())).ReturnsAsync(CreateDbContext);
-        return new NetworkStorageManager(
-            factory.Object,
-            [_s3, new HttpStorageProtocol(null!)],
-            _trueCache.Object,
-            NullLogger<NetworkStorageManager>.Instance);
+        return factory.Object;
     }
 
     [Fact]
@@ -292,7 +317,7 @@ public sealed class NetworkStorageManagerTests : IDisposable
     }
 
     [Fact]
-    public async Task GetStoragesAsync_CountsEpisodesByState()
+    public async Task Inventory_GetStoragesAsync_CountsEpisodesByState()
     {
         await AddAccessAsync("media");
         var declared = AddItem("/tv/Show/S01E01.strm", "s3://media/Show/S01E01.mkv", size: 1000);
@@ -305,7 +330,7 @@ public sealed class NetworkStorageManagerTests : IDisposable
         DeclareTrueCache(declared, failed);
         AddFailure(failed, "s3://media/Show/S01E03.mkv", NetworkStorageIssue.NotFound);
 
-        var storages = await _manager.GetStoragesAsync(CancellationToken.None);
+        var storages = await _inventory.GetStoragesAsync(CancellationToken.None);
 
         var media = Assert.Single(storages, s => s.Key == "s3:media");
         Assert.Equal(3, media.ResourceCount);
@@ -324,7 +349,7 @@ public sealed class NetworkStorageManagerTests : IDisposable
     }
 
     [Fact]
-    public async Task GetResourcesAsync_FiltersByStateAndPages()
+    public async Task Inventory_GetResourcesAsync_FiltersByStateAndPages()
     {
         await AddAccessAsync("media");
         var failed = AddItem("/tv/Show/S01E01.strm", "s3://media/Show/S01E01.mkv", size: 1000);
@@ -333,8 +358,8 @@ public sealed class NetworkStorageManagerTests : IDisposable
         DeclareTrueCache(failed);
         AddFailure(failed, "s3://media/Show/S01E01.mkv", NetworkStorageIssue.Forbidden);
 
-        var invalid = await _manager.GetResourcesAsync("s3:media", [NetworkStorageResourceState.Invalid, NetworkStorageResourceState.Unknown], 0, 10, CancellationToken.None);
-        var page = await _manager.GetResourcesAsync("s3:media", [], 1, 1, CancellationToken.None);
+        var invalid = await _inventory.GetResourcesAsync("s3:media", [NetworkStorageResourceState.Invalid, NetworkStorageResourceState.Unknown], null, 0, 10, CancellationToken.None);
+        var page = await _inventory.GetResourcesAsync("s3:media", [], null, 1, 1, CancellationToken.None);
 
         var resource = Assert.Single(invalid.Items);
         Assert.Equal(failed, resource.ItemId);
@@ -405,14 +430,14 @@ public sealed class NetworkStorageManagerTests : IDisposable
     }
 
     [Fact]
-    public async Task GetResourcesAsync_FailureOfAnEarlierTarget_IsIgnored()
+    public async Task Inventory_GetResourcesAsync_FailureOfAnEarlierTarget_IsIgnored()
     {
         await AddAccessAsync("media");
         var item = AddItem("/movies/Film.strm", "s3://media/Film-fixed.mkv", size: 1000);
         DeclareTrueCache(item);
         AddFailure(item, "s3://media/Film-missing.mkv", NetworkStorageIssue.NotFound);
 
-        var resource = Assert.Single((await _manager.GetResourcesAsync("s3:media", [], 0, null, CancellationToken.None)).Items);
+        var resource = Assert.Single((await _inventory.GetResourcesAsync("s3:media", [], null, 0, null, CancellationToken.None)).Items);
 
         Assert.Equal(NetworkStorageResourceState.Valid, resource.State);
         Assert.Null(resource.Issue);
@@ -433,7 +458,7 @@ public sealed class NetworkStorageManagerTests : IDisposable
         await _manager.CheckAllAsync(new Progress<double>(), CancellationToken.None);
 
         Assert.Equal(5000, expected);
-        var resource = Assert.Single((await _manager.GetResourcesAsync("s3:media", [], 0, null, CancellationToken.None)).Items);
+        var resource = Assert.Single((await _inventory.GetResourcesAsync("s3:media", [], null, 0, null, CancellationToken.None)).Items);
         Assert.Equal(5000, resource.Size);
     }
 

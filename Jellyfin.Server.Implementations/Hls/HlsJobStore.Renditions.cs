@@ -19,6 +19,41 @@ namespace Jellyfin.Server.Implementations.Hls;
 public sealed partial class HlsJobStore
 {
     /// <summary>
+    /// Gets every content with what is published of it, the size of each rendition from the files its job submitted, and the
+    /// items whose file is the content.
+    /// </summary>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The contents, by hash.</returns>
+    public Task<IReadOnlyList<HlsStoredContent>> GetStoredContentsAsync(CancellationToken cancellationToken)
+        => ReadAsync<IReadOnlyList<HlsStoredContent>>(
+            async context =>
+            {
+                var media = await context.HlsMedia.AsNoTracking().OrderBy(m => m.Sha256).ToListAsync(cancellationToken).ConfigureAwait(false);
+                var renditions = await context.HlsRenditions.AsNoTracking()
+                    .Where(r => r.State == (int)HlsRenditionState.Published && r.Base != null && r.PublishedJobId != null)
+                    .ToListAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                var jobIds = renditions.Select(r => r.PublishedJobId!.Value).Distinct().ToList();
+                var outputs = (await context.HlsJobOutputs.AsNoTracking().Where(o => jobIds.Contains(o.JobId)).ToListAsync(cancellationToken).ConfigureAwait(false))
+                    .ToDictionary(o => (o.JobId, o.Key));
+                var sources = (await context.HlsSources.AsNoTracking()
+                        .Where(s => s.Sha256 != null)
+                        .Select(s => new { s.ItemId, s.Sha256 })
+                        .ToListAsync(cancellationToken)
+                        .ConfigureAwait(false))
+                    .ToLookup(s => s.Sha256!, s => s.ItemId, StringComparer.Ordinal);
+                var bySha = renditions.ToLookup(r => r.Sha256, StringComparer.Ordinal);
+                return media.Select(m => new HlsStoredContent(
+                        m.Sha256,
+                        m.LibraryId,
+                        m.DateOrphaned,
+                        bySha[m.Sha256].OrderBy(r => r.Key, StringComparer.Ordinal).Select(r => ToStored(r, outputs)).ToList(),
+                        sources[m.Sha256].Order().ToList()))
+                    .ToList();
+            },
+            cancellationToken);
+
+    /// <summary>
     /// Brings the renditions of a content in line with its stored probe and the qualities it should have: renditions no longer
     /// wanted are removed and their directories queued for deletion, new ones are added as missing. A content in no chosen
     /// library is left as it is, for the orphan rules.
@@ -297,6 +332,32 @@ public sealed partial class HlsJobStore
             rendition.RelativeDirectory,
             rendition.Summary is null ? null : Deserialize<HlsRenditionSummary>(rendition.Summary),
             rendition.Profile);
+
+    // A rendition whose outputs are gone has no size known.
+    private static HlsStoredRendition ToStored(HlsRendition rendition, Dictionary<(Guid JobId, string Key), HlsJobOutput> outputs)
+    {
+        var files = outputs.TryGetValue((rendition.PublishedJobId!.Value, rendition.Key), out var output)
+            ? Deserialize<List<HlsOutputFile>>(output.Files)
+            : [];
+        return new HlsStoredRendition(
+            rendition.Key,
+            GetKind(rendition.Key),
+            rendition.Base!,
+            rendition.Summary is null ? new HlsRenditionSummary() : Deserialize<HlsRenditionSummary>(rendition.Summary),
+            files.Sum(f => f.Length),
+            files.Count);
+    }
+
+    // The kind of a rendition by its key, as HlsRenditionPlanner names them: v1080, a1, s2 and preview.
+    private static HlsRenditionKind GetKind(string key)
+        => string.Equals(key, "preview", StringComparison.Ordinal)
+            ? HlsRenditionKind.Preview
+            : key[0] switch
+            {
+                'a' => HlsRenditionKind.Audio,
+                's' => HlsRenditionKind.Subtitle,
+                _ => HlsRenditionKind.Video
+            };
 
     private static async Task<bool> SyncRenditionsAsync(JellyfinDbContext context, string sha256, IReadOnlyList<HlsRenditionSpec> desired, DateTime now, CancellationToken cancellationToken)
     {

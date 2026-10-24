@@ -144,27 +144,19 @@ public interface INetworkStorageManager
     bool IsArchived(string? target);
 
     /// <summary>
-    /// Gets statistics of every storage the library has resources in, from what the library already knows.
+    /// Gets every resource the library has in network storage, from what the library already knows: the items whose
+    /// <c>.strm</c> file names a target.
     /// </summary>
     /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>The storages.</returns>
-    Task<IReadOnlyList<NetworkStorageSummary>> GetStoragesAsync(CancellationToken cancellationToken);
+    /// <returns>The resources, with where they are.</returns>
+    Task<IReadOnlyList<NetworkStorageResourceEntry>> GetResourceEntriesAsync(CancellationToken cancellationToken);
 
     /// <summary>
-    /// Gets the resources of one storage.
+    /// Gets the key of the storage a target or a root is in, such as <c>s3:bucket</c>.
     /// </summary>
-    /// <param name="storageKey">The key of the storage.</param>
-    /// <param name="states">The states to include; empty includes all.</param>
-    /// <param name="startIndex">The index of the first resource.</param>
-    /// <param name="limit">The most resources to return, or <c>null</c> for all.</param>
-    /// <param name="cancellationToken">The cancellation token.</param>
-    /// <returns>The resources, invalid first.</returns>
-    Task<QueryResult<NetworkStorageResource>> GetResourcesAsync(
-        string storageKey,
-        IReadOnlyCollection<NetworkStorageResourceState> states,
-        int startIndex,
-        int? limit,
-        CancellationToken cancellationToken);
+    /// <param name="target">The target or root.</param>
+    /// <returns>The key, or <c>null</c> when no protocol knows the target.</returns>
+    string? GetStorageKey(string target);
 
     /// <summary>
     /// Reports that reading the network resource of an item failed. The resource is checked: only a resource that is
