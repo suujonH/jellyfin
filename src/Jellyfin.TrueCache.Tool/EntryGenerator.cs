@@ -17,6 +17,7 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.TrueCache;
 using MediaBrowser.MediaEncoding.Probing;
+using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Dlna;
 using MediaBrowser.Model.Drawing;
 using MediaBrowser.Model.Dto;
@@ -502,21 +503,18 @@ internal sealed class EntryGenerator
         var resolutions = new TomlTableArray();
         foreach (var width in options.WidthResolutions.Select(w => TrueCacheRules.GetTrickplayWidth(w, videoStream.Width)).Distinct())
         {
-            var images = await _services.Encoder.ExtractVideoImagesOnIntervalAccelerated(
-                resourcePath,
-                info.Container,
-                source,
-                videoStream,
-                width,
-                TimeSpan.FromMilliseconds(options.Interval),
-                options.EnableHwAcceleration,
-                options.EnableHwEncoding,
-                options.ProcessThreads,
-                options.Qscale,
-                options.ProcessPriority,
-                options.EnableKeyFrameOnlyExtraction,
-                _services.EncodingHelper,
-                cancellationToken).ConfigureAwait(false);
+            string images;
+            try
+            {
+                images = await ExtractThumbnailsAsync(resourcePath, info, source, videoStream, width, options, options.EnableHwAcceleration, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (options.EnableHwAcceleration && ex is not OperationCanceledException)
+            {
+                // The hardware may not decode this video, such as 10-bit HEVC on an older GPU: software always does.
+                _logger.LogWarning("Hardware decoding failed for the trickplay of {Path}, decoding in software: {Error}", resourcePath, ex.Message);
+                images = await ExtractThumbnailsAsync(resourcePath, info, source, videoStream, width, options, false, cancellationToken).ConfigureAwait(false);
+            }
+
             try
             {
                 var thumbnails = Directory.EnumerateFiles(images, "*.jpg").Order(StringComparer.Ordinal).ToList();
@@ -541,6 +539,31 @@ internal sealed class EntryGenerator
 
         return resolutions;
     }
+
+    private Task<string> ExtractThumbnailsAsync(
+        string resourcePath,
+        MediaInfo info,
+        MediaSourceInfo source,
+        MediaStream videoStream,
+        int width,
+        TrickplayOptions options,
+        bool hardware,
+        CancellationToken cancellationToken)
+        => _services.Encoder.ExtractVideoImagesOnIntervalAccelerated(
+            resourcePath,
+            info.Container,
+            source,
+            videoStream,
+            width,
+            TimeSpan.FromMilliseconds(options.Interval),
+            hardware,
+            options.EnableHwEncoding,
+            options.ProcessThreads,
+            options.Qscale,
+            options.ProcessPriority,
+            options.EnableKeyFrameOnlyExtraction,
+            _services.EncodingHelper,
+            cancellationToken);
 
     private async Task WriteSubtitlesAsync(string directory, MediaSourceInfo source, IReadOnlyList<MediaStream> streams, CancellationToken cancellationToken)
     {

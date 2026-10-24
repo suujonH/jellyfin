@@ -256,15 +256,25 @@ internal sealed class ToolServices : IDisposable
             return;
         }
 
-        // What every GPU of recent years decodes; AV1 needs a newer one.
+        // What every GPU of recent years decodes; AV1 needs a newer one. A video the GPU cannot decode, such as 10-bit HEVC
+        // on an older one, is decoded in software instead, as EntryGenerator retries.
         encoding.HardwareDecodingCodecs = ["h264", "hevc", "mpeg2video", "vc1", "vp9"];
         encoding.EnableDecodingColorDepth10Hevc = true;
         encoding.EnableDecodingColorDepth10Vp9 = true;
+
+        // The devices the server chose are those of its machine; this one takes its first GPU unless told otherwise.
+        var defaults = new EncodingOptions();
+        encoding.VaapiDevice = defaults.VaapiDevice;
+        encoding.QsvDevice = defaults.QsvDevice;
         if (options.HardwareDevice is { } device)
         {
             if (type == HardwareAccelerationType.vaapi)
             {
                 encoding.VaapiDevice = device;
+            }
+            else if (type == HardwareAccelerationType.qsv)
+            {
+                encoding.QsvDevice = device;
             }
             else
             {

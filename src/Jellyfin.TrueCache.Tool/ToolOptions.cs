@@ -44,7 +44,8 @@ internal sealed class ToolOptions
           --hwaccel <type>             none, nvenc, qsv, amf or vaapi: the hardware trickplay decodes with, instead of the
                                        server's hardware acceleration (default: the server's settings)
           --hw-device <device>         with --hwaccel nvenc, the GPU index; with --hwaccel vaapi, the render node,
-                                       such as /dev/dri/renderD128
+                                       such as /dev/dri/renderD128; with --hwaccel qsv, the adapter index on Windows
+                                       or the render node on Linux (default: the first GPU)
           --kind <kind>                video, audio, dvd, bluray, book or photo instead of guessing from the path;
                                        video or audio for strm
           --force                      replace existing entries
@@ -215,9 +216,9 @@ internal sealed class ToolOptions
             throw new ArgumentException("--server-url and --api-key go together.");
         }
 
-        if (device is not null && hwaccel is not (HardwareAccelerationType.nvenc or HardwareAccelerationType.vaapi))
+        if (device is not null && hwaccel is not (HardwareAccelerationType.nvenc or HardwareAccelerationType.vaapi or HardwareAccelerationType.qsv))
         {
-            throw new ArgumentException("--hw-device goes with --hwaccel nvenc or vaapi.");
+            throw new ArgumentException("--hw-device goes with --hwaccel nvenc, vaapi or qsv.");
         }
 
         if (hwaccel == HardwareAccelerationType.nvenc && device is not null && !int.TryParse(device, NumberStyles.None, CultureInfo.InvariantCulture, out _))
