@@ -33,12 +33,19 @@ public sealed partial class HlsJobStore
                     .Where(r => r.State == (int)HlsRenditionState.Published && r.Base != null && r.PublishedJobId != null)
                     .ToListAsync(cancellationToken)
                     .ConfigureAwait(false);
-                // Only the outputs not read before are read: their file lists, which are the bulk of them, once each.
-                var jobIds = renditions
-                    .Where(r => !_outputSizes.ContainsKey((r.PublishedJobId!.Value, r.Key)))
-                    .Select(r => r.PublishedJobId!.Value)
-                    .Distinct()
-                    .ToList();
+                // Only the outputs not read before are read: their file lists, which are the bulk of them, once each. The sizes of
+                // this listing are its own, taken as the cache is read, so another listing letting go of some does not change them.
+                var published = renditions.Select(r => (r.PublishedJobId!.Value, r.Key)).ToHashSet();
+                var sizes = new Dictionary<(Guid JobId, string Key), (long Size, int Count)>();
+                foreach (var key in published)
+                {
+                    if (_outputSizes.TryGetValue(key, out var size))
+                    {
+                        sizes[key] = size;
+                    }
+                }
+
+                var jobIds = published.Where(k => !sizes.ContainsKey(k)).Select(k => k.Item1).Distinct().ToList();
                 if (jobIds.Count > 0)
                 {
                     var outputs = await context.HlsJobOutputs.AsNoTracking()
@@ -49,8 +56,16 @@ public sealed partial class HlsJobStore
                     foreach (var output in outputs)
                     {
                         var files = Deserialize<List<HlsOutputFile>>(output.Files);
-                        _outputSizes[(output.JobId, output.Key)] = (files.Sum(f => f.Length), files.Count);
+                        var key = (output.JobId, output.Key);
+                        sizes[key] = (files.Sum(f => f.Length), files.Count);
+                        _outputSizes[key] = sizes[key];
                     }
+                }
+
+                // The cache lets go of what is no longer published.
+                foreach (var key in _outputSizes.Keys.Where(k => !published.Contains(k)))
+                {
+                    _outputSizes.TryRemove(key, out _);
                 }
 
                 var sources = (await context.HlsSources.AsNoTracking()
@@ -64,7 +79,7 @@ public sealed partial class HlsJobStore
                         m.Sha256,
                         m.LibraryId,
                         m.DateOrphaned,
-                        bySha[m.Sha256].OrderBy(r => r.Key, StringComparer.Ordinal).Select(ToStored).ToList(),
+                        bySha[m.Sha256].OrderBy(r => r.Key, StringComparer.Ordinal).Select(r => ToStored(r, sizes)).ToList(),
                         sources[m.Sha256].Order().ToList()))
                     .ToList();
             },
@@ -351,9 +366,9 @@ public sealed partial class HlsJobStore
             rendition.Profile);
 
     // A rendition whose outputs are gone has no size known.
-    private HlsStoredRendition ToStored(HlsRendition rendition)
+    private static HlsStoredRendition ToStored(HlsRendition rendition, IReadOnlyDictionary<(Guid JobId, string Key), (long Size, int Count)> sizes)
     {
-        var (size, count) = _outputSizes.GetValueOrDefault((rendition.PublishedJobId!.Value, rendition.Key));
+        var (size, count) = sizes.GetValueOrDefault((rendition.PublishedJobId!.Value, rendition.Key));
         return new HlsStoredRendition(
             rendition.Key,
             GetKind(rendition.Key),
